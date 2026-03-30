@@ -39,33 +39,27 @@ interface RunRequestResult {
   notes: string[];
 }
 
-interface IncomingRunRequest {
-  jobId: string;
-  projectName: string;
-  detectedStack: string;
+interface ContributorWorkerRecord {
+  id: string;
   status: string;
-  containerImage: string;
-  artifactSha256: string;
-  artifactObjectKey: string;
-  artifactUri: string;
-  artifactApiUrl: string;
-  artifactPublicUrl: string;
-  gzipArchivePath: string;
-  gzipSizeBytes: number;
-  createdAtUnix: number;
-  projectRoot: string;
-}
-
-interface ContributorWorkerProfile {
-  workerId: string;
-  name: string;
-  email: string;
-  location: string;
-  workerVersion: string;
-  availableCpuCores: number;
-  availableGpuCount: number;
-  availableMemoryMb: number;
-  availableStorageGb: number;
+  resources: {
+    cpu_cores: number;
+    memory_mb: number;
+    gpu: boolean;
+  };
+  current_load: {
+    cpu_used: number;
+    memory_used: number;
+  };
+  capabilities: {
+    docker: boolean;
+    gpu_supported: boolean;
+  };
+  last_heartbeat: number;
+  stats: {
+    jobs_completed: number;
+    jobs_failed: number;
+  };
 }
 
 interface ProcessLogEntry {
@@ -92,7 +86,7 @@ const interfaceCopy: Record<Mode, InterfaceCopy> = {
     eyebrow: "Contributor flow",
     heading: "Compile Hive",
     copy:
-      "Inspect queued run requests from Redis. Each request carries the artifact location and SHA-256 hash that contributors can verify before later contributor actions run it.",
+      "Register or log in with a worker name and password. The contributor surface unlocks only when the local worker hash matches this device.",
   },
 };
 
@@ -145,33 +139,34 @@ const imageSize = getElement<HTMLElement>("#image-size");
 const dockerSetupSource =
   getElement<HTMLElement>("#docker-setup-source");
 const buildNotes = getElement<HTMLUListElement>("#build-notes");
-const workerQueue = getElement<HTMLElement>("#worker-queue");
-const refreshWorkersButton =
-  getElement<HTMLButtonElement>("#refresh-workers");
-const contributorSignupForm =
-  getElement<HTMLFormElement>("#contributor-signup-form");
-const contributorNameInput =
-  getElement<HTMLInputElement>("#contributor-name");
-const contributorEmailInput =
-  getElement<HTMLInputElement>("#contributor-email");
-const contributorLocationInput =
-  getElement<HTMLInputElement>("#contributor-location");
-const contributorSignupSubmit =
-  getElement<HTMLButtonElement>("#contributor-signup-submit");
+const contributorWorkerNameInput =
+  getElement<HTMLInputElement>("#contributor-worker-name");
+const contributorWorkerPasswordInput =
+  getElement<HTMLInputElement>("#contributor-worker-password");
+const contributorRegisterSubmit =
+  getElement<HTMLButtonElement>("#contributor-register-submit");
+const contributorLoginSubmit =
+  getElement<HTMLButtonElement>("#contributor-login-submit");
+const contributorAuthCard =
+  getElement<HTMLElement>("#contributor-auth-card");
 const contributorSetupStatus =
   getElement<HTMLElement>("#contributor-setup-status");
 const contributorProfileCard =
   getElement<HTMLElement>("#contributor-profile-card");
-const profileWorkerId =
-  getElement<HTMLElement>("#profile-worker-id");
-const profileContributorName =
-  getElement<HTMLElement>("#profile-contributor-name");
-const profileContributorEmail =
-  getElement<HTMLElement>("#profile-contributor-email");
-const profileContributorLocation =
-  getElement<HTMLElement>("#profile-contributor-location");
-const profileContributorResources =
-  getElement<HTMLElement>("#profile-contributor-resources");
+const contributeButton =
+  getElement<HTMLButtonElement>("#contribute-button");
+const profileWorkerStatus =
+  getElement<HTMLElement>("#profile-worker-status");
+const profileWorkerResources =
+  getElement<HTMLElement>("#profile-worker-resources");
+const profileWorkerLoad =
+  getElement<HTMLElement>("#profile-worker-load");
+const profileWorkerCapabilities =
+  getElement<HTMLElement>("#profile-worker-capabilities");
+const profileWorkerHeartbeat =
+  getElement<HTMLElement>("#profile-worker-heartbeat");
+const profileWorkerStats =
+  getElement<HTMLElement>("#profile-worker-stats");
 
 const state: {
   mode: Mode;
@@ -180,10 +175,8 @@ const state: {
   buildResult: DockerImageResult | null;
   runResult: RunRequestResult | null;
   error: string;
-  contributorRequests: IncomingRunRequest[];
-  contributorLoading: boolean;
-  contributorError: string;
-  contributorProfile: ContributorWorkerProfile | null;
+  contributorWorker: ContributorWorkerRecord | null;
+  contributorWorkerLoaded: boolean;
   contributorSetupLoading: boolean;
   contributorSetupMessage: string;
   contributorSetupError: string;
@@ -196,10 +189,8 @@ const state: {
   buildResult: null,
   runResult: null,
   error: "",
-  contributorRequests: [],
-  contributorLoading: false,
-  contributorError: "",
-  contributorProfile: null,
+  contributorWorker: null,
+  contributorWorkerLoaded: false,
   contributorSetupLoading: false,
   contributorSetupMessage: "",
   contributorSetupError: "",
@@ -231,46 +222,6 @@ function formatUnixTime(unixSeconds: number): string {
     dateStyle: "medium",
     timeStyle: "short",
   }).format(new Date(unixSeconds * 1000));
-}
-
-function shortHash(hash: string): string {
-  if (hash.length <= 16) {
-    return hash;
-  }
-
-  return `${hash.slice(0, 12)}…${hash.slice(-8)}`;
-}
-
-function createQueueInfoCard(
-  titleText: string,
-  bodyText: string,
-): HTMLElement {
-  const card = document.createElement("article");
-  card.className = "queue-card queue-card-empty";
-
-  const title = document.createElement("h3");
-  title.textContent = titleText;
-
-  const body = document.createElement("p");
-  body.className = "support-copy";
-  body.textContent = bodyText;
-
-  card.append(title, body);
-  return card;
-}
-
-function appendQueueMetric(
-  parent: HTMLElement,
-  labelText: string,
-  valueText: string,
-): void {
-  const block = document.createElement("div");
-  const label = document.createElement("span");
-  label.textContent = labelText;
-  const value = document.createElement("strong");
-  value.textContent = valueText;
-  block.append(label, value);
-  parent.append(block);
 }
 
 function triggerModeChipBurst(button: HTMLButtonElement): void {
@@ -578,95 +529,17 @@ function appendResultLogs(result: RunRequestResult): void {
   });
 }
 
-function renderContributorQueue(): void {
-  workerQueue.replaceChildren();
-  refreshWorkersButton.disabled = state.contributorLoading;
-  refreshWorkersButton.textContent = state.contributorLoading
-    ? "Refreshing queue..."
-    : "Refresh queue";
-
-  if (state.contributorLoading) {
-    workerQueue.append(
-      createQueueInfoCard(
-        "Loading queued run requests",
-        "ComputeHive is reading the current Redis queue and artifact metadata.",
-      ),
-    );
-    return;
-  }
-
-  if (state.contributorError) {
-    workerQueue.append(
-      createQueueInfoCard("Queue load failed", state.contributorError),
-    );
-    return;
-  }
-
-  if (state.contributorRequests.length === 0) {
-    workerQueue.append(
-      createQueueInfoCard(
-        "No queued run requests yet",
-        "Use Request for run in the project user flow to create the Redis job record, artifact metadata record, and queue entry.",
-      ),
-    );
-    return;
-  }
-
-  state.contributorRequests.forEach((worker) => {
-    const card = document.createElement("article");
-    card.className = "queue-card";
-
-    const topRow = document.createElement("div");
-    topRow.className = "queue-top";
-
-    const titleWrap = document.createElement("div");
-    const title = document.createElement("h3");
-    title.textContent = worker.projectName;
-    const subhead = document.createElement("p");
-    subhead.className = "queue-owner";
-    subhead.textContent = `${worker.jobId} · queued ${formatUnixTime(worker.createdAtUnix)}`;
-    titleWrap.append(title, subhead);
-
-    const badge = document.createElement("span");
-    badge.className = "queue-badge";
-    badge.textContent = worker.status;
-
-    topRow.append(titleWrap, badge);
-
-    const meta = document.createElement("div");
-    meta.className = "queue-meta";
-    appendQueueMetric(meta, "Stack", worker.detectedStack);
-    appendQueueMetric(meta, "Artifact", formatBytes(worker.gzipSizeBytes));
-    appendQueueMetric(meta, "Image tag", worker.containerImage);
-    appendQueueMetric(meta, "Hash", shortHash(worker.artifactSha256));
-    appendQueueMetric(meta, "Object key", worker.artifactObjectKey || "Pending");
-    appendQueueMetric(meta, "Project root", worker.projectRoot || "Unknown");
-
-    if (worker.artifactPublicUrl) {
-      const linkRow = document.createElement("p");
-      linkRow.className = "queue-link";
-      const label = document.createElement("span");
-      label.className = "queue-link-label";
-      label.textContent = "Public link";
-      const link = document.createElement("a");
-      link.href = worker.artifactPublicUrl;
-      link.target = "_blank";
-      link.rel = "noreferrer";
-      link.textContent = worker.artifactPublicUrl;
-      linkRow.append(label, link);
-      card.append(topRow, meta, linkRow);
-    } else {
-      card.append(topRow, meta);
-    }
-    workerQueue.append(card);
-  });
-}
-
 function renderContributorSetup(): void {
-  contributorSignupSubmit.disabled = state.contributorSetupLoading;
-  contributorSignupSubmit.textContent = state.contributorSetupLoading
-    ? "Setting up contributor..."
-    : "Sign up as contributor";
+  contributorRegisterSubmit.disabled = state.contributorSetupLoading;
+  contributorLoginSubmit.disabled = state.contributorSetupLoading;
+  contributeButton.disabled =
+    state.contributorSetupLoading || !state.contributorWorker;
+  contributorRegisterSubmit.textContent = state.contributorSetupLoading
+    ? "Registering worker..."
+    : "Register worker";
+  contributorLoginSubmit.textContent = state.contributorSetupLoading
+    ? "Checking device..."
+    : "Login worker";
 
   if (state.contributorSetupError) {
     contributorSetupStatus.textContent = state.contributorSetupError;
@@ -678,31 +551,41 @@ function renderContributorSetup(): void {
     contributorSetupStatus.classList.remove("contributor-status-error");
   } else {
     contributorSetupStatus.textContent =
-      "Fill the form to register this machine as a contributor worker.";
+      "Register this machine to create a worker record in Redis.";
     contributorSetupStatus.classList.remove(
       "contributor-status-success",
       "contributor-status-error",
     );
   }
 
-  const profile = state.contributorProfile;
-  contributorProfileCard.hidden = !profile;
-  if (!profile) {
-    profileWorkerId.textContent = "Pending";
-    profileContributorName.textContent = "Pending";
-    profileContributorEmail.textContent = "Pending";
-    profileContributorLocation.textContent = "Pending";
-    profileContributorResources.textContent =
-      "CPU: - · GPU: - · Memory: - · Storage: -";
+  const worker = state.contributorWorker;
+  contributorAuthCard.hidden = !!worker;
+  contributorProfileCard.hidden = !worker;
+  if (!worker) {
+    profileWorkerStatus.textContent = "Pending";
+    profileWorkerResources.textContent =
+      "CPU: - · Memory: - · GPU: -";
+    profileWorkerLoad.textContent =
+      "CPU used: - · Memory used: -";
+    profileWorkerCapabilities.textContent =
+      "Docker: - · GPU supported: -";
+    profileWorkerHeartbeat.textContent = "Pending";
+    profileWorkerStats.textContent =
+      "Completed: - · Failed: -";
     return;
   }
 
-  profileWorkerId.textContent = profile.workerId;
-  profileContributorName.textContent = `${profile.name} · ${profile.workerVersion}`;
-  profileContributorEmail.textContent = profile.email;
-  profileContributorLocation.textContent = profile.location;
-  profileContributorResources.textContent =
-    `CPU: ${profile.availableCpuCores} cores · GPU: ${profile.availableGpuCount} · Memory: ${profile.availableMemoryMb} MB · Storage: ${profile.availableStorageGb} GB`;
+  profileWorkerStatus.textContent = worker.status;
+  profileWorkerResources.textContent =
+    `CPU: ${worker.resources.cpu_cores} cores · Memory: ${worker.resources.memory_mb} MB · GPU: ${worker.resources.gpu ? "Yes" : "No"}`;
+  profileWorkerLoad.textContent =
+    `CPU used: ${worker.current_load.cpu_used} · Memory used: ${worker.current_load.memory_used} MB`;
+  profileWorkerCapabilities.textContent =
+    `Docker: ${worker.capabilities.docker ? "Yes" : "No"} · GPU supported: ${worker.capabilities.gpu_supported ? "Yes" : "No"}`;
+  profileWorkerHeartbeat.textContent =
+    formatUnixTime(worker.last_heartbeat);
+  profileWorkerStats.textContent =
+    `Completed: ${worker.stats.jobs_completed} · Failed: ${worker.stats.jobs_failed}`;
 }
 
 function renderMode(): void {
@@ -881,7 +764,6 @@ async function requestProjectRun(): Promise<void> {
     state.runResult = result;
     state.buildStatus = "done";
     appendResultLogs(result);
-    void refreshContributorQueue();
   } catch (error) {
     clearProcessLogTimers();
     state.error = error instanceof Error ? error.message : String(error);
@@ -893,38 +775,19 @@ async function requestProjectRun(): Promise<void> {
   renderUserState();
 }
 
-async function refreshContributorQueue(): Promise<void> {
-  state.contributorLoading = true;
-  state.contributorError = "";
-  renderContributorQueue();
-
-  try {
-    const requests = await invoke<IncomingRunRequest[]>(
-      "list_incoming_run_requests",
-    );
-    state.contributorRequests = requests;
-  } catch (error) {
-    state.contributorRequests = [];
-    state.contributorError =
-      error instanceof Error ? error.message : String(error);
-  } finally {
-    state.contributorLoading = false;
-    renderContributorQueue();
-  }
-}
-
 async function loadContributorProfile(): Promise<void> {
   try {
-    const profile = await invoke<ContributorWorkerProfile | null>(
+    const worker = await invoke<ContributorWorkerRecord | null>(
       "get_registered_contributor_worker",
     );
-    state.contributorProfile = profile;
-    if (profile && !state.contributorSetupMessage) {
+    state.contributorWorker = worker;
+    state.contributorWorkerLoaded = true;
+    if (worker && !state.contributorSetupMessage) {
       state.contributorSetupMessage =
-        "Contributor setup already exists for this machine.";
+        "A worker record already exists for this machine.";
     }
   } catch (error) {
-    state.contributorProfile = null;
+    state.contributorWorker = null;
     state.contributorSetupError =
       error instanceof Error ? error.message : String(error);
   }
@@ -932,14 +795,13 @@ async function loadContributorProfile(): Promise<void> {
   renderContributorSetup();
 }
 
-async function setupContributorWorker(): Promise<void> {
-  const name = contributorNameInput.value.trim();
-  const email = contributorEmailInput.value.trim();
-  const location = contributorLocationInput.value.trim();
+async function registerContributorWorker(): Promise<void> {
+  const workerName = contributorWorkerNameInput.value.trim();
+  const password = contributorWorkerPasswordInput.value.trim();
 
-  if (!name || !email || !location) {
+  if (!workerName || !password) {
     state.contributorSetupError =
-      "Name, email, and location are required to register as a contributor.";
+      "Worker name and password are required.";
     state.contributorSetupMessage = "";
     renderContributorSetup();
     return;
@@ -951,25 +813,91 @@ async function setupContributorWorker(): Promise<void> {
   renderContributorSetup();
 
   try {
-    const profile = await invoke<ContributorWorkerProfile>(
-      "setup_contributor_worker",
+    const worker = await invoke<ContributorWorkerRecord>(
+      "register_contributor_worker",
       {
-        name,
-        email,
-        location,
+        workerName,
+        password,
       },
     );
 
-    state.contributorProfile = profile;
+    state.contributorWorker = worker;
+    state.contributorWorkerLoaded = true;
     state.contributorSetupMessage =
-      "Contributor setup completed and worker details were stored in Redis.";
-    contributorSignupForm.reset();
+      "Worker registered on this device. The local worker hash was saved.";
   } catch (error) {
     state.contributorSetupError =
       error instanceof Error ? error.message : String(error);
   } finally {
     state.contributorSetupLoading = false;
     renderContributorSetup();
+  }
+}
+
+async function loginContributorWorker(): Promise<void> {
+  const workerName = contributorWorkerNameInput.value.trim();
+  const password = contributorWorkerPasswordInput.value.trim();
+
+  if (!workerName || !password) {
+    state.contributorSetupError =
+      "Worker name and password are required.";
+    state.contributorSetupMessage = "";
+    renderContributorSetup();
+    return;
+  }
+
+  state.contributorSetupLoading = true;
+  state.contributorSetupError = "";
+  state.contributorSetupMessage = "";
+  renderContributorSetup();
+
+  try {
+    const worker = await invoke<ContributorWorkerRecord>(
+      "login_contributor_worker",
+      {
+        workerName,
+        password,
+      },
+    );
+    state.contributorWorker = worker;
+    state.contributorWorkerLoaded = true;
+    state.contributorSetupMessage =
+      "Contributor worker unlocked on this device.";
+  } catch (error) {
+    state.contributorSetupError =
+      error instanceof Error ? error.message : String(error);
+  } finally {
+    state.contributorSetupLoading = false;
+    renderContributorSetup();
+  }
+}
+
+async function activateContributorWorker(): Promise<void> {
+  state.contributorSetupLoading = true;
+  state.contributorSetupError = "";
+  state.contributorSetupMessage = "";
+  renderContributorSetup();
+
+  try {
+    const worker = await invoke<ContributorWorkerRecord>(
+      "activate_contributor_worker",
+    );
+    state.contributorWorker = worker;
+    state.contributorWorkerLoaded = true;
+    state.contributorSetupMessage =
+      "Worker status is active. This device is now available for compute.";
+  } catch (error) {
+    state.contributorSetupError =
+      error instanceof Error ? error.message : String(error);
+  } finally {
+    state.contributorSetupLoading = false;
+    renderContributorSetup();
+  }
+}
+
+function loadContributorView(): void {
+  if (!state.contributorWorkerLoaded) {
+    void loadContributorProfile();
   }
 }
 
@@ -993,7 +921,7 @@ modeButtons.forEach((button) => {
       state.mode = nextMode;
       renderMode();
       if (nextMode === "contributor") {
-        void refreshContributorQueue();
+        loadContributorView();
       }
     }
   });
@@ -1011,13 +939,16 @@ revealFolderButton.addEventListener("click", () => {
   openSelectedFolder();
 });
 
-refreshWorkersButton.addEventListener("click", () => {
-  void refreshContributorQueue();
+contributorRegisterSubmit.addEventListener("click", () => {
+  void registerContributorWorker();
 });
 
-contributorSignupForm.addEventListener("submit", (event) => {
-  event.preventDefault();
-  void setupContributorWorker();
+contributorLoginSubmit.addEventListener("click", () => {
+  void loginContributorWorker();
+});
+
+contributeButton.addEventListener("click", () => {
+  void activateContributorWorker();
 });
 
 clearSelectionButton.addEventListener("click", clearSelection);
@@ -1025,5 +956,3 @@ clearSelectionButton.addEventListener("click", clearSelection);
 renderMode();
 renderUserState();
 renderContributorSetup();
-void refreshContributorQueue();
-void loadContributorProfile();

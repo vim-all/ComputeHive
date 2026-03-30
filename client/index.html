@@ -224,98 +224,89 @@
           <div class="panel-header">
             <div>
               <p class="eyebrow">Contributor Dashboard</p>
-              <h2>Incoming run requests queued for local contributor execution</h2>
+              <h2>Register and log in this device as a contributor worker</h2>
             </div>
-
-            <button id="refresh-workers" class="ghost-button" type="button">
-              Refresh queue
-            </button>
           </div>
 
           <div class="contributor-grid">
-            <div class="queue-column">
-              <p class="support-copy contributor-copy">
-                This surface is for contributors who offer their compute
-                resources. Incoming run requests are loaded from Redis here,
-                including the queued image tag, compressed artifact, and
-                matching SHA-256 hash. The future Docker execution lifecycle
-                stays grouped under <strong>Contributor Actions</strong>.
-              </p>
-
-              <div id="worker-queue" class="queue-list"></div>
-            </div>
-
             <aside class="contributor-aside">
-              <div class="future-block">
+              <div id="contributor-auth-card" class="future-block">
                 <p class="eyebrow">Contributor Actions</p>
-                <h3>Sign up this machine as a contributor</h3>
+                <h3>Register this machine as a worker</h3>
                 <p class="support-copy">
-                  Register basic contributor details so this machine is tracked
-                  in Redis as a worker. CPU, GPU, memory, and storage values
-                  are hardcoded for now to unblock the contributor setup flow.
+                  Create a worker with a worker name and password. The app
+                  stores a device-bound worker hash locally and only allows
+                  login on the same device.
                 </p>
 
-                <form id="contributor-signup-form" class="contributor-form">
-                  <label class="contributor-label" for="contributor-name">Full name</label>
+                <div class="contributor-form">
+                  <label class="contributor-label" for="contributor-worker-name">Worker name</label>
                   <input
-                    id="contributor-name"
+                    id="contributor-worker-name"
                     class="contributor-input"
                     type="text"
-                    placeholder="Jane Doe"
-                    autocomplete="name"
-                    required
+                    placeholder="worker-alpha"
+                    autocomplete="username"
                   />
 
-                  <label class="contributor-label" for="contributor-email">Email</label>
+                  <label class="contributor-label" for="contributor-worker-password">Password</label>
                   <input
-                    id="contributor-email"
+                    id="contributor-worker-password"
                     class="contributor-input"
-                    type="email"
-                    placeholder="jane@example.com"
-                    autocomplete="email"
-                    required
+                    type="password"
+                    placeholder="Enter a worker password"
+                    autocomplete="current-password"
                   />
 
-                  <label class="contributor-label" for="contributor-location">Location</label>
-                  <input
-                    id="contributor-location"
-                    class="contributor-input"
-                    type="text"
-                    placeholder="Chennai"
-                    autocomplete="address-level2"
-                    required
-                  />
-
-                  <button id="contributor-signup-submit" class="primary-button" type="submit">
-                    Sign up as contributor
-                  </button>
-                </form>
+                  <div class="button-group">
+                    <button id="contributor-register-submit" class="primary-button" type="button">
+                      Register worker
+                    </button>
+                    <button id="contributor-login-submit" class="ghost-button" type="button">
+                      Login worker
+                    </button>
+                  </div>
+                </div>
 
                 <p id="contributor-setup-status" class="support-copy contributor-setup-status">
-                  Fill the form to register this machine as a contributor worker.
+                  Register or log in to unlock the contributor worker on this device.
                 </p>
               </div>
 
               <div id="contributor-profile-card" class="future-notes contributor-profile" hidden>
-                <div class="note-row">
-                  <span class="note-label">Worker id</span>
-                  <p id="profile-worker-id">Pending</p>
+                <div class="panel-header contributor-dashboard-head">
+                  <div>
+                    <p class="eyebrow">Worker Dashboard</p>
+                    <h3>Contributor ready</h3>
+                  </div>
+
+                  <button id="contribute-button" class="primary-button" type="button">
+                    Contribute
+                  </button>
                 </div>
                 <div class="note-row">
-                  <span class="note-label">Contributor</span>
-                  <p id="profile-contributor-name">Pending</p>
+                  <span class="note-label">Status</span>
+                  <p id="profile-worker-status">Pending</p>
                 </div>
                 <div class="note-row">
-                  <span class="note-label">Email</span>
-                  <p id="profile-contributor-email">Pending</p>
+                  <span class="note-label">Resources</span>
+                  <p id="profile-worker-resources">CPU: - · Memory: - · GPU: -</p>
                 </div>
                 <div class="note-row">
-                  <span class="note-label">Location</span>
-                  <p id="profile-contributor-location">Pending</p>
+                  <span class="note-label">Current load</span>
+                  <p id="profile-worker-load">CPU used: - · Memory used: -</p>
                 </div>
                 <div class="note-row">
-                  <span class="note-label">Hardcoded resources</span>
-                  <p id="profile-contributor-resources">CPU: - · GPU: - · Memory: - · Storage: -</p>
+                  <span class="note-label">Capabilities</span>
+                  <p id="profile-worker-capabilities">Docker: - · GPU supported: -</p>
+                </div>
+                <div class="note-row">
+                  <span class="note-label">Last heartbeat</span>
+                  <p id="profile-worker-heartbeat">Pending</p>
+                </div>
+                <div class="note-row">
+                  <span class="note-label">Stats</span>
+                  <p id="profile-worker-stats">Completed: - · Failed: -</p>
                 </div>
               </div>
             </aside>

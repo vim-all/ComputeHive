@@ -24,8 +24,9 @@ const JOB_QUEUE_KEY: &str = "job_queue";
 const WORKERS_KEY: &str = "workers";
 const JOB_STATUS_QUEUED: &str = "queued";
 const ARTIFACT_RECORD_PREFIX: &str = "computehive_job_artifact:";
-const CONTRIBUTOR_PROFILE_PREFIX: &str = "computehive_contributor_profile:";
 const CONTRIBUTOR_ACTIVE_WORKER_KEY: &str = "computehive_active_contributor_worker";
+const WORKER_AUTH_PREFIX: &str = "computehive_worker_auth:";
+const LOCAL_WORKER_IDENTITY_FILE: &str = ".computehive-worker-identity.json";
 const DEFAULT_MAX_RUNTIME_SECONDS: i32 = 3600;
 const DEFAULT_REQUIRED_CPU_CORES: i32 = 1;
 const DEFAULT_REQUIRED_GPU_COUNT: i32 = 0;
@@ -34,8 +35,6 @@ const DEFAULT_R2_REGION: &str = "auto";
 const DEFAULT_CONTRIBUTOR_CPU_CORES: i32 = 8;
 const DEFAULT_CONTRIBUTOR_GPU_COUNT: i32 = 1;
 const DEFAULT_CONTRIBUTOR_MEMORY_MB: i32 = 16384;
-const DEFAULT_CONTRIBUTOR_STORAGE_GB: i32 = 256;
-const DEFAULT_CONTRIBUTOR_WORKER_VERSION: &str = "computehive-contributor-v0";
 const EMPTY_PAYLOAD_SHA256: &str =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
@@ -166,10 +165,37 @@ struct RedisResourceSpec {
 #[derive(Serialize, Deserialize)]
 struct RedisWorkerRecord {
     id: String,
-    available_resources: Option<RedisResourceSpec>,
-    worker_version: String,
-    registered_at_unix: i64,
-    last_heartbeat_unix: i64,
+    status: String,
+    resources: RedisWorkerResources,
+    current_load: RedisWorkerCurrentLoad,
+    capabilities: RedisWorkerCapabilities,
+    last_heartbeat: i64,
+    stats: RedisWorkerStats,
+}
+
+#[derive(Serialize, Deserialize)]
+struct RedisWorkerResources {
+    cpu_cores: i32,
+    memory_mb: i32,
+    gpu: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+struct RedisWorkerCurrentLoad {
+    cpu_used: i32,
+    memory_used: i32,
+}
+
+#[derive(Serialize, Deserialize)]
+struct RedisWorkerCapabilities {
+    docker: bool,
+    gpu_supported: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+struct RedisWorkerStats {
+    jobs_completed: i32,
+    jobs_failed: i32,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -185,30 +211,54 @@ struct RedisJobRecord {
     assigned_worker_id: String,
 }
 
-#[derive(Serialize, Deserialize)]
-struct RedisContributorProfileRecord {
-    worker_id: String,
-    name: String,
-    email: String,
-    location: String,
-    worker_version: String,
-    available_resources: RedisResourceSpec,
-    available_storage_gb: i32,
-    registered_at_unix: i64,
+#[derive(Serialize)]
+struct ContributorWorkerRecord {
+    id: String,
+    status: String,
+    resources: ContributorWorkerResources,
+    current_load: ContributorWorkerCurrentLoad,
+    capabilities: ContributorWorkerCapabilities,
+    last_heartbeat: i64,
+    stats: ContributorWorkerStats,
 }
 
 #[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ContributorWorkerProfile {
+struct ContributorWorkerResources {
+    cpu_cores: i32,
+    memory_mb: i32,
+    gpu: bool,
+}
+
+#[derive(Serialize)]
+struct ContributorWorkerCurrentLoad {
+    cpu_used: i32,
+    memory_used: i32,
+}
+
+#[derive(Serialize)]
+struct ContributorWorkerCapabilities {
+    docker: bool,
+    gpu_supported: bool,
+}
+
+#[derive(Serialize)]
+struct ContributorWorkerStats {
+    jobs_completed: i32,
+    jobs_failed: i32,
+}
+
+#[derive(Serialize, Deserialize)]
+struct RedisWorkerAuthRecord {
     worker_id: String,
-    name: String,
-    email: String,
-    location: String,
-    worker_version: String,
-    available_cpu_cores: i32,
-    available_gpu_count: i32,
-    available_memory_mb: i32,
-    available_storage_gb: i32,
+    worker_name: String,
+    password_hash: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct LocalWorkerIdentity {
+    worker_id: String,
+    worker_name: String,
+    worker_hash: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -394,25 +444,50 @@ fn list_incoming_run_requests() -> Result<Vec<IncomingRunRequest>, String> {
         .lrange::<_, Vec<String>>(JOB_QUEUE_KEY, 0, 49)
         .map_err(|error| format!("Failed to read the Redis job queue: {error}"))?;
 
+    if queued_job_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let job_keys = queued_job_ids
+        .iter()
+        .map(|job_id| job_key(job_id))
+        .collect::<Vec<_>>();
+    let artifact_keys = queued_job_ids
+        .iter()
+        .map(|job_id| artifact_record_key(job_id))
+        .collect::<Vec<_>>();
+    let status_keys = queued_job_ids
+        .iter()
+        .map(|job_id| job_status_key(job_id))
+        .collect::<Vec<_>>();
+    let job_payloads = redis::cmd("MGET")
+        .arg(&job_keys)
+        .query::<Vec<Option<String>>>(&mut connection)
+        .map_err(|error| format!("Failed to load queued job records: {error}"))?;
+    let artifact_payloads = redis::cmd("MGET")
+        .arg(&artifact_keys)
+        .query::<Vec<Option<String>>>(&mut connection)
+        .map_err(|error| format!("Failed to load queued artifact records: {error}"))?;
+    let statuses = redis::cmd("MGET")
+        .arg(&status_keys)
+        .query::<Vec<Option<String>>>(&mut connection)
+        .map_err(|error| format!("Failed to load queued job statuses: {error}"))?;
+
     let mut requests = Vec::with_capacity(queued_job_ids.len());
 
-    for job_id in queued_job_ids {
-        let job_payload = connection
-            .get::<_, Option<String>>(job_key(&job_id))
-            .map_err(|error| format!("Failed to load {}: {error}", job_key(&job_id)))?;
-        let artifact_payload = connection
-            .get::<_, Option<String>>(artifact_record_key(&job_id))
-            .map_err(|error| format!("Failed to load {}: {error}", artifact_record_key(&job_id)))?;
-        let status = connection
-            .get::<_, Option<String>>(job_status_key(&job_id))
-            .map_err(|error| format!("Failed to load {}: {error}", job_status_key(&job_id)))?
-            .unwrap_or_else(|| JOB_STATUS_QUEUED.to_string());
-
-        let Some(job_payload) = job_payload else {
+    for (index, job_id) in queued_job_ids.into_iter().enumerate() {
+        let Some(job_payload) = job_payloads.get(index).and_then(|payload| payload.as_ref()) else {
             continue;
         };
+        let artifact_payload = artifact_payloads
+            .get(index)
+            .and_then(|payload| payload.as_deref());
+        let status = statuses
+            .get(index)
+            .and_then(|value| value.clone())
+            .unwrap_or_else(|| JOB_STATUS_QUEUED.to_string());
 
-        let job: RedisJobRecord = serde_json::from_str(&job_payload).map_err(|error| {
+        let job: RedisJobRecord = serde_json::from_str(job_payload).map_err(|error| {
             format!(
                 "Failed to parse the queued job record {}: {error}",
                 job_key(&job_id)
@@ -420,7 +495,6 @@ fn list_incoming_run_requests() -> Result<Vec<IncomingRunRequest>, String> {
         })?;
 
         let artifact = artifact_payload
-            .as_deref()
             .map(serde_json::from_str::<ArtifactRecord>)
             .transpose()
             .map_err(|error| {
@@ -485,25 +559,12 @@ fn list_incoming_run_requests() -> Result<Vec<IncomingRunRequest>, String> {
 }
 
 #[tauri::command]
-fn setup_contributor_worker(
-    name: String,
-    email: String,
-    location: String,
-) -> Result<ContributorWorkerProfile, String> {
-    let name = name.trim().to_string();
-    let email = email.trim().to_string();
-    let location = location.trim().to_string();
-
-    if name.is_empty() {
-        return Err("Contributor name is required.".to_string());
-    }
-    if email.is_empty() {
-        return Err("Contributor email is required.".to_string());
-    }
-    if location.is_empty() {
-        return Err("Contributor location is required.".to_string());
-    }
-
+fn register_contributor_worker(
+    worker_name: String,
+    password: String,
+) -> Result<ContributorWorkerRecord, String> {
+    let worker_name = normalize_worker_name(&worker_name)?;
+    let password_hash = hash_string(password.trim());
     let config = app_config()?;
     let client = redis::Client::open(config.redis_url.as_str())
         .map_err(|error| format!("Failed to parse the Redis URL: {error}"))?;
@@ -511,36 +572,53 @@ fn setup_contributor_worker(
         .get_connection()
         .map_err(|error| format!("Failed to connect to Redis: {error}"))?;
 
+    let auth_key = worker_auth_key(&worker_name);
+    let existing_auth = connection
+        .get::<_, Option<String>>(&auth_key)
+        .map_err(|error| format!("Failed to check existing worker auth {}: {error}", auth_key))?;
+    if existing_auth.is_some() {
+        return Err("That worker name is already registered.".to_string());
+    }
+
     let registered_at_unix = current_unix_timestamp();
     let worker_id = Uuid::new_v4().to_string();
-    let available_resources = RedisResourceSpec {
-        cpu_cores: DEFAULT_CONTRIBUTOR_CPU_CORES,
-        gpu_count: DEFAULT_CONTRIBUTOR_GPU_COUNT,
-        memory_mb: DEFAULT_CONTRIBUTOR_MEMORY_MB,
-    };
-
     let worker_record = RedisWorkerRecord {
         id: worker_id.clone(),
-        available_resources: Some(available_resources.clone()),
-        worker_version: DEFAULT_CONTRIBUTOR_WORKER_VERSION.to_string(),
-        registered_at_unix,
-        last_heartbeat_unix: registered_at_unix,
+        status: "available".to_string(),
+        resources: RedisWorkerResources {
+            cpu_cores: DEFAULT_CONTRIBUTOR_CPU_CORES,
+            memory_mb: DEFAULT_CONTRIBUTOR_MEMORY_MB,
+            gpu: DEFAULT_CONTRIBUTOR_GPU_COUNT > 0,
+        },
+        current_load: RedisWorkerCurrentLoad {
+            cpu_used: 0,
+            memory_used: 0,
+        },
+        capabilities: RedisWorkerCapabilities {
+            docker: true,
+            gpu_supported: DEFAULT_CONTRIBUTOR_GPU_COUNT > 0,
+        },
+        last_heartbeat: registered_at_unix,
+        stats: RedisWorkerStats {
+            jobs_completed: 0,
+            jobs_failed: 0,
+        },
     };
-    let profile_record = RedisContributorProfileRecord {
-        worker_id: worker_id.clone(),
-        name,
-        email,
-        location,
-        worker_version: DEFAULT_CONTRIBUTOR_WORKER_VERSION.to_string(),
-        available_resources,
-        available_storage_gb: DEFAULT_CONTRIBUTOR_STORAGE_GB,
-        registered_at_unix,
-    };
-
     let worker_payload = serde_json::to_string(&worker_record)
         .map_err(|error| format!("Failed to serialize worker record: {error}"))?;
-    let profile_payload = serde_json::to_string(&profile_record)
-        .map_err(|error| format!("Failed to serialize contributor profile: {error}"))?;
+    let auth_record = RedisWorkerAuthRecord {
+        worker_id: worker_id.clone(),
+        worker_name: worker_name.clone(),
+        password_hash: password_hash.clone(),
+    };
+    let auth_payload = serde_json::to_string(&auth_record)
+        .map_err(|error| format!("Failed to serialize worker auth record: {error}"))?;
+    let local_identity = LocalWorkerIdentity {
+        worker_id: worker_id.clone(),
+        worker_name: worker_name.clone(),
+        worker_hash: build_worker_hash(&worker_id, &worker_name, &password_hash)?,
+    };
+    save_local_worker_identity(&local_identity)?;
 
     redis::pipe()
         .atomic()
@@ -548,20 +626,20 @@ fn setup_contributor_worker(
         .ignore()
         .set(redis_worker_key(&worker_id), worker_payload)
         .ignore()
-        .set(redis_worker_alive_key(&worker_id), "1")
+        .set(auth_key, auth_payload)
         .ignore()
-        .set(contributor_profile_key(&worker_id), profile_payload)
+        .set(redis_worker_alive_key(&worker_id), "1")
         .ignore()
         .set(CONTRIBUTOR_ACTIVE_WORKER_KEY, &worker_id)
         .ignore()
         .query::<()>(&mut connection)
         .map_err(|error| format!("Failed to store contributor worker in Redis: {error}"))?;
 
-    Ok(to_contributor_worker_profile(&profile_record))
+    Ok(to_contributor_worker_record(&worker_record))
 }
 
 #[tauri::command]
-fn get_registered_contributor_worker() -> Result<Option<ContributorWorkerProfile>, String> {
+fn get_registered_contributor_worker() -> Result<Option<ContributorWorkerRecord>, String> {
     let config = app_config()?;
     let client = redis::Client::open(config.redis_url.as_str())
         .map_err(|error| format!("Failed to parse the Redis URL: {error}"))?;
@@ -569,41 +647,126 @@ fn get_registered_contributor_worker() -> Result<Option<ContributorWorkerProfile
         .get_connection()
         .map_err(|error| format!("Failed to connect to Redis: {error}"))?;
 
-    let active_worker_id = connection
-        .get::<_, Option<String>>(CONTRIBUTOR_ACTIVE_WORKER_KEY)
+    let Some(local_identity) = load_local_worker_identity()? else {
+        return Ok(None);
+    };
+    let worker_id = local_identity.worker_id;
+
+    let worker_payload = connection
+        .get::<_, Option<String>>(redis_worker_key(&worker_id))
         .map_err(|error| {
             format!(
-                "Failed to load contributor pointer {}: {error}",
-                CONTRIBUTOR_ACTIVE_WORKER_KEY
+                "Failed to load worker record {}: {error}",
+                redis_worker_key(&worker_id)
             )
         })?;
 
-    let Some(worker_id) = active_worker_id else {
+    let Some(worker_payload) = worker_payload else {
         return Ok(None);
     };
 
-    let profile_payload = connection
-        .get::<_, Option<String>>(contributor_profile_key(&worker_id))
-        .map_err(|error| {
-            format!(
-                "Failed to load contributor profile {}: {error}",
-                contributor_profile_key(&worker_id)
-            )
-        })?;
-
-    let Some(profile_payload) = profile_payload else {
-        return Ok(None);
+    let worker_record: RedisWorkerRecord = match serde_json::from_str(&worker_payload) {
+        Ok(record) => record,
+        Err(_) => return Ok(None),
     };
 
-    let profile_record: RedisContributorProfileRecord = serde_json::from_str(&profile_payload)
-        .map_err(|error| {
-            format!(
-                "Failed to parse contributor profile {}: {error}",
-                contributor_profile_key(&worker_id)
-            )
-        })?;
+    let auth_payload = connection
+        .get::<_, Option<String>>(worker_auth_key(&local_identity.worker_name))
+        .map_err(|error| format!("Failed to load worker auth for {}: {error}", local_identity.worker_name))?;
+    let Some(auth_payload) = auth_payload else {
+        return Ok(None);
+    };
+    let auth_record: RedisWorkerAuthRecord = serde_json::from_str(&auth_payload)
+        .map_err(|error| format!("Failed to parse worker auth: {error}"))?;
+    let expected_hash =
+        build_worker_hash(&auth_record.worker_id, &auth_record.worker_name, &auth_record.password_hash)?;
+    if expected_hash != local_identity.worker_hash {
+        return Err("This is not your device.".to_string());
+    }
 
-    Ok(Some(to_contributor_worker_profile(&profile_record)))
+    Ok(Some(to_contributor_worker_record(&worker_record)))
+}
+
+#[tauri::command]
+fn login_contributor_worker(
+    worker_name: String,
+    password: String,
+) -> Result<ContributorWorkerRecord, String> {
+    let worker_name = normalize_worker_name(&worker_name)?;
+    let password_hash = hash_string(password.trim());
+    let local_identity = load_local_worker_identity()?
+        .ok_or_else(|| "No local worker identity was found on this device.".to_string())?;
+    let config = app_config()?;
+    let client = redis::Client::open(config.redis_url.as_str())
+        .map_err(|error| format!("Failed to parse the Redis URL: {error}"))?;
+    let mut connection = client
+        .get_connection()
+        .map_err(|error| format!("Failed to connect to Redis: {error}"))?;
+
+    let auth_payload = connection
+        .get::<_, Option<String>>(worker_auth_key(&worker_name))
+        .map_err(|error| format!("Failed to load worker auth: {error}"))?
+        .ok_or_else(|| "Worker name or password is incorrect.".to_string())?;
+    let auth_record: RedisWorkerAuthRecord = serde_json::from_str(&auth_payload)
+        .map_err(|error| format!("Failed to parse worker auth: {error}"))?;
+    if auth_record.password_hash != password_hash {
+        return Err("Worker name or password is incorrect.".to_string());
+    }
+
+    let expected_hash =
+        build_worker_hash(&auth_record.worker_id, &auth_record.worker_name, &auth_record.password_hash)?;
+    if local_identity.worker_name != auth_record.worker_name
+        || local_identity.worker_id != auth_record.worker_id
+        || local_identity.worker_hash != expected_hash
+    {
+        return Err("This is not your device.".to_string());
+    }
+
+    connection
+        .set::<_, _, ()>(CONTRIBUTOR_ACTIVE_WORKER_KEY, &auth_record.worker_id)
+        .map_err(|error| format!("Failed to mark the active worker: {error}"))?;
+
+    let worker_payload = connection
+        .get::<_, Option<String>>(redis_worker_key(&auth_record.worker_id))
+        .map_err(|error| format!("Failed to load worker record: {error}"))?
+        .ok_or_else(|| "The worker record could not be found.".to_string())?;
+    let worker_record: RedisWorkerRecord = serde_json::from_str(&worker_payload)
+        .map_err(|error| format!("Failed to parse worker record: {error}"))?;
+    Ok(to_contributor_worker_record(&worker_record))
+}
+
+#[tauri::command]
+fn activate_contributor_worker() -> Result<ContributorWorkerRecord, String> {
+    let local_identity = load_local_worker_identity()?
+        .ok_or_else(|| "No local worker identity was found on this device.".to_string())?;
+    let config = app_config()?;
+    let client = redis::Client::open(config.redis_url.as_str())
+        .map_err(|error| format!("Failed to parse the Redis URL: {error}"))?;
+    let mut connection = client
+        .get_connection()
+        .map_err(|error| format!("Failed to connect to Redis: {error}"))?;
+
+    let worker_payload = connection
+        .get::<_, Option<String>>(redis_worker_key(&local_identity.worker_id))
+        .map_err(|error| format!("Failed to load worker record: {error}"))?
+        .ok_or_else(|| "The worker record could not be found.".to_string())?;
+    let mut worker_record: RedisWorkerRecord = serde_json::from_str(&worker_payload)
+        .map_err(|error| format!("Failed to parse worker record: {error}"))?;
+    worker_record.status = "active".to_string();
+    worker_record.last_heartbeat = current_unix_timestamp();
+
+    let payload = serde_json::to_string(&worker_record)
+        .map_err(|error| format!("Failed to serialize worker record: {error}"))?;
+    redis::pipe()
+        .atomic()
+        .set(redis_worker_key(&worker_record.id), payload)
+        .ignore()
+        .set(redis_worker_alive_key(&worker_record.id), "1")
+        .ignore()
+        .query::<()>(&mut connection)
+        .map_err(|error| format!("Failed to activate the worker record: {error}"))?;
+
+    Ok(to_contributor_worker_record(&worker_record))
 }
 
 fn build_project_docker_image(project_path: &str) -> Result<DockerImageResult, String> {
@@ -1864,24 +2027,102 @@ fn redis_worker_alive_key(worker_id: &str) -> String {
     format!("worker_alive:{worker_id}")
 }
 
-fn contributor_profile_key(worker_id: &str) -> String {
-    format!("{CONTRIBUTOR_PROFILE_PREFIX}{worker_id}")
+fn worker_auth_key(worker_name: &str) -> String {
+    format!("{WORKER_AUTH_PREFIX}{worker_name}")
 }
 
-fn to_contributor_worker_profile(
-    profile_record: &RedisContributorProfileRecord,
-) -> ContributorWorkerProfile {
-    ContributorWorkerProfile {
-        worker_id: profile_record.worker_id.clone(),
-        name: profile_record.name.clone(),
-        email: profile_record.email.clone(),
-        location: profile_record.location.clone(),
-        worker_version: profile_record.worker_version.clone(),
-        available_cpu_cores: profile_record.available_resources.cpu_cores,
-        available_gpu_count: profile_record.available_resources.gpu_count,
-        available_memory_mb: profile_record.available_resources.memory_mb,
-        available_storage_gb: profile_record.available_storage_gb,
+fn to_contributor_worker_record(worker_record: &RedisWorkerRecord) -> ContributorWorkerRecord {
+    ContributorWorkerRecord {
+        id: worker_record.id.clone(),
+        status: worker_record.status.clone(),
+        resources: ContributorWorkerResources {
+            cpu_cores: worker_record.resources.cpu_cores,
+            memory_mb: worker_record.resources.memory_mb,
+            gpu: worker_record.resources.gpu,
+        },
+        current_load: ContributorWorkerCurrentLoad {
+            cpu_used: worker_record.current_load.cpu_used,
+            memory_used: worker_record.current_load.memory_used,
+        },
+        capabilities: ContributorWorkerCapabilities {
+            docker: worker_record.capabilities.docker,
+            gpu_supported: worker_record.capabilities.gpu_supported,
+        },
+        last_heartbeat: worker_record.last_heartbeat,
+        stats: ContributorWorkerStats {
+            jobs_completed: worker_record.stats.jobs_completed,
+            jobs_failed: worker_record.stats.jobs_failed,
+        },
     }
+}
+
+fn normalize_worker_name(worker_name: &str) -> Result<String, String> {
+    let normalized = worker_name.trim().to_lowercase();
+    if normalized.is_empty() {
+        return Err("Worker name is required.".to_string());
+    }
+    Ok(normalized)
+}
+
+fn hash_string(value: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(value.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+fn build_worker_hash(worker_id: &str, worker_name: &str, password_hash: &str) -> Result<String, String> {
+    let fingerprint = local_device_fingerprint()?;
+    Ok(hash_string(&format!(
+        "{worker_id}:{worker_name}:{password_hash}:{fingerprint}"
+    )))
+}
+
+fn local_device_fingerprint() -> Result<String, String> {
+    let hostname = Command::new("hostname")
+        .output()
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .unwrap_or_default();
+    let username = std::env::var("USER").unwrap_or_default();
+    let home = std::env::var("HOME").unwrap_or_default();
+    let raw = format!(
+        "{}:{}:{}:{}:{}",
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        username,
+        home,
+        hostname
+    );
+    if raw.trim_matches(':').is_empty() {
+        return Err("Unable to derive a stable device fingerprint.".to_string());
+    }
+    Ok(hash_string(&raw))
+}
+
+fn local_worker_identity_path() -> Result<PathBuf, String> {
+    let home = std::env::var("HOME")
+        .map(PathBuf::from)
+        .map_err(|_| "HOME is not set, so the local worker identity cannot be stored.".to_string())?;
+    Ok(home.join(LOCAL_WORKER_IDENTITY_FILE))
+}
+
+fn save_local_worker_identity(identity: &LocalWorkerIdentity) -> Result<(), String> {
+    let path = local_worker_identity_path()?;
+    let payload = serde_json::to_vec(identity)
+        .map_err(|error| format!("Failed to serialize the local worker identity: {error}"))?;
+    fs::write(&path, payload)
+        .map_err(|error| format!("Failed to store the local worker identity at {}: {error}", path.display()))
+}
+
+fn load_local_worker_identity() -> Result<Option<LocalWorkerIdentity>, String> {
+    let path = local_worker_identity_path()?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let payload = fs::read(&path)
+        .map_err(|error| format!("Failed to read the local worker identity at {}: {error}", path.display()))?;
+    let identity = serde_json::from_slice(&payload)
+        .map_err(|error| format!("Failed to parse the local worker identity: {error}"))?;
+    Ok(Some(identity))
 }
 
 fn sanitize_name(name: &str) -> String {
@@ -1973,7 +2214,9 @@ pub fn run() {
             create_project_docker_image,
             request_project_run,
             list_incoming_run_requests,
-            setup_contributor_worker,
+            register_contributor_worker,
+            login_contributor_worker,
+            activate_contributor_worker,
             get_registered_contributor_worker
         ])
         .run(tauri::generate_context!())
