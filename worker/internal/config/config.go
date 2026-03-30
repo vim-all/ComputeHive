@@ -13,6 +13,8 @@ import (
 
 type Config struct {
 	WorkerID                string
+	CoordinatorAddr         string
+	PollViaServer           bool
 	RedisAddr               string
 	RedisUsername           string
 	RedisPassword           string
@@ -59,6 +61,8 @@ func Parse(args []string) (Config, error) {
 func parse(args []string, getenv func(string) string) (Config, error) {
 	cfg := Config{
 		WorkerID:                envOr(getenv, "WORKER_ID", defaultWorkerID()),
+		CoordinatorAddr:         envOr(getenv, "COORDINATOR_ADDR", "127.0.0.1:50051"),
+		PollViaServer:           envBool(getenv, "POLL_VIA_SERVER", true),
 		RedisAddr:               envOr(getenv, "REDIS_ADDR", "127.0.0.1:6379"),
 		RedisUsername:           envOr(getenv, "REDIS_USERNAME", ""),
 		RedisPassword:           envOr(getenv, "REDIS_PASSWORD", ""),
@@ -105,6 +109,8 @@ func parse(args []string, getenv func(string) string) (Config, error) {
 
 	fs := flag.NewFlagSet("worker", flag.ContinueOnError)
 	fs.StringVar(&cfg.WorkerID, "worker-id", cfg.WorkerID, "Unique ID for this worker")
+	fs.StringVar(&cfg.CoordinatorAddr, "coordinator-addr", cfg.CoordinatorAddr, "Coordinator gRPC address used for job polling")
+	fs.BoolVar(&cfg.PollViaServer, "poll-via-server", cfg.PollViaServer, "Poll jobs from coordinator server instead of Redis queue")
 	fs.StringVar(&cfg.RedisAddr, "redis-addr", cfg.RedisAddr, "Redis host:port")
 	fs.StringVar(&cfg.RedisUsername, "redis-username", cfg.RedisUsername, "Redis username (ACL)")
 	fs.StringVar(&cfg.RedisPassword, "redis-password", cfg.RedisPassword, "Redis password")
@@ -144,6 +150,9 @@ func parse(args []string, getenv func(string) string) (Config, error) {
 
 	if strings.TrimSpace(cfg.WorkerID) == "" {
 		return Config{}, fmt.Errorf("worker-id is required")
+	}
+	if cfg.PollViaServer && strings.TrimSpace(cfg.CoordinatorAddr) == "" {
+		return Config{}, fmt.Errorf("coordinator-addr is required when poll-via-server is enabled")
 	}
 	if strings.TrimSpace(cfg.RedisAddr) == "" {
 		return Config{}, fmt.Errorf("redis-addr is required")

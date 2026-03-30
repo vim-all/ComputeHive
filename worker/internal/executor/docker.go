@@ -47,30 +47,25 @@ func (e *DockerExecutor) Run(ctx context.Context, job domain.Job, bundle artifac
 		ArtifactSizeBytes: bundle.SizeBytes,
 	}
 
-	if strings.TrimSpace(bundle.ArchivePath) == "" {
-		result.Error = "artifact archive path is required"
-		result.FinishedAt = time.Now().UTC()
-		result.DurationMillis = result.FinishedAt.Sub(startedAt).Milliseconds()
-		return result
-	}
+	if strings.TrimSpace(bundle.ArchivePath) != "" {
+		loadStdout, loadStderr, err := e.runDockerCommand(ctx, "load", "-i", bundle.ArchivePath)
+		if err != nil {
+			result.Error = "docker load failed: " + err.Error()
+			result.Stdout = loadStdout
+			result.Stderr = loadStderr
+			result.FinishedAt = time.Now().UTC()
+			result.DurationMillis = result.FinishedAt.Sub(startedAt).Milliseconds()
+			return result
+		}
+		defer e.cleanupImage(job.ImageRef)
 
-	loadStdout, loadStderr, err := e.runDockerCommand(ctx, "load", "-i", bundle.ArchivePath)
-	if err != nil {
-		result.Error = "docker load failed: " + err.Error()
-		result.Stdout = loadStdout
-		result.Stderr = loadStderr
-		result.FinishedAt = time.Now().UTC()
-		result.DurationMillis = result.FinishedAt.Sub(startedAt).Milliseconds()
-		return result
-	}
-	defer e.cleanupImage(job.ImageRef)
-
-	if _, _, err := e.runDockerCommand(ctx, "image", "inspect", job.ImageRef); err != nil {
-		result.Error = "loaded archive does not contain expected image_ref: " + job.ImageRef
-		result.Stdout = loadStdout
-		result.FinishedAt = time.Now().UTC()
-		result.DurationMillis = result.FinishedAt.Sub(startedAt).Milliseconds()
-		return result
+		if _, _, err := e.runDockerCommand(ctx, "image", "inspect", job.ImageRef); err != nil {
+			result.Error = "loaded archive does not contain expected image_ref: " + job.ImageRef
+			result.Stdout = loadStdout
+			result.FinishedAt = time.Now().UTC()
+			result.DurationMillis = result.FinishedAt.Sub(startedAt).Milliseconds()
+			return result
+		}
 	}
 
 	args, err := e.buildRunArgs(job)

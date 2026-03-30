@@ -1,22 +1,27 @@
 package store
 
 import (
-	"bufio"
 	"context"
-	"crypto/tls"
-	"encoding/json"
 	"fmt"
-	"net"
-	"strconv"
 	"strings"
-	"time"
+	"sync"
 
+	pb "coordinator/pkg/pb"
 	"github.com/adhyan-jain/ComputeHive/worker/internal/config"
 	"github.com/adhyan-jain/ComputeHive/worker/internal/domain"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 )
 
 type Store struct {
 	cfg config.Config
+
+	mu                  sync.Mutex
+	coordinatorConn     *grpc.ClientConn
+	coordinatorClient   pb.WorkerServiceClient
+	coordinatorWorkerID string
 }
 
 func New(cfg config.Config) *Store {
@@ -24,186 +29,212 @@ func New(cfg config.Config) *Store {
 }
 
 func (s *Store) PullJob(ctx context.Context) (*domain.Job, bool, error) {
-	payload, found, err := s.brpop(ctx, s.cfg.QueueKey, s.cfg.PollTimeout)
-	if err != nil || !found {
-		return nil, found, err
+	client, workerID, err := s.coordinator(ctx)
+	if err != nil {
+		return nil, false, err
 	}
 
-	var job domain.Job
-	if err := json.Unmarshal([]byte(payload), &job); err != nil {
-		return nil, false, fmt.Errorf("unmarshal job payload: %w", err)
+	requestCtx, cancel := context.WithTimeout(ctx, s.cfg.PollTimeout+s.cfg.RedisIOTimeout)
+	defer cancel()
+
+	response, err := client.RequestJob(requestCtx, &pb.RequestJobRequest{
+		WorkerId: &pb.WorkerID{Value: workerID},
+	})
+	if isNotFound(err) {
+		newWorkerID, registerErr := s.reRegister(requestCtx)
+		if registerErr != nil {
+			return nil, false, fmt.Errorf("request job from coordinator: worker re-register failed: %w", registerErr)
+		}
+		response, err = client.RequestJob(requestCtx, &pb.RequestJobRequest{
+			WorkerId: &pb.WorkerID{Value: newWorkerID},
+		})
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("request job from coordinator: %w", err)
+	}
+	if !response.GetHasJob() || response.GetJob() == nil {
+		return nil, false, nil
 	}
 
-	return &job, true, nil
+	jobMessage := response.GetJob()
+	resources := jobMessage.GetRequiredResources()
+	job := &domain.Job{
+		ID:             strings.TrimSpace(jobMessage.GetJobId().GetValue()),
+		Status:         domain.JobStatusAssigned,
+		ImageRef:       strings.TrimSpace(jobMessage.GetContainerImage()),
+		Command:        append([]string(nil), jobMessage.GetCommand()...),
+		CreatedAtUnix:  jobMessage.GetCreatedAtUnix(),
+		TimeoutSeconds: 0,
+	}
+	if resources != nil {
+		job.CPUCores = float64(resources.GetCpuCores())
+		job.MemoryMB = int64(resources.GetMemoryMb())
+		job.GPU = resources.GetGpuCount() > 0
+	}
+
+	return job, true, nil
 }
 
 func (s *Store) PublishHeartbeat(ctx context.Context, heartbeat domain.WorkerHeartbeat) error {
-	data, err := json.Marshal(heartbeat)
+	client, workerID, err := s.coordinator(ctx)
 	if err != nil {
 		return err
 	}
 
-	key := fmt.Sprintf("%s:%s:heartbeat", s.cfg.WorkerKeyPrefix, heartbeat.WorkerID)
-	if err := s.setEx(ctx, key, string(data), s.cfg.HeartbeatTTL); err != nil {
-		return err
+	_, err = client.Heartbeat(ctx, &pb.HeartbeatRequest{
+		WorkerId: &pb.WorkerID{Value: workerID},
+		AvailableResources: &pb.ResourceSpec{
+			CpuCores: int32(heartbeat.Resources.CPUCores),
+			MemoryMb: int32(heartbeat.Resources.MemoryMB),
+			GpuCount: boolToGPUCount(heartbeat.Resources.GPU),
+		},
+	})
+	if isNotFound(err) {
+		if _, registerErr := s.reRegister(ctx); registerErr != nil {
+			return fmt.Errorf("publish coordinator heartbeat: worker re-register failed: %w", registerErr)
+		}
+		_, err = client.Heartbeat(ctx, &pb.HeartbeatRequest{
+			WorkerId: &pb.WorkerID{Value: s.coordinatorWorkerID},
+			AvailableResources: &pb.ResourceSpec{
+				CpuCores: int32(heartbeat.Resources.CPUCores),
+				MemoryMb: int32(heartbeat.Resources.MemoryMB),
+				GpuCount: boolToGPUCount(heartbeat.Resources.GPU),
+			},
+		})
+	}
+	if err != nil {
+		return fmt.Errorf("publish coordinator heartbeat: %w", err)
 	}
 
-	return s.publish(ctx, s.cfg.WorkerEventsChannel, string(data))
+	return nil
 }
 
-func (s *Store) PublishJobStatus(ctx context.Context, status domain.JobStatusUpdate) error {
-	data, err := json.Marshal(status)
-	if err != nil {
-		return err
-	}
+func (s *Store) PublishJobStatus(ctx context.Context, status domain.JobState) error {
+	_ = ctx
+	_ = status
+	return nil
+}
 
-	key := fmt.Sprintf("%s:%s:status", s.cfg.JobKeyPrefix, status.JobID)
-	if err := s.setEx(ctx, key, string(data), s.cfg.ResultTTL); err != nil {
-		return err
-	}
-
-	return s.publish(ctx, s.cfg.JobEventsChannel, string(data))
+func (s *Store) PublishAssignment(ctx context.Context, assignment domain.Assignment) error {
+	_ = ctx
+	_ = assignment
+	return nil
 }
 
 func (s *Store) PublishJobResult(ctx context.Context, result domain.JobResult) error {
-	data, err := json.Marshal(result)
+	client, workerID, err := s.coordinator(ctx)
 	if err != nil {
 		return err
 	}
 
-	key := fmt.Sprintf("%s:%s:result", s.cfg.JobKeyPrefix, result.JobID)
-	if err := s.setEx(ctx, key, string(data), s.cfg.ResultTTL); err != nil {
-		return err
-	}
-	if err := s.lpush(ctx, s.cfg.ResultsKey, string(data)); err != nil {
-		return err
-	}
-
-	return s.publish(ctx, s.cfg.JobEventsChannel, string(data))
-}
-
-func (s *Store) setEx(ctx context.Context, key, value string, ttl time.Duration) error {
-	seconds := max(1, int(ttl/time.Second))
-	_, err := s.do(ctx, s.cfg.RedisIOTimeout, "SET", key, value, "EX", strconv.Itoa(seconds))
-	return err
-}
-
-func (s *Store) publish(ctx context.Context, channel, message string) error {
-	_, err := s.do(ctx, s.cfg.RedisIOTimeout, "PUBLISH", channel, message)
-	return err
-}
-
-func (s *Store) lpush(ctx context.Context, key, value string) error {
-	_, err := s.do(ctx, s.cfg.RedisIOTimeout, "LPUSH", key, value)
-	return err
-}
-
-func (s *Store) brpop(ctx context.Context, key string, timeout time.Duration) (string, bool, error) {
-	seconds := max(1, int(timeout/time.Second))
-	reply, err := s.do(ctx, timeout+s.cfg.RedisIOTimeout, "BRPOP", key, strconv.Itoa(seconds))
-	if err != nil {
-		return "", false, err
-	}
-	if reply.nil {
-		return "", false, nil
-	}
-	if len(reply.array) != 2 {
-		return "", false, fmt.Errorf("unexpected BRPOP reply length %d", len(reply.array))
-	}
-
-	return reply.array[1].String(), true, nil
-}
-
-func (s *Store) do(ctx context.Context, timeout time.Duration, args ...string) (respValue, error) {
-	conn, reader, err := s.open(ctx, timeout)
-	if err != nil {
-		return respValue{}, err
-	}
-	defer conn.Close()
-
-	if err := writeCommand(conn, args); err != nil {
-		return respValue{}, err
-	}
-
-	return readReply(reader)
-}
-
-func (s *Store) open(ctx context.Context, timeout time.Duration) (net.Conn, *bufio.Reader, error) {
-	dialer := net.Dialer{Timeout: s.cfg.RedisDialTimeout}
-	var (
-		conn net.Conn
-		err  error
-	)
-	if s.cfg.RedisUseTLS {
-		tlsDialer := tls.Dialer{
-			NetDialer: &dialer,
-			Config: &tls.Config{
-				MinVersion: tls.VersionTLS12,
-				ServerName: redisServerName(s.cfg.RedisAddr),
+	_, err = client.SubmitResult(ctx, &pb.SubmitResultRequest{
+		WorkerId: &pb.WorkerID{Value: workerID},
+		Result: &pb.Result{
+			JobId:          &pb.JobID{Value: result.JobID},
+			Status:         domainStatusToPB(result.Status),
+			ExitCode:       int32(result.ExitCode),
+			StdoutExcerpt:  trimTo(result.Stdout, 4096),
+			StderrExcerpt:  trimTo(result.Stderr, 4096),
+			FinishedAtUnix: result.FinishedAt.UTC().Unix(),
+		},
+	})
+	if isNotFound(err) {
+		newWorkerID, registerErr := s.reRegister(ctx)
+		if registerErr != nil {
+			return fmt.Errorf("submit result to coordinator: worker re-register failed: %w", registerErr)
+		}
+		_, err = client.SubmitResult(ctx, &pb.SubmitResultRequest{
+			WorkerId: &pb.WorkerID{Value: newWorkerID},
+			Result: &pb.Result{
+				JobId:          &pb.JobID{Value: result.JobID},
+				Status:         domainStatusToPB(result.Status),
+				ExitCode:       int32(result.ExitCode),
+				StdoutExcerpt:  trimTo(result.Stdout, 4096),
+				StderrExcerpt:  trimTo(result.Stderr, 4096),
+				FinishedAtUnix: result.FinishedAt.UTC().Unix(),
 			},
-		}
-		conn, err = tlsDialer.DialContext(ctx, "tcp", s.cfg.RedisAddr)
-	} else {
-		conn, err = dialer.DialContext(ctx, "tcp", s.cfg.RedisAddr)
+		})
 	}
 	if err != nil {
-		return nil, nil, fmt.Errorf("dial redis: %w", err)
+		return fmt.Errorf("submit result to coordinator: %w", err)
 	}
 
-	deadline := time.Now().Add(timeout)
-	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
-		deadline = ctxDeadline
-	}
-	if err := conn.SetDeadline(deadline); err != nil {
-		conn.Close()
-		return nil, nil, err
+	return nil
+}
+
+func (s *Store) coordinator(ctx context.Context) (pb.WorkerServiceClient, string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.coordinatorClient == nil {
+		dialCtx, cancel := context.WithTimeout(ctx, s.cfg.RedisDialTimeout)
+		defer cancel()
+
+		conn, err := grpc.DialContext(dialCtx, s.cfg.CoordinatorAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+		if err != nil {
+			return nil, "", fmt.Errorf("dial coordinator: %w", err)
+		}
+
+		s.coordinatorConn = conn
+		s.coordinatorClient = pb.NewWorkerServiceClient(conn)
 	}
 
-	reader := bufio.NewReader(conn)
-	if s.cfg.RedisPassword != "" {
-		authArgs := []string{"AUTH"}
-		if strings.TrimSpace(s.cfg.RedisUsername) != "" {
-			authArgs = append(authArgs, s.cfg.RedisUsername)
-		}
-		authArgs = append(authArgs, s.cfg.RedisPassword)
-		if _, err := s.simple(conn, reader, authArgs...); err != nil {
-			conn.Close()
-			return nil, nil, fmt.Errorf("redis auth: %w", err)
-		}
-	}
-	if s.cfg.RedisDB != 0 {
-		if _, err := s.simple(conn, reader, "SELECT", strconv.Itoa(s.cfg.RedisDB)); err != nil {
-			conn.Close()
-			return nil, nil, fmt.Errorf("redis select: %w", err)
+	if strings.TrimSpace(s.coordinatorWorkerID) == "" {
+		if _, err := s.reRegister(ctx); err != nil {
+			return nil, "", fmt.Errorf("register worker with coordinator: %w", err)
 		}
 	}
 
-	return conn, reader, nil
+	return s.coordinatorClient, s.coordinatorWorkerID, nil
 }
 
-func (s *Store) simple(conn net.Conn, reader *bufio.Reader, args ...string) (respValue, error) {
-	if err := writeCommand(conn, args); err != nil {
-		return respValue{}, err
+func (s *Store) reRegister(ctx context.Context) (string, error) {
+	registerResponse, err := s.coordinatorClient.RegisterWorker(ctx, &pb.RegisterWorkerRequest{
+		WorkerVersion: s.cfg.Version,
+	})
+	if err != nil {
+		return "", err
 	}
-	return readReply(reader)
-}
 
-func max(a, b int) int {
-	if a > b {
-		return a
+	workerID := strings.TrimSpace(registerResponse.GetWorkerId().GetValue())
+	if workerID == "" {
+		return "", fmt.Errorf("coordinator returned empty worker id")
 	}
-	return b
+
+	s.coordinatorWorkerID = workerID
+	return workerID, nil
 }
 
-func sanitizeError(message string) string {
-	return strings.TrimSpace(message)
+func boolToGPUCount(gpu bool) int32 {
+	if gpu {
+		return 1
+	}
+	return 0
 }
 
-func redisServerName(addr string) string {
-	host, _, err := net.SplitHostPort(addr)
+func domainStatusToPB(status string) pb.Status {
+	switch strings.TrimSpace(status) {
+	case domain.JobStatusRunning:
+		return pb.Status_STATUS_RUNNING
+	case domain.JobStatusCompleted:
+		return pb.Status_STATUS_SUCCEEDED
+	case domain.JobStatusFailed:
+		return pb.Status_STATUS_FAILED
+	default:
+		return pb.Status_STATUS_UNSPECIFIED
+	}
+}
+
+func trimTo(value string, maxLen int) string {
+	if maxLen <= 0 || len(value) <= maxLen {
+		return value
+	}
+	return value[:maxLen]
+}
+
+func isNotFound(err error) bool {
 	if err == nil {
-		return host
+		return false
 	}
-
-	return addr
+	return status.Code(err) == codes.NotFound
 }
