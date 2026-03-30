@@ -4,8 +4,27 @@ use std::{
 };
 
 fn main() {
+    compile_proto_bindings();
     repair_tauri_permission_paths();
     tauri_build::build()
+}
+
+fn compile_proto_bindings() {
+    let manifest_dir = PathBuf::from(
+        env::var("CARGO_MANIFEST_DIR").expect("missing CARGO_MANIFEST_DIR in build script"),
+    );
+    let proto_dir = manifest_dir.join("../../shared/proto");
+    let client_proto = proto_dir.join("client.proto");
+    let worker_proto = proto_dir.join("worker.proto");
+
+    println!("cargo:rerun-if-changed={}", client_proto.display());
+    println!("cargo:rerun-if-changed={}", worker_proto.display());
+
+    tonic_build::configure()
+        .build_client(true)
+        .build_server(false)
+        .compile_protos(&[client_proto, worker_proto], &[proto_dir])
+        .expect("failed to compile coordinator client protos");
 }
 
 fn repair_tauri_permission_paths() {

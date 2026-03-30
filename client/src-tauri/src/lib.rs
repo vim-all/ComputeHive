@@ -5,6 +5,7 @@ use reqwest::blocking::Client as BlockingHttpClient;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use tonic::transport::Channel;
 use std::{
     collections::HashMap,
     error::Error as StdError,
@@ -20,6 +21,13 @@ use time::{macros::format_description, OffsetDateTime};
 use url::Url;
 use uuid::Uuid;
 
+pub mod coordinatorpb {
+    tonic::include_proto!("compute.v1");
+}
+
+use coordinatorpb::client_service_client::ClientServiceClient;
+use coordinatorpb::{ResourceSpec as CoordinatorResourceSpec, SubmitJobRequest};
+
 const JOB_QUEUE_KEY: &str = "job_queue";
 const WORKERS_KEY: &str = "workers";
 const JOB_STATUS_QUEUED: &str = "queued";
@@ -32,6 +40,7 @@ const DEFAULT_REQUIRED_CPU_CORES: i32 = 1;
 const DEFAULT_REQUIRED_GPU_COUNT: i32 = 0;
 const DEFAULT_REQUIRED_MEMORY_MB: i32 = 1024;
 const DEFAULT_R2_REGION: &str = "auto";
+const DEFAULT_COORDINATOR_ADDR: &str = "127.0.0.1:50051";
 const DEFAULT_CONTRIBUTOR_CPU_CORES: i32 = 8;
 const DEFAULT_CONTRIBUTOR_GPU_COUNT: i32 = 1;
 const DEFAULT_CONTRIBUTOR_MEMORY_MB: i32 = 16384;
@@ -142,6 +151,7 @@ struct RustProject {
 struct AppConfig {
     object_storage: ObjectStorageConfig,
     redis_url: String,
+    coordinator_addr: String,
 }
 
 #[derive(Clone)]
@@ -355,19 +365,53 @@ async fn request_project_run(project_path: String) -> Result<RunRequestResult, S
         created_at_unix: current_unix_timestamp(),
     };
 
-    if let Err(error) = enqueue_run_request(config, &job_id, &image, &artifact_record) {
-        let cleanup_result = delete_artifact_from_object_storage(config, &object_key).await;
-        let cleanup_message = match cleanup_result {
-            Ok(()) => "The uploaded artifact was cleaned up automatically.".to_string(),
-            Err(cleanup_error) => format!(
-                "The uploaded artifact could not be cleaned up automatically: {cleanup_error}"
-            ),
-        };
+    let mut environment = HashMap::new();
+    environment.insert(
+        "COMPUTEHIVE_ARTIFACT_SHA256".to_string(),
+        artifact_record.artifact_sha256.clone(),
+    );
+    environment.insert(
+        "COMPUTEHIVE_ARTIFACT_URI".to_string(),
+        artifact_record.artifact_uri.clone(),
+    );
+    environment.insert(
+        "COMPUTEHIVE_ARTIFACT_API_URL".to_string(),
+        artifact_record.artifact_api_url.clone(),
+    );
+    environment.insert(
+        "COMPUTEHIVE_ARTIFACT_OBJECT_KEY".to_string(),
+        artifact_record.artifact_object_key.clone(),
+    );
+    environment.insert(
+        "COMPUTEHIVE_PROJECT_NAME".to_string(),
+        artifact_record.project_name.clone(),
+    );
+    environment.insert(
+        "COMPUTEHIVE_DETECTED_STACK".to_string(),
+        artifact_record.detected_stack.clone(),
+    );
+    environment.insert("COMPUTEHIVE_IMAGE_TAG".to_string(), image.image_tag.clone());
+    environment.insert(
+        "COMPUTEHIVE_IMAGE_ARCHIVE_PATH".to_string(),
+        artifact_record.gzip_archive_path.clone(),
+    );
 
-        return Err(format!(
-            "Failed to queue the run request in Redis after uploading the artifact. {error} {cleanup_message}"
-        ));
-    }
+    let coordinator_job_id = match submit_job_to_coordinator(config, &image, environment).await {
+        Ok(job_id) => job_id,
+        Err(error) => {
+            let cleanup_result = delete_artifact_from_object_storage(config, &object_key).await;
+            let cleanup_message = match cleanup_result {
+                Ok(()) => "The uploaded artifact was cleaned up automatically.".to_string(),
+                Err(cleanup_error) => format!(
+                    "The uploaded artifact could not be cleaned up automatically: {cleanup_error}"
+                ),
+            };
+
+            return Err(format!(
+                "Failed to submit the run request to the coordinator after uploading the artifact. {error} {cleanup_message}"
+            ));
+        }
+    };
 
     let mut notes = image.notes.clone();
     notes.push(format!(
@@ -393,12 +437,11 @@ async fn request_project_run(project_path: String) -> Result<RunRequestResult, S
         );
     }
     notes.push(format!(
-        "Queued a coordinator-compatible Redis job under {} and pushed it onto {}.",
-        job_key(&job_id),
-        JOB_QUEUE_KEY
+        "Submitted the run request to the coordinator SubmitJob endpoint as job {}.",
+        coordinator_job_id
     ));
     notes.push(
-        "The queued job carries the artifact hash and object storage location in its environment for future contributor actions."
+        "The submitted job carries the artifact hash and object storage location in its environment for future contributor actions."
             .to_string(),
     );
     notes.push(
@@ -407,8 +450,8 @@ async fn request_project_run(project_path: String) -> Result<RunRequestResult, S
     );
 
     let summary = format!(
-        "Built the Docker image, compressed it to a tar.gz artifact, uploaded it to object storage, and queued run request {} in Redis.",
-        job_id
+        "Built the Docker image, compressed it to a tar.gz artifact, uploaded it to object storage, and submitted run request {} to the coordinator.",
+        coordinator_job_id
     );
 
     Ok(RunRequestResult {
@@ -420,11 +463,11 @@ async fn request_project_run(project_path: String) -> Result<RunRequestResult, S
         artifact_uri: uploaded_artifact.artifact_uri,
         artifact_api_url: uploaded_artifact.artifact_api_url,
         artifact_public_url: uploaded_artifact.artifact_public_url,
-        artifact_record_key: artifact_record_key(&job_id),
+        artifact_record_key: artifact_record_key(&coordinator_job_id),
         artifact_etag: uploaded_artifact.artifact_etag,
-        redis_job_id: job_id.clone(),
-        redis_job_key: job_key(&job_id),
-        redis_status_key: job_status_key(&job_id),
+        redis_job_id: coordinator_job_id.clone(),
+        redis_job_key: job_key(&coordinator_job_id),
+        redis_status_key: job_status_key(&coordinator_job_id),
         redis_queue_key: JOB_QUEUE_KEY.to_string(),
         summary,
         notes,
@@ -1799,90 +1842,6 @@ fn format_reqwest_error(error: &reqwest::Error) -> String {
     message
 }
 
-fn enqueue_run_request(
-    config: &AppConfig,
-    job_id: &str,
-    image: &DockerImageResult,
-    artifact_record: &ArtifactRecord,
-) -> Result<(), String> {
-    let client = redis::Client::open(config.redis_url.as_str())
-        .map_err(|error| format!("Failed to parse the Redis URL: {error}"))?;
-    let mut connection = client
-        .get_connection()
-        .map_err(|error| format!("Failed to connect to Redis: {error}"))?;
-
-    let mut environment = HashMap::new();
-    environment.insert(
-        "COMPUTEHIVE_ARTIFACT_SHA256".to_string(),
-        artifact_record.artifact_sha256.clone(),
-    );
-    environment.insert(
-        "COMPUTEHIVE_ARTIFACT_URI".to_string(),
-        artifact_record.artifact_uri.clone(),
-    );
-    environment.insert(
-        "COMPUTEHIVE_ARTIFACT_API_URL".to_string(),
-        artifact_record.artifact_api_url.clone(),
-    );
-    environment.insert(
-        "COMPUTEHIVE_ARTIFACT_OBJECT_KEY".to_string(),
-        artifact_record.artifact_object_key.clone(),
-    );
-    environment.insert(
-        "COMPUTEHIVE_PROJECT_NAME".to_string(),
-        artifact_record.project_name.clone(),
-    );
-    environment.insert(
-        "COMPUTEHIVE_DETECTED_STACK".to_string(),
-        artifact_record.detected_stack.clone(),
-    );
-    environment.insert("COMPUTEHIVE_IMAGE_TAG".to_string(), image.image_tag.clone());
-    environment.insert(
-        "COMPUTEHIVE_IMAGE_ARCHIVE_PATH".to_string(),
-        artifact_record.gzip_archive_path.clone(),
-    );
-
-    let job_record = RedisJobRecord {
-        id: job_id.to_string(),
-        container_image: image.image_tag.clone(),
-        command: placeholder_contributor_command(),
-        required_resources: Some(default_required_resources()),
-        environment,
-        max_runtime_seconds: DEFAULT_MAX_RUNTIME_SECONDS,
-        status: JOB_STATUS_QUEUED.to_string(),
-        created_at_unix: artifact_record.created_at_unix,
-        assigned_worker_id: String::new(),
-    };
-
-    let job_payload = serde_json::to_string(&job_record)
-        .map_err(|error| format!("Failed to encode the Redis job record: {error}"))?;
-    let artifact_payload = serde_json::to_string(artifact_record)
-        .map_err(|error| format!("Failed to encode the artifact metadata record: {error}"))?;
-
-    redis::pipe()
-        .atomic()
-        .set(job_key(job_id), job_payload)
-        .ignore()
-        .set(job_status_key(job_id), JOB_STATUS_QUEUED)
-        .ignore()
-        .rpush(JOB_QUEUE_KEY, job_id)
-        .ignore()
-        .set(artifact_record_key(job_id), artifact_payload)
-        .ignore()
-        .query::<()>(&mut connection)
-        .map_err(|error| format!("Failed to enqueue the run request in Redis: {error}"))?;
-
-    Ok(())
-}
-
-fn default_required_resources() -> RedisResourceSpec {
-    RedisResourceSpec {
-        cpu_cores: DEFAULT_REQUIRED_CPU_CORES,
-        gpu_count: DEFAULT_REQUIRED_GPU_COUNT,
-        memory_mb: DEFAULT_REQUIRED_MEMORY_MB,
-    }
-}
-
 fn placeholder_contributor_command() -> Vec<String> {
     vec![
         "/bin/sh".to_string(),
@@ -1919,6 +1878,8 @@ fn load_app_config() -> Result<AppConfig, String> {
     let access_key_id = required_env("S3_ACCESS_KEY_ID")?;
     let secret_access_key = required_env("S3_SECRET_ACCESS_KEY")?;
     let redis_url = required_env("REDIS_URL")?;
+    let coordinator_addr = optional_env("COORDINATOR_ADDR")
+        .unwrap_or_else(|| DEFAULT_COORDINATOR_ADDR.to_string());
     let (endpoint_url, bucket_name, bucket_api_url) = parse_bucket_url(&bucket_url)?;
     let bucket_public_url =
         optional_env("S3_PUBLIC_BUCKET_URL").unwrap_or_else(|| bucket_api_url.clone());
@@ -1934,7 +1895,54 @@ fn load_app_config() -> Result<AppConfig, String> {
             region: DEFAULT_R2_REGION.to_string(),
         },
         redis_url,
+        coordinator_addr,
     })
+}
+
+async fn submit_job_to_coordinator(
+    config: &AppConfig,
+    image: &DockerImageResult,
+    environment: HashMap<String, String>,
+) -> Result<String, String> {
+    let endpoint = coordinator_endpoint(&config.coordinator_addr);
+    let channel = Channel::from_shared(endpoint.clone())
+        .map_err(|error| format!("Failed to parse coordinator address {endpoint}: {error}"))?
+        .connect()
+        .await
+        .map_err(|error| format!("Failed to connect to coordinator at {endpoint}: {error}"))?;
+
+    let mut client = ClientServiceClient::new(channel);
+    let response = client
+        .submit_job(SubmitJobRequest {
+            container_image: image.image_tag.clone(),
+            command: placeholder_contributor_command(),
+            required_resources: Some(CoordinatorResourceSpec {
+                cpu_cores: DEFAULT_REQUIRED_CPU_CORES,
+                gpu_count: DEFAULT_REQUIRED_GPU_COUNT,
+                memory_mb: DEFAULT_REQUIRED_MEMORY_MB,
+            }),
+            environment,
+            max_runtime_seconds: DEFAULT_MAX_RUNTIME_SECONDS,
+            job: None,
+        })
+        .await
+        .map_err(|error| format!("Coordinator SubmitJob request failed: {error}"))?;
+
+    let job_id = response.into_inner().job_id.map(|id| id.value).unwrap_or_default();
+    if job_id.trim().is_empty() {
+        return Err("Coordinator SubmitJob response did not include a job id.".to_string());
+    }
+
+    Ok(job_id)
+}
+
+fn coordinator_endpoint(address: &str) -> String {
+    let trimmed = address.trim();
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        trimmed.to_string()
+    } else {
+        format!("http://{trimmed}")
+    }
 }
 
 fn ensure_env_file_loaded() {
