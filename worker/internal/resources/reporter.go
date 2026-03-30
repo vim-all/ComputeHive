@@ -22,22 +22,16 @@ func NewReporter(dockerBinary string) *Reporter {
 }
 
 func (r *Reporter) Snapshot(ctx context.Context) domain.ResourceSnapshot {
-	hostname, _ := os.Hostname()
-	totalMemory, availableMemory := detectMemory(ctx)
-	dockerAvailable, dockerVersion := detectDocker(ctx, r.dockerBinary)
+	totalMemory, _ := detectMemory(ctx)
+	dockerAvailable, _ := detectDocker(ctx, r.dockerBinary)
 	gpuModels := detectNVIDIAGPUs(ctx)
 
 	return domain.ResourceSnapshot{
-		Hostname:             hostname,
-		OS:                   runtime.GOOS,
-		Arch:                 runtime.GOARCH,
-		CPUCores:             runtime.NumCPU(),
-		MemoryTotalBytes:     totalMemory,
-		MemoryAvailableBytes: availableMemory,
-		GPUCount:             len(gpuModels),
-		GPUModels:            gpuModels,
-		DockerAvailable:      dockerAvailable,
-		DockerVersion:        dockerVersion,
+		CPUCores:        runtime.NumCPU(),
+		MemoryMB:        int64(totalMemory / (1024 * 1024)),
+		GPU:             len(gpuModels) > 0,
+		DockerAvailable: dockerAvailable,
+		GPUSupported:    len(gpuModels) > 0,
 	}
 }
 

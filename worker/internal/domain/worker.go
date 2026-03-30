@@ -1,31 +1,60 @@
 package domain
 
-import "time"
-
 const (
-	WorkerStatusIdle = "idle"
-	WorkerStatusBusy = "busy"
+	WorkerStatusAvailable = "available"
+	WorkerStatusBusy      = "busy"
+	WorkerStatusOffline   = "offline"
+
+	// Backward-compatibility alias.
+	WorkerStatusIdle = WorkerStatusAvailable
 )
 
 type ResourceSnapshot struct {
-	Hostname             string   `json:"hostname"`
-	OS                   string   `json:"os"`
-	Arch                 string   `json:"arch"`
-	CPUCores             int      `json:"cpu_cores"`
-	MemoryTotalBytes     uint64   `json:"memory_total_bytes,omitempty"`
-	MemoryAvailableBytes uint64   `json:"memory_available_bytes,omitempty"`
-	GPUCount             int      `json:"gpu_count"`
-	GPUModels            []string `json:"gpu_models,omitempty"`
-	DockerAvailable      bool     `json:"docker_available"`
-	DockerVersion        string   `json:"docker_version,omitempty"`
+	CPUCores        int   `json:"cpu_cores"`
+	MemoryMB        int64 `json:"memory_mb"`
+	GPU             bool  `json:"gpu"`
+	DockerAvailable bool  `json:"docker_available"`
+	GPUSupported    bool  `json:"gpu_supported"`
 }
 
 type WorkerHeartbeat struct {
-	WorkerID      string           `json:"worker_id"`
-	Status        string           `json:"status"`
-	CurrentJobID  string           `json:"current_job_id,omitempty"`
-	LastSeen      time.Time        `json:"last_seen"`
-	UptimeSeconds int64            `json:"uptime_seconds"`
-	Version       string           `json:"version"`
-	Resource      ResourceSnapshot `json:"resource"`
+	ID            string             `json:"id"`
+	Status        string             `json:"status"`
+	Resources     WorkerResources    `json:"resources"`
+	CurrentLoad   WorkerCurrentLoad  `json:"current_load"`
+	Capabilities  WorkerCapabilities `json:"capabilities"`
+	LastHeartbeat int64              `json:"last_heartbeat"`
+	Stats         WorkerStats        `json:"stats"`
 }
+
+type WorkerResources struct {
+	CPUCores int   `json:"cpu_cores"`
+	MemoryMB int64 `json:"memory_mb"`
+	GPU      bool  `json:"gpu"`
+}
+
+type WorkerCurrentLoad struct {
+	CPUUsed    int   `json:"cpu_used"`
+	MemoryUsed int64 `json:"memory_used"`
+}
+
+type WorkerCapabilities struct {
+	Docker       bool `json:"docker"`
+	GPUSupported bool `json:"gpu_supported"`
+}
+
+type WorkerStats struct {
+	JobsCompleted int64 `json:"jobs_completed"`
+	JobsFailed    int64 `json:"jobs_failed"`
+}
+
+type Assignment struct {
+	JobID    string `json:"job_id"`
+	WorkerID string `json:"worker_id"`
+	Status   string `json:"status"`
+}
+
+const (
+	AssignmentStatusAssigned = "assigned"
+	AssignmentStatusRunning  = "running"
+)
