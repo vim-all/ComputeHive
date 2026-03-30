@@ -12,12 +12,15 @@ import (
 )
 
 func main() {
-	cfg := config.Load()
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatalf("invalid config: %v", err)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	redisClient, err := store.NewRedisClient(ctx, cfg.RedisAddr)
+	redisClient, err := store.NewRedisClient(ctx, cfg.RedisAddr, cfg.RedisPassword, cfg.RedisDB, cfg.RedisTLS)
 	if err != nil {
 		log.Fatalf("redis init failed: %v", err)
 	}

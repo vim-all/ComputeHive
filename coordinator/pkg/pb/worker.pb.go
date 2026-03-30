@@ -21,6 +21,166 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// Canonical job lifecycle for v2 schema.
+type JobLifecycleStatus int32
+
+const (
+	JobLifecycleStatus_JOB_LIFECYCLE_STATUS_UNSPECIFIED JobLifecycleStatus = 0
+	JobLifecycleStatus_JOB_LIFECYCLE_STATUS_PENDING     JobLifecycleStatus = 1
+	JobLifecycleStatus_JOB_LIFECYCLE_STATUS_ASSIGNED    JobLifecycleStatus = 2
+	JobLifecycleStatus_JOB_LIFECYCLE_STATUS_RUNNING     JobLifecycleStatus = 3
+	JobLifecycleStatus_JOB_LIFECYCLE_STATUS_COMPLETED   JobLifecycleStatus = 4
+	JobLifecycleStatus_JOB_LIFECYCLE_STATUS_FAILED      JobLifecycleStatus = 5
+)
+
+// Enum value maps for JobLifecycleStatus.
+var (
+	JobLifecycleStatus_name = map[int32]string{
+		0: "JOB_LIFECYCLE_STATUS_UNSPECIFIED",
+		1: "JOB_LIFECYCLE_STATUS_PENDING",
+		2: "JOB_LIFECYCLE_STATUS_ASSIGNED",
+		3: "JOB_LIFECYCLE_STATUS_RUNNING",
+		4: "JOB_LIFECYCLE_STATUS_COMPLETED",
+		5: "JOB_LIFECYCLE_STATUS_FAILED",
+	}
+	JobLifecycleStatus_value = map[string]int32{
+		"JOB_LIFECYCLE_STATUS_UNSPECIFIED": 0,
+		"JOB_LIFECYCLE_STATUS_PENDING":     1,
+		"JOB_LIFECYCLE_STATUS_ASSIGNED":    2,
+		"JOB_LIFECYCLE_STATUS_RUNNING":     3,
+		"JOB_LIFECYCLE_STATUS_COMPLETED":   4,
+		"JOB_LIFECYCLE_STATUS_FAILED":      5,
+	}
+)
+
+func (x JobLifecycleStatus) Enum() *JobLifecycleStatus {
+	p := new(JobLifecycleStatus)
+	*p = x
+	return p
+}
+
+func (x JobLifecycleStatus) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (JobLifecycleStatus) Descriptor() protoreflect.EnumDescriptor {
+	return file_worker_proto_enumTypes[0].Descriptor()
+}
+
+func (JobLifecycleStatus) Type() protoreflect.EnumType {
+	return &file_worker_proto_enumTypes[0]
+}
+
+func (x JobLifecycleStatus) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use JobLifecycleStatus.Descriptor instead.
+func (JobLifecycleStatus) EnumDescriptor() ([]byte, []int) {
+	return file_worker_proto_rawDescGZIP(), []int{0}
+}
+
+type WorkerLifecycleStatus int32
+
+const (
+	WorkerLifecycleStatus_WORKER_LIFECYCLE_STATUS_UNSPECIFIED WorkerLifecycleStatus = 0
+	WorkerLifecycleStatus_WORKER_LIFECYCLE_STATUS_AVAILABLE   WorkerLifecycleStatus = 1
+	WorkerLifecycleStatus_WORKER_LIFECYCLE_STATUS_BUSY        WorkerLifecycleStatus = 2
+	WorkerLifecycleStatus_WORKER_LIFECYCLE_STATUS_OFFLINE     WorkerLifecycleStatus = 3
+)
+
+// Enum value maps for WorkerLifecycleStatus.
+var (
+	WorkerLifecycleStatus_name = map[int32]string{
+		0: "WORKER_LIFECYCLE_STATUS_UNSPECIFIED",
+		1: "WORKER_LIFECYCLE_STATUS_AVAILABLE",
+		2: "WORKER_LIFECYCLE_STATUS_BUSY",
+		3: "WORKER_LIFECYCLE_STATUS_OFFLINE",
+	}
+	WorkerLifecycleStatus_value = map[string]int32{
+		"WORKER_LIFECYCLE_STATUS_UNSPECIFIED": 0,
+		"WORKER_LIFECYCLE_STATUS_AVAILABLE":   1,
+		"WORKER_LIFECYCLE_STATUS_BUSY":        2,
+		"WORKER_LIFECYCLE_STATUS_OFFLINE":     3,
+	}
+)
+
+func (x WorkerLifecycleStatus) Enum() *WorkerLifecycleStatus {
+	p := new(WorkerLifecycleStatus)
+	*p = x
+	return p
+}
+
+func (x WorkerLifecycleStatus) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (WorkerLifecycleStatus) Descriptor() protoreflect.EnumDescriptor {
+	return file_worker_proto_enumTypes[1].Descriptor()
+}
+
+func (WorkerLifecycleStatus) Type() protoreflect.EnumType {
+	return &file_worker_proto_enumTypes[1]
+}
+
+func (x WorkerLifecycleStatus) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use WorkerLifecycleStatus.Descriptor instead.
+func (WorkerLifecycleStatus) EnumDescriptor() ([]byte, []int) {
+	return file_worker_proto_rawDescGZIP(), []int{1}
+}
+
+type AssignmentLifecycleStatus int32
+
+const (
+	AssignmentLifecycleStatus_ASSIGNMENT_LIFECYCLE_STATUS_UNSPECIFIED AssignmentLifecycleStatus = 0
+	AssignmentLifecycleStatus_ASSIGNMENT_LIFECYCLE_STATUS_ASSIGNED    AssignmentLifecycleStatus = 1
+	AssignmentLifecycleStatus_ASSIGNMENT_LIFECYCLE_STATUS_RUNNING     AssignmentLifecycleStatus = 2
+)
+
+// Enum value maps for AssignmentLifecycleStatus.
+var (
+	AssignmentLifecycleStatus_name = map[int32]string{
+		0: "ASSIGNMENT_LIFECYCLE_STATUS_UNSPECIFIED",
+		1: "ASSIGNMENT_LIFECYCLE_STATUS_ASSIGNED",
+		2: "ASSIGNMENT_LIFECYCLE_STATUS_RUNNING",
+	}
+	AssignmentLifecycleStatus_value = map[string]int32{
+		"ASSIGNMENT_LIFECYCLE_STATUS_UNSPECIFIED": 0,
+		"ASSIGNMENT_LIFECYCLE_STATUS_ASSIGNED":    1,
+		"ASSIGNMENT_LIFECYCLE_STATUS_RUNNING":     2,
+	}
+)
+
+func (x AssignmentLifecycleStatus) Enum() *AssignmentLifecycleStatus {
+	p := new(AssignmentLifecycleStatus)
+	*p = x
+	return p
+}
+
+func (x AssignmentLifecycleStatus) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (AssignmentLifecycleStatus) Descriptor() protoreflect.EnumDescriptor {
+	return file_worker_proto_enumTypes[2].Descriptor()
+}
+
+func (AssignmentLifecycleStatus) Type() protoreflect.EnumType {
+	return &file_worker_proto_enumTypes[2]
+}
+
+func (x AssignmentLifecycleStatus) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use AssignmentLifecycleStatus.Descriptor instead.
+func (AssignmentLifecycleStatus) EnumDescriptor() ([]byte, []int) {
+	return file_worker_proto_rawDescGZIP(), []int{2}
+}
+
 // Lifecycle state of a job.
 type Status int32
 
@@ -67,11 +227,11 @@ func (x Status) String() string {
 }
 
 func (Status) Descriptor() protoreflect.EnumDescriptor {
-	return file_worker_proto_enumTypes[0].Descriptor()
+	return file_worker_proto_enumTypes[3].Descriptor()
 }
 
 func (Status) Type() protoreflect.EnumType {
-	return &file_worker_proto_enumTypes[0]
+	return &file_worker_proto_enumTypes[3]
 }
 
 func (x Status) Number() protoreflect.EnumNumber {
@@ -80,7 +240,751 @@ func (x Status) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use Status.Descriptor instead.
 func (Status) EnumDescriptor() ([]byte, []int) {
+	return file_worker_proto_rawDescGZIP(), []int{3}
+}
+
+type JobImage struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Ref           string                 `protobuf:"bytes,1,opt,name=ref,proto3" json:"ref,omitempty"`
+	SourceUrl     string                 `protobuf:"bytes,2,opt,name=source_url,json=sourceUrl,proto3" json:"source_url,omitempty"`
+	Hash          string                 `protobuf:"bytes,3,opt,name=hash,proto3" json:"hash,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *JobImage) Reset() {
+	*x = JobImage{}
+	mi := &file_worker_proto_msgTypes[0]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *JobImage) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*JobImage) ProtoMessage() {}
+
+func (x *JobImage) ProtoReflect() protoreflect.Message {
+	mi := &file_worker_proto_msgTypes[0]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use JobImage.ProtoReflect.Descriptor instead.
+func (*JobImage) Descriptor() ([]byte, []int) {
 	return file_worker_proto_rawDescGZIP(), []int{0}
+}
+
+func (x *JobImage) GetRef() string {
+	if x != nil {
+		return x.Ref
+	}
+	return ""
+}
+
+func (x *JobImage) GetSourceUrl() string {
+	if x != nil {
+		return x.SourceUrl
+	}
+	return ""
+}
+
+func (x *JobImage) GetHash() string {
+	if x != nil {
+		return x.Hash
+	}
+	return ""
+}
+
+type JobExecution struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Command       []string               `protobuf:"bytes,1,rep,name=command,proto3" json:"command,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *JobExecution) Reset() {
+	*x = JobExecution{}
+	mi := &file_worker_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *JobExecution) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*JobExecution) ProtoMessage() {}
+
+func (x *JobExecution) ProtoReflect() protoreflect.Message {
+	mi := &file_worker_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use JobExecution.ProtoReflect.Descriptor instead.
+func (*JobExecution) Descriptor() ([]byte, []int) {
+	return file_worker_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *JobExecution) GetCommand() []string {
+	if x != nil {
+		return x.Command
+	}
+	return nil
+}
+
+type JobTimeouts struct {
+	state               protoimpl.MessageState `protogen:"open.v1"`
+	MaxExecutionSeconds int32                  `protobuf:"varint,1,opt,name=max_execution_seconds,json=maxExecutionSeconds,proto3" json:"max_execution_seconds,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
+}
+
+func (x *JobTimeouts) Reset() {
+	*x = JobTimeouts{}
+	mi := &file_worker_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *JobTimeouts) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*JobTimeouts) ProtoMessage() {}
+
+func (x *JobTimeouts) ProtoReflect() protoreflect.Message {
+	mi := &file_worker_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use JobTimeouts.ProtoReflect.Descriptor instead.
+func (*JobTimeouts) Descriptor() ([]byte, []int) {
+	return file_worker_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *JobTimeouts) GetMaxExecutionSeconds() int32 {
+	if x != nil {
+		return x.MaxExecutionSeconds
+	}
+	return 0
+}
+
+type JobResultSchema struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Status        JobLifecycleStatus     `protobuf:"varint,1,opt,name=status,proto3,enum=compute.v1.JobLifecycleStatus" json:"status,omitempty"`
+	Output        string                 `protobuf:"bytes,2,opt,name=output,proto3" json:"output,omitempty"`
+	Error         string                 `protobuf:"bytes,3,opt,name=error,proto3" json:"error,omitempty"`
+	ExitCode      int32                  `protobuf:"varint,4,opt,name=exit_code,json=exitCode,proto3" json:"exit_code,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *JobResultSchema) Reset() {
+	*x = JobResultSchema{}
+	mi := &file_worker_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *JobResultSchema) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*JobResultSchema) ProtoMessage() {}
+
+func (x *JobResultSchema) ProtoReflect() protoreflect.Message {
+	mi := &file_worker_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use JobResultSchema.ProtoReflect.Descriptor instead.
+func (*JobResultSchema) Descriptor() ([]byte, []int) {
+	return file_worker_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *JobResultSchema) GetStatus() JobLifecycleStatus {
+	if x != nil {
+		return x.Status
+	}
+	return JobLifecycleStatus_JOB_LIFECYCLE_STATUS_UNSPECIFIED
+}
+
+func (x *JobResultSchema) GetOutput() string {
+	if x != nil {
+		return x.Output
+	}
+	return ""
+}
+
+func (x *JobResultSchema) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+func (x *JobResultSchema) GetExitCode() int32 {
+	if x != nil {
+		return x.ExitCode
+	}
+	return 0
+}
+
+type JobTimestamps struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	CreatedAt     int64                  `protobuf:"varint,1,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	AssignedAt    int64                  `protobuf:"varint,2,opt,name=assigned_at,json=assignedAt,proto3" json:"assigned_at,omitempty"`
+	StartedAt     int64                  `protobuf:"varint,3,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`
+	CompletedAt   int64                  `protobuf:"varint,4,opt,name=completed_at,json=completedAt,proto3" json:"completed_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *JobTimestamps) Reset() {
+	*x = JobTimestamps{}
+	mi := &file_worker_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *JobTimestamps) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*JobTimestamps) ProtoMessage() {}
+
+func (x *JobTimestamps) ProtoReflect() protoreflect.Message {
+	mi := &file_worker_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use JobTimestamps.ProtoReflect.Descriptor instead.
+func (*JobTimestamps) Descriptor() ([]byte, []int) {
+	return file_worker_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *JobTimestamps) GetCreatedAt() int64 {
+	if x != nil {
+		return x.CreatedAt
+	}
+	return 0
+}
+
+func (x *JobTimestamps) GetAssignedAt() int64 {
+	if x != nil {
+		return x.AssignedAt
+	}
+	return 0
+}
+
+func (x *JobTimestamps) GetStartedAt() int64 {
+	if x != nil {
+		return x.StartedAt
+	}
+	return 0
+}
+
+func (x *JobTimestamps) GetCompletedAt() int64 {
+	if x != nil {
+		return x.CompletedAt
+	}
+	return 0
+}
+
+type JobSchema struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Status        JobLifecycleStatus     `protobuf:"varint,2,opt,name=status,proto3,enum=compute.v1.JobLifecycleStatus" json:"status,omitempty"`
+	Image         *JobImage              `protobuf:"bytes,3,opt,name=image,proto3" json:"image,omitempty"`
+	Execution     *JobExecution          `protobuf:"bytes,4,opt,name=execution,proto3" json:"execution,omitempty"`
+	Timeouts      *JobTimeouts           `protobuf:"bytes,5,opt,name=timeouts,proto3" json:"timeouts,omitempty"`
+	Result        *JobResultSchema       `protobuf:"bytes,6,opt,name=result,proto3" json:"result,omitempty"`
+	Timestamps    *JobTimestamps         `protobuf:"bytes,7,opt,name=timestamps,proto3" json:"timestamps,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *JobSchema) Reset() {
+	*x = JobSchema{}
+	mi := &file_worker_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *JobSchema) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*JobSchema) ProtoMessage() {}
+
+func (x *JobSchema) ProtoReflect() protoreflect.Message {
+	mi := &file_worker_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use JobSchema.ProtoReflect.Descriptor instead.
+func (*JobSchema) Descriptor() ([]byte, []int) {
+	return file_worker_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *JobSchema) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *JobSchema) GetStatus() JobLifecycleStatus {
+	if x != nil {
+		return x.Status
+	}
+	return JobLifecycleStatus_JOB_LIFECYCLE_STATUS_UNSPECIFIED
+}
+
+func (x *JobSchema) GetImage() *JobImage {
+	if x != nil {
+		return x.Image
+	}
+	return nil
+}
+
+func (x *JobSchema) GetExecution() *JobExecution {
+	if x != nil {
+		return x.Execution
+	}
+	return nil
+}
+
+func (x *JobSchema) GetTimeouts() *JobTimeouts {
+	if x != nil {
+		return x.Timeouts
+	}
+	return nil
+}
+
+func (x *JobSchema) GetResult() *JobResultSchema {
+	if x != nil {
+		return x.Result
+	}
+	return nil
+}
+
+func (x *JobSchema) GetTimestamps() *JobTimestamps {
+	if x != nil {
+		return x.Timestamps
+	}
+	return nil
+}
+
+type WorkerResources struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	CpuCores      int32                  `protobuf:"varint,1,opt,name=cpu_cores,json=cpuCores,proto3" json:"cpu_cores,omitempty"`
+	MemoryMb      int32                  `protobuf:"varint,2,opt,name=memory_mb,json=memoryMb,proto3" json:"memory_mb,omitempty"`
+	Gpu           bool                   `protobuf:"varint,3,opt,name=gpu,proto3" json:"gpu,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WorkerResources) Reset() {
+	*x = WorkerResources{}
+	mi := &file_worker_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WorkerResources) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WorkerResources) ProtoMessage() {}
+
+func (x *WorkerResources) ProtoReflect() protoreflect.Message {
+	mi := &file_worker_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WorkerResources.ProtoReflect.Descriptor instead.
+func (*WorkerResources) Descriptor() ([]byte, []int) {
+	return file_worker_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *WorkerResources) GetCpuCores() int32 {
+	if x != nil {
+		return x.CpuCores
+	}
+	return 0
+}
+
+func (x *WorkerResources) GetMemoryMb() int32 {
+	if x != nil {
+		return x.MemoryMb
+	}
+	return 0
+}
+
+func (x *WorkerResources) GetGpu() bool {
+	if x != nil {
+		return x.Gpu
+	}
+	return false
+}
+
+type WorkerCurrentLoad struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	CpuUsed       int32                  `protobuf:"varint,1,opt,name=cpu_used,json=cpuUsed,proto3" json:"cpu_used,omitempty"`
+	MemoryUsed    int32                  `protobuf:"varint,2,opt,name=memory_used,json=memoryUsed,proto3" json:"memory_used,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WorkerCurrentLoad) Reset() {
+	*x = WorkerCurrentLoad{}
+	mi := &file_worker_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WorkerCurrentLoad) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WorkerCurrentLoad) ProtoMessage() {}
+
+func (x *WorkerCurrentLoad) ProtoReflect() protoreflect.Message {
+	mi := &file_worker_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WorkerCurrentLoad.ProtoReflect.Descriptor instead.
+func (*WorkerCurrentLoad) Descriptor() ([]byte, []int) {
+	return file_worker_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *WorkerCurrentLoad) GetCpuUsed() int32 {
+	if x != nil {
+		return x.CpuUsed
+	}
+	return 0
+}
+
+func (x *WorkerCurrentLoad) GetMemoryUsed() int32 {
+	if x != nil {
+		return x.MemoryUsed
+	}
+	return 0
+}
+
+type WorkerCapabilities struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Docker        bool                   `protobuf:"varint,1,opt,name=docker,proto3" json:"docker,omitempty"`
+	GpuSupported  bool                   `protobuf:"varint,2,opt,name=gpu_supported,json=gpuSupported,proto3" json:"gpu_supported,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WorkerCapabilities) Reset() {
+	*x = WorkerCapabilities{}
+	mi := &file_worker_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WorkerCapabilities) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WorkerCapabilities) ProtoMessage() {}
+
+func (x *WorkerCapabilities) ProtoReflect() protoreflect.Message {
+	mi := &file_worker_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WorkerCapabilities.ProtoReflect.Descriptor instead.
+func (*WorkerCapabilities) Descriptor() ([]byte, []int) {
+	return file_worker_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *WorkerCapabilities) GetDocker() bool {
+	if x != nil {
+		return x.Docker
+	}
+	return false
+}
+
+func (x *WorkerCapabilities) GetGpuSupported() bool {
+	if x != nil {
+		return x.GpuSupported
+	}
+	return false
+}
+
+type WorkerStats struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	JobsCompleted int32                  `protobuf:"varint,1,opt,name=jobs_completed,json=jobsCompleted,proto3" json:"jobs_completed,omitempty"`
+	JobsFailed    int32                  `protobuf:"varint,2,opt,name=jobs_failed,json=jobsFailed,proto3" json:"jobs_failed,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WorkerStats) Reset() {
+	*x = WorkerStats{}
+	mi := &file_worker_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WorkerStats) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WorkerStats) ProtoMessage() {}
+
+func (x *WorkerStats) ProtoReflect() protoreflect.Message {
+	mi := &file_worker_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WorkerStats.ProtoReflect.Descriptor instead.
+func (*WorkerStats) Descriptor() ([]byte, []int) {
+	return file_worker_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *WorkerStats) GetJobsCompleted() int32 {
+	if x != nil {
+		return x.JobsCompleted
+	}
+	return 0
+}
+
+func (x *WorkerStats) GetJobsFailed() int32 {
+	if x != nil {
+		return x.JobsFailed
+	}
+	return 0
+}
+
+type WorkerSchema struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Status        WorkerLifecycleStatus  `protobuf:"varint,2,opt,name=status,proto3,enum=compute.v1.WorkerLifecycleStatus" json:"status,omitempty"`
+	Resources     *WorkerResources       `protobuf:"bytes,3,opt,name=resources,proto3" json:"resources,omitempty"`
+	CurrentLoad   *WorkerCurrentLoad     `protobuf:"bytes,4,opt,name=current_load,json=currentLoad,proto3" json:"current_load,omitempty"`
+	Capabilities  *WorkerCapabilities    `protobuf:"bytes,5,opt,name=capabilities,proto3" json:"capabilities,omitempty"`
+	LastHeartbeat int64                  `protobuf:"varint,6,opt,name=last_heartbeat,json=lastHeartbeat,proto3" json:"last_heartbeat,omitempty"`
+	Stats         *WorkerStats           `protobuf:"bytes,7,opt,name=stats,proto3" json:"stats,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WorkerSchema) Reset() {
+	*x = WorkerSchema{}
+	mi := &file_worker_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WorkerSchema) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WorkerSchema) ProtoMessage() {}
+
+func (x *WorkerSchema) ProtoReflect() protoreflect.Message {
+	mi := &file_worker_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WorkerSchema.ProtoReflect.Descriptor instead.
+func (*WorkerSchema) Descriptor() ([]byte, []int) {
+	return file_worker_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *WorkerSchema) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *WorkerSchema) GetStatus() WorkerLifecycleStatus {
+	if x != nil {
+		return x.Status
+	}
+	return WorkerLifecycleStatus_WORKER_LIFECYCLE_STATUS_UNSPECIFIED
+}
+
+func (x *WorkerSchema) GetResources() *WorkerResources {
+	if x != nil {
+		return x.Resources
+	}
+	return nil
+}
+
+func (x *WorkerSchema) GetCurrentLoad() *WorkerCurrentLoad {
+	if x != nil {
+		return x.CurrentLoad
+	}
+	return nil
+}
+
+func (x *WorkerSchema) GetCapabilities() *WorkerCapabilities {
+	if x != nil {
+		return x.Capabilities
+	}
+	return nil
+}
+
+func (x *WorkerSchema) GetLastHeartbeat() int64 {
+	if x != nil {
+		return x.LastHeartbeat
+	}
+	return 0
+}
+
+func (x *WorkerSchema) GetStats() *WorkerStats {
+	if x != nil {
+		return x.Stats
+	}
+	return nil
+}
+
+type AssignmentSchema struct {
+	state         protoimpl.MessageState    `protogen:"open.v1"`
+	JobId         string                    `protobuf:"bytes,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
+	WorkerId      string                    `protobuf:"bytes,2,opt,name=worker_id,json=workerId,proto3" json:"worker_id,omitempty"`
+	Status        AssignmentLifecycleStatus `protobuf:"varint,3,opt,name=status,proto3,enum=compute.v1.AssignmentLifecycleStatus" json:"status,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AssignmentSchema) Reset() {
+	*x = AssignmentSchema{}
+	mi := &file_worker_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AssignmentSchema) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AssignmentSchema) ProtoMessage() {}
+
+func (x *AssignmentSchema) ProtoReflect() protoreflect.Message {
+	mi := &file_worker_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AssignmentSchema.ProtoReflect.Descriptor instead.
+func (*AssignmentSchema) Descriptor() ([]byte, []int) {
+	return file_worker_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *AssignmentSchema) GetJobId() string {
+	if x != nil {
+		return x.JobId
+	}
+	return ""
+}
+
+func (x *AssignmentSchema) GetWorkerId() string {
+	if x != nil {
+		return x.WorkerId
+	}
+	return ""
+}
+
+func (x *AssignmentSchema) GetStatus() AssignmentLifecycleStatus {
+	if x != nil {
+		return x.Status
+	}
+	return AssignmentLifecycleStatus_ASSIGNMENT_LIFECYCLE_STATUS_UNSPECIFIED
 }
 
 // Stable identifier for a registered worker node.
@@ -93,7 +997,7 @@ type WorkerID struct {
 
 func (x *WorkerID) Reset() {
 	*x = WorkerID{}
-	mi := &file_worker_proto_msgTypes[0]
+	mi := &file_worker_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -105,7 +1009,7 @@ func (x *WorkerID) String() string {
 func (*WorkerID) ProtoMessage() {}
 
 func (x *WorkerID) ProtoReflect() protoreflect.Message {
-	mi := &file_worker_proto_msgTypes[0]
+	mi := &file_worker_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -118,7 +1022,7 @@ func (x *WorkerID) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WorkerID.ProtoReflect.Descriptor instead.
 func (*WorkerID) Descriptor() ([]byte, []int) {
-	return file_worker_proto_rawDescGZIP(), []int{0}
+	return file_worker_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *WorkerID) GetValue() string {
@@ -138,7 +1042,7 @@ type JobID struct {
 
 func (x *JobID) Reset() {
 	*x = JobID{}
-	mi := &file_worker_proto_msgTypes[1]
+	mi := &file_worker_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -150,7 +1054,7 @@ func (x *JobID) String() string {
 func (*JobID) ProtoMessage() {}
 
 func (x *JobID) ProtoReflect() protoreflect.Message {
-	mi := &file_worker_proto_msgTypes[1]
+	mi := &file_worker_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -163,7 +1067,7 @@ func (x *JobID) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use JobID.ProtoReflect.Descriptor instead.
 func (*JobID) Descriptor() ([]byte, []int) {
-	return file_worker_proto_rawDescGZIP(), []int{1}
+	return file_worker_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *JobID) GetValue() string {
@@ -185,7 +1089,7 @@ type ResourceSpec struct {
 
 func (x *ResourceSpec) Reset() {
 	*x = ResourceSpec{}
-	mi := &file_worker_proto_msgTypes[2]
+	mi := &file_worker_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -197,7 +1101,7 @@ func (x *ResourceSpec) String() string {
 func (*ResourceSpec) ProtoMessage() {}
 
 func (x *ResourceSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_worker_proto_msgTypes[2]
+	mi := &file_worker_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -210,7 +1114,7 @@ func (x *ResourceSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResourceSpec.ProtoReflect.Descriptor instead.
 func (*ResourceSpec) Descriptor() ([]byte, []int) {
-	return file_worker_proto_rawDescGZIP(), []int{2}
+	return file_worker_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *ResourceSpec) GetCpuCores() int32 {
@@ -249,7 +1153,7 @@ type Job struct {
 
 func (x *Job) Reset() {
 	*x = Job{}
-	mi := &file_worker_proto_msgTypes[3]
+	mi := &file_worker_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -261,7 +1165,7 @@ func (x *Job) String() string {
 func (*Job) ProtoMessage() {}
 
 func (x *Job) ProtoReflect() protoreflect.Message {
-	mi := &file_worker_proto_msgTypes[3]
+	mi := &file_worker_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -274,7 +1178,7 @@ func (x *Job) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Job.ProtoReflect.Descriptor instead.
 func (*Job) Descriptor() ([]byte, []int) {
-	return file_worker_proto_rawDescGZIP(), []int{3}
+	return file_worker_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *Job) GetJobId() *JobID {
@@ -335,7 +1239,7 @@ type Result struct {
 
 func (x *Result) Reset() {
 	*x = Result{}
-	mi := &file_worker_proto_msgTypes[4]
+	mi := &file_worker_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -347,7 +1251,7 @@ func (x *Result) String() string {
 func (*Result) ProtoMessage() {}
 
 func (x *Result) ProtoReflect() protoreflect.Message {
-	mi := &file_worker_proto_msgTypes[4]
+	mi := &file_worker_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -360,7 +1264,7 @@ func (x *Result) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Result.ProtoReflect.Descriptor instead.
 func (*Result) Descriptor() ([]byte, []int) {
-	return file_worker_proto_rawDescGZIP(), []int{4}
+	return file_worker_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *Result) GetJobId() *JobID {
@@ -416,13 +1320,14 @@ type RegisterWorkerRequest struct {
 	state              protoimpl.MessageState `protogen:"open.v1"`
 	AvailableResources *ResourceSpec          `protobuf:"bytes,1,opt,name=available_resources,json=availableResources,proto3" json:"available_resources,omitempty"`
 	WorkerVersion      string                 `protobuf:"bytes,2,opt,name=worker_version,json=workerVersion,proto3" json:"worker_version,omitempty"`
+	Worker             *WorkerSchema          `protobuf:"bytes,3,opt,name=worker,proto3" json:"worker,omitempty"`
 	unknownFields      protoimpl.UnknownFields
 	sizeCache          protoimpl.SizeCache
 }
 
 func (x *RegisterWorkerRequest) Reset() {
 	*x = RegisterWorkerRequest{}
-	mi := &file_worker_proto_msgTypes[5]
+	mi := &file_worker_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -434,7 +1339,7 @@ func (x *RegisterWorkerRequest) String() string {
 func (*RegisterWorkerRequest) ProtoMessage() {}
 
 func (x *RegisterWorkerRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_worker_proto_msgTypes[5]
+	mi := &file_worker_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -447,7 +1352,7 @@ func (x *RegisterWorkerRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegisterWorkerRequest.ProtoReflect.Descriptor instead.
 func (*RegisterWorkerRequest) Descriptor() ([]byte, []int) {
-	return file_worker_proto_rawDescGZIP(), []int{5}
+	return file_worker_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *RegisterWorkerRequest) GetAvailableResources() *ResourceSpec {
@@ -464,6 +1369,13 @@ func (x *RegisterWorkerRequest) GetWorkerVersion() string {
 	return ""
 }
 
+func (x *RegisterWorkerRequest) GetWorker() *WorkerSchema {
+	if x != nil {
+		return x.Worker
+	}
+	return nil
+}
+
 type RegisterWorkerResponse struct {
 	state                    protoimpl.MessageState `protogen:"open.v1"`
 	WorkerId                 *WorkerID              `protobuf:"bytes,1,opt,name=worker_id,json=workerId,proto3" json:"worker_id,omitempty"`
@@ -474,7 +1386,7 @@ type RegisterWorkerResponse struct {
 
 func (x *RegisterWorkerResponse) Reset() {
 	*x = RegisterWorkerResponse{}
-	mi := &file_worker_proto_msgTypes[6]
+	mi := &file_worker_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -486,7 +1398,7 @@ func (x *RegisterWorkerResponse) String() string {
 func (*RegisterWorkerResponse) ProtoMessage() {}
 
 func (x *RegisterWorkerResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_worker_proto_msgTypes[6]
+	mi := &file_worker_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -499,7 +1411,7 @@ func (x *RegisterWorkerResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegisterWorkerResponse.ProtoReflect.Descriptor instead.
 func (*RegisterWorkerResponse) Descriptor() ([]byte, []int) {
-	return file_worker_proto_rawDescGZIP(), []int{6}
+	return file_worker_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *RegisterWorkerResponse) GetWorkerId() *WorkerID {
@@ -521,13 +1433,14 @@ type HeartbeatRequest struct {
 	WorkerId           *WorkerID              `protobuf:"bytes,1,opt,name=worker_id,json=workerId,proto3" json:"worker_id,omitempty"`
 	AvailableResources *ResourceSpec          `protobuf:"bytes,2,opt,name=available_resources,json=availableResources,proto3" json:"available_resources,omitempty"`
 	RunningJobs        []*JobID               `protobuf:"bytes,3,rep,name=running_jobs,json=runningJobs,proto3" json:"running_jobs,omitempty"`
+	CurrentLoad        *WorkerCurrentLoad     `protobuf:"bytes,4,opt,name=current_load,json=currentLoad,proto3" json:"current_load,omitempty"`
 	unknownFields      protoimpl.UnknownFields
 	sizeCache          protoimpl.SizeCache
 }
 
 func (x *HeartbeatRequest) Reset() {
 	*x = HeartbeatRequest{}
-	mi := &file_worker_proto_msgTypes[7]
+	mi := &file_worker_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -539,7 +1452,7 @@ func (x *HeartbeatRequest) String() string {
 func (*HeartbeatRequest) ProtoMessage() {}
 
 func (x *HeartbeatRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_worker_proto_msgTypes[7]
+	mi := &file_worker_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -552,7 +1465,7 @@ func (x *HeartbeatRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HeartbeatRequest.ProtoReflect.Descriptor instead.
 func (*HeartbeatRequest) Descriptor() ([]byte, []int) {
-	return file_worker_proto_rawDescGZIP(), []int{7}
+	return file_worker_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *HeartbeatRequest) GetWorkerId() *WorkerID {
@@ -576,6 +1489,13 @@ func (x *HeartbeatRequest) GetRunningJobs() []*JobID {
 	return nil
 }
 
+func (x *HeartbeatRequest) GetCurrentLoad() *WorkerCurrentLoad {
+	if x != nil {
+		return x.CurrentLoad
+	}
+	return nil
+}
+
 type HeartbeatResponse struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	Accepted       bool                   `protobuf:"varint,1,opt,name=accepted,proto3" json:"accepted,omitempty"`
@@ -586,7 +1506,7 @@ type HeartbeatResponse struct {
 
 func (x *HeartbeatResponse) Reset() {
 	*x = HeartbeatResponse{}
-	mi := &file_worker_proto_msgTypes[8]
+	mi := &file_worker_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -598,7 +1518,7 @@ func (x *HeartbeatResponse) String() string {
 func (*HeartbeatResponse) ProtoMessage() {}
 
 func (x *HeartbeatResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_worker_proto_msgTypes[8]
+	mi := &file_worker_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -611,7 +1531,7 @@ func (x *HeartbeatResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HeartbeatResponse.ProtoReflect.Descriptor instead.
 func (*HeartbeatResponse) Descriptor() ([]byte, []int) {
-	return file_worker_proto_rawDescGZIP(), []int{8}
+	return file_worker_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *HeartbeatResponse) GetAccepted() bool {
@@ -637,7 +1557,7 @@ type RequestJobRequest struct {
 
 func (x *RequestJobRequest) Reset() {
 	*x = RequestJobRequest{}
-	mi := &file_worker_proto_msgTypes[9]
+	mi := &file_worker_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -649,7 +1569,7 @@ func (x *RequestJobRequest) String() string {
 func (*RequestJobRequest) ProtoMessage() {}
 
 func (x *RequestJobRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_worker_proto_msgTypes[9]
+	mi := &file_worker_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -662,7 +1582,7 @@ func (x *RequestJobRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RequestJobRequest.ProtoReflect.Descriptor instead.
 func (*RequestJobRequest) Descriptor() ([]byte, []int) {
-	return file_worker_proto_rawDescGZIP(), []int{9}
+	return file_worker_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *RequestJobRequest) GetWorkerId() *WorkerID {
@@ -676,13 +1596,15 @@ type RequestJobResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	HasJob        bool                   `protobuf:"varint,1,opt,name=has_job,json=hasJob,proto3" json:"has_job,omitempty"`
 	Job           *Job                   `protobuf:"bytes,2,opt,name=job,proto3" json:"job,omitempty"`
+	JobSchema     *JobSchema             `protobuf:"bytes,3,opt,name=job_schema,json=jobSchema,proto3" json:"job_schema,omitempty"`
+	Assignment    *AssignmentSchema      `protobuf:"bytes,4,opt,name=assignment,proto3" json:"assignment,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *RequestJobResponse) Reset() {
 	*x = RequestJobResponse{}
-	mi := &file_worker_proto_msgTypes[10]
+	mi := &file_worker_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -694,7 +1616,7 @@ func (x *RequestJobResponse) String() string {
 func (*RequestJobResponse) ProtoMessage() {}
 
 func (x *RequestJobResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_worker_proto_msgTypes[10]
+	mi := &file_worker_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -707,7 +1629,7 @@ func (x *RequestJobResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RequestJobResponse.ProtoReflect.Descriptor instead.
 func (*RequestJobResponse) Descriptor() ([]byte, []int) {
-	return file_worker_proto_rawDescGZIP(), []int{10}
+	return file_worker_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *RequestJobResponse) GetHasJob() bool {
@@ -724,17 +1646,32 @@ func (x *RequestJobResponse) GetJob() *Job {
 	return nil
 }
 
+func (x *RequestJobResponse) GetJobSchema() *JobSchema {
+	if x != nil {
+		return x.JobSchema
+	}
+	return nil
+}
+
+func (x *RequestJobResponse) GetAssignment() *AssignmentSchema {
+	if x != nil {
+		return x.Assignment
+	}
+	return nil
+}
+
 type SubmitResultRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	WorkerId      *WorkerID              `protobuf:"bytes,1,opt,name=worker_id,json=workerId,proto3" json:"worker_id,omitempty"`
 	Result        *Result                `protobuf:"bytes,2,opt,name=result,proto3" json:"result,omitempty"`
+	ResultSchema  *JobResultSchema       `protobuf:"bytes,3,opt,name=result_schema,json=resultSchema,proto3" json:"result_schema,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *SubmitResultRequest) Reset() {
 	*x = SubmitResultRequest{}
-	mi := &file_worker_proto_msgTypes[11]
+	mi := &file_worker_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -746,7 +1683,7 @@ func (x *SubmitResultRequest) String() string {
 func (*SubmitResultRequest) ProtoMessage() {}
 
 func (x *SubmitResultRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_worker_proto_msgTypes[11]
+	mi := &file_worker_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -759,7 +1696,7 @@ func (x *SubmitResultRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SubmitResultRequest.ProtoReflect.Descriptor instead.
 func (*SubmitResultRequest) Descriptor() ([]byte, []int) {
-	return file_worker_proto_rawDescGZIP(), []int{11}
+	return file_worker_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *SubmitResultRequest) GetWorkerId() *WorkerID {
@@ -776,6 +1713,13 @@ func (x *SubmitResultRequest) GetResult() *Result {
 	return nil
 }
 
+func (x *SubmitResultRequest) GetResultSchema() *JobResultSchema {
+	if x != nil {
+		return x.ResultSchema
+	}
+	return nil
+}
+
 type SubmitResultResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Accepted      bool                   `protobuf:"varint,1,opt,name=accepted,proto3" json:"accepted,omitempty"`
@@ -785,7 +1729,7 @@ type SubmitResultResponse struct {
 
 func (x *SubmitResultResponse) Reset() {
 	*x = SubmitResultResponse{}
-	mi := &file_worker_proto_msgTypes[12]
+	mi := &file_worker_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -797,7 +1741,7 @@ func (x *SubmitResultResponse) String() string {
 func (*SubmitResultResponse) ProtoMessage() {}
 
 func (x *SubmitResultResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_worker_proto_msgTypes[12]
+	mi := &file_worker_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -810,7 +1754,7 @@ func (x *SubmitResultResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SubmitResultResponse.ProtoReflect.Descriptor instead.
 func (*SubmitResultResponse) Descriptor() ([]byte, []int) {
-	return file_worker_proto_rawDescGZIP(), []int{12}
+	return file_worker_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *SubmitResultResponse) GetAccepted() bool {
@@ -825,7 +1769,66 @@ var File_worker_proto protoreflect.FileDescriptor
 const file_worker_proto_rawDesc = "" +
 	"\n" +
 	"\fworker.proto\x12\n" +
-	"compute.v1\" \n" +
+	"compute.v1\"O\n" +
+	"\bJobImage\x12\x10\n" +
+	"\x03ref\x18\x01 \x01(\tR\x03ref\x12\x1d\n" +
+	"\n" +
+	"source_url\x18\x02 \x01(\tR\tsourceUrl\x12\x12\n" +
+	"\x04hash\x18\x03 \x01(\tR\x04hash\"(\n" +
+	"\fJobExecution\x12\x18\n" +
+	"\acommand\x18\x01 \x03(\tR\acommand\"A\n" +
+	"\vJobTimeouts\x122\n" +
+	"\x15max_execution_seconds\x18\x01 \x01(\x05R\x13maxExecutionSeconds\"\x94\x01\n" +
+	"\x0fJobResultSchema\x126\n" +
+	"\x06status\x18\x01 \x01(\x0e2\x1e.compute.v1.JobLifecycleStatusR\x06status\x12\x16\n" +
+	"\x06output\x18\x02 \x01(\tR\x06output\x12\x14\n" +
+	"\x05error\x18\x03 \x01(\tR\x05error\x12\x1b\n" +
+	"\texit_code\x18\x04 \x01(\x05R\bexitCode\"\x91\x01\n" +
+	"\rJobTimestamps\x12\x1d\n" +
+	"\n" +
+	"created_at\x18\x01 \x01(\x03R\tcreatedAt\x12\x1f\n" +
+	"\vassigned_at\x18\x02 \x01(\x03R\n" +
+	"assignedAt\x12\x1d\n" +
+	"\n" +
+	"started_at\x18\x03 \x01(\x03R\tstartedAt\x12!\n" +
+	"\fcompleted_at\x18\x04 \x01(\x03R\vcompletedAt\"\xdc\x02\n" +
+	"\tJobSchema\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x126\n" +
+	"\x06status\x18\x02 \x01(\x0e2\x1e.compute.v1.JobLifecycleStatusR\x06status\x12*\n" +
+	"\x05image\x18\x03 \x01(\v2\x14.compute.v1.JobImageR\x05image\x126\n" +
+	"\texecution\x18\x04 \x01(\v2\x18.compute.v1.JobExecutionR\texecution\x123\n" +
+	"\btimeouts\x18\x05 \x01(\v2\x17.compute.v1.JobTimeoutsR\btimeouts\x123\n" +
+	"\x06result\x18\x06 \x01(\v2\x1b.compute.v1.JobResultSchemaR\x06result\x129\n" +
+	"\n" +
+	"timestamps\x18\a \x01(\v2\x19.compute.v1.JobTimestampsR\n" +
+	"timestamps\"]\n" +
+	"\x0fWorkerResources\x12\x1b\n" +
+	"\tcpu_cores\x18\x01 \x01(\x05R\bcpuCores\x12\x1b\n" +
+	"\tmemory_mb\x18\x02 \x01(\x05R\bmemoryMb\x12\x10\n" +
+	"\x03gpu\x18\x03 \x01(\bR\x03gpu\"O\n" +
+	"\x11WorkerCurrentLoad\x12\x19\n" +
+	"\bcpu_used\x18\x01 \x01(\x05R\acpuUsed\x12\x1f\n" +
+	"\vmemory_used\x18\x02 \x01(\x05R\n" +
+	"memoryUsed\"Q\n" +
+	"\x12WorkerCapabilities\x12\x16\n" +
+	"\x06docker\x18\x01 \x01(\bR\x06docker\x12#\n" +
+	"\rgpu_supported\x18\x02 \x01(\bR\fgpuSupported\"U\n" +
+	"\vWorkerStats\x12%\n" +
+	"\x0ejobs_completed\x18\x01 \x01(\x05R\rjobsCompleted\x12\x1f\n" +
+	"\vjobs_failed\x18\x02 \x01(\x05R\n" +
+	"jobsFailed\"\xf0\x02\n" +
+	"\fWorkerSchema\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x129\n" +
+	"\x06status\x18\x02 \x01(\x0e2!.compute.v1.WorkerLifecycleStatusR\x06status\x129\n" +
+	"\tresources\x18\x03 \x01(\v2\x1b.compute.v1.WorkerResourcesR\tresources\x12@\n" +
+	"\fcurrent_load\x18\x04 \x01(\v2\x1d.compute.v1.WorkerCurrentLoadR\vcurrentLoad\x12B\n" +
+	"\fcapabilities\x18\x05 \x01(\v2\x1e.compute.v1.WorkerCapabilitiesR\fcapabilities\x12%\n" +
+	"\x0elast_heartbeat\x18\x06 \x01(\x03R\rlastHeartbeat\x12-\n" +
+	"\x05stats\x18\a \x01(\v2\x17.compute.v1.WorkerStatsR\x05stats\"\x85\x01\n" +
+	"\x10AssignmentSchema\x12\x15\n" +
+	"\x06job_id\x18\x01 \x01(\tR\x05jobId\x12\x1b\n" +
+	"\tworker_id\x18\x02 \x01(\tR\bworkerId\x12=\n" +
+	"\x06status\x18\x03 \x01(\x0e2%.compute.v1.AssignmentLifecycleStatusR\x06status\" \n" +
 	"\bWorkerID\x12\x14\n" +
 	"\x05value\x18\x01 \x01(\tR\x05value\"\x1d\n" +
 	"\x05JobID\x12\x14\n" +
@@ -849,30 +1852,54 @@ const file_worker_proto_rawDesc = "" +
 	"\x0estderr_excerpt\x18\x05 \x01(\tR\rstderrExcerpt\x12\x1d\n" +
 	"\n" +
 	"output_uri\x18\x06 \x01(\tR\toutputUri\x12(\n" +
-	"\x10finished_at_unix\x18\a \x01(\x03R\x0efinishedAtUnix\"\x89\x01\n" +
+	"\x10finished_at_unix\x18\a \x01(\x03R\x0efinishedAtUnix\"\xbb\x01\n" +
 	"\x15RegisterWorkerRequest\x12I\n" +
 	"\x13available_resources\x18\x01 \x01(\v2\x18.compute.v1.ResourceSpecR\x12availableResources\x12%\n" +
-	"\x0eworker_version\x18\x02 \x01(\tR\rworkerVersion\"\x89\x01\n" +
+	"\x0eworker_version\x18\x02 \x01(\tR\rworkerVersion\x120\n" +
+	"\x06worker\x18\x03 \x01(\v2\x18.compute.v1.WorkerSchemaR\x06worker\"\x89\x01\n" +
 	"\x16RegisterWorkerResponse\x121\n" +
 	"\tworker_id\x18\x01 \x01(\v2\x14.compute.v1.WorkerIDR\bworkerId\x12<\n" +
-	"\x1aheartbeat_interval_seconds\x18\x02 \x01(\x05R\x18heartbeatIntervalSeconds\"\xc6\x01\n" +
+	"\x1aheartbeat_interval_seconds\x18\x02 \x01(\x05R\x18heartbeatIntervalSeconds\"\x88\x02\n" +
 	"\x10HeartbeatRequest\x121\n" +
 	"\tworker_id\x18\x01 \x01(\v2\x14.compute.v1.WorkerIDR\bworkerId\x12I\n" +
 	"\x13available_resources\x18\x02 \x01(\v2\x18.compute.v1.ResourceSpecR\x12availableResources\x124\n" +
-	"\frunning_jobs\x18\x03 \x03(\v2\x11.compute.v1.JobIDR\vrunningJobs\"Y\n" +
+	"\frunning_jobs\x18\x03 \x03(\v2\x11.compute.v1.JobIDR\vrunningJobs\x12@\n" +
+	"\fcurrent_load\x18\x04 \x01(\v2\x1d.compute.v1.WorkerCurrentLoadR\vcurrentLoad\"Y\n" +
 	"\x11HeartbeatResponse\x12\x1a\n" +
 	"\baccepted\x18\x01 \x01(\bR\baccepted\x12(\n" +
 	"\x10server_time_unix\x18\x02 \x01(\x03R\x0eserverTimeUnix\"F\n" +
 	"\x11RequestJobRequest\x121\n" +
-	"\tworker_id\x18\x01 \x01(\v2\x14.compute.v1.WorkerIDR\bworkerId\"P\n" +
+	"\tworker_id\x18\x01 \x01(\v2\x14.compute.v1.WorkerIDR\bworkerId\"\xc4\x01\n" +
 	"\x12RequestJobResponse\x12\x17\n" +
 	"\ahas_job\x18\x01 \x01(\bR\x06hasJob\x12!\n" +
-	"\x03job\x18\x02 \x01(\v2\x0f.compute.v1.JobR\x03job\"t\n" +
+	"\x03job\x18\x02 \x01(\v2\x0f.compute.v1.JobR\x03job\x124\n" +
+	"\n" +
+	"job_schema\x18\x03 \x01(\v2\x15.compute.v1.JobSchemaR\tjobSchema\x12<\n" +
+	"\n" +
+	"assignment\x18\x04 \x01(\v2\x1c.compute.v1.AssignmentSchemaR\n" +
+	"assignment\"\xb6\x01\n" +
 	"\x13SubmitResultRequest\x121\n" +
 	"\tworker_id\x18\x01 \x01(\v2\x14.compute.v1.WorkerIDR\bworkerId\x12*\n" +
-	"\x06result\x18\x02 \x01(\v2\x12.compute.v1.ResultR\x06result\"2\n" +
+	"\x06result\x18\x02 \x01(\v2\x12.compute.v1.ResultR\x06result\x12@\n" +
+	"\rresult_schema\x18\x03 \x01(\v2\x1b.compute.v1.JobResultSchemaR\fresultSchema\"2\n" +
 	"\x14SubmitResultResponse\x12\x1a\n" +
-	"\baccepted\x18\x01 \x01(\bR\baccepted*\x9a\x01\n" +
+	"\baccepted\x18\x01 \x01(\bR\baccepted*\xe6\x01\n" +
+	"\x12JobLifecycleStatus\x12$\n" +
+	" JOB_LIFECYCLE_STATUS_UNSPECIFIED\x10\x00\x12 \n" +
+	"\x1cJOB_LIFECYCLE_STATUS_PENDING\x10\x01\x12!\n" +
+	"\x1dJOB_LIFECYCLE_STATUS_ASSIGNED\x10\x02\x12 \n" +
+	"\x1cJOB_LIFECYCLE_STATUS_RUNNING\x10\x03\x12\"\n" +
+	"\x1eJOB_LIFECYCLE_STATUS_COMPLETED\x10\x04\x12\x1f\n" +
+	"\x1bJOB_LIFECYCLE_STATUS_FAILED\x10\x05*\xae\x01\n" +
+	"\x15WorkerLifecycleStatus\x12'\n" +
+	"#WORKER_LIFECYCLE_STATUS_UNSPECIFIED\x10\x00\x12%\n" +
+	"!WORKER_LIFECYCLE_STATUS_AVAILABLE\x10\x01\x12 \n" +
+	"\x1cWORKER_LIFECYCLE_STATUS_BUSY\x10\x02\x12#\n" +
+	"\x1fWORKER_LIFECYCLE_STATUS_OFFLINE\x10\x03*\x9b\x01\n" +
+	"\x19AssignmentLifecycleStatus\x12+\n" +
+	"'ASSIGNMENT_LIFECYCLE_STATUS_UNSPECIFIED\x10\x00\x12(\n" +
+	"$ASSIGNMENT_LIFECYCLE_STATUS_ASSIGNED\x10\x01\x12'\n" +
+	"#ASSIGNMENT_LIFECYCLE_STATUS_RUNNING\x10\x02*\x9a\x01\n" +
 	"\x06Status\x12\x16\n" +
 	"\x12STATUS_UNSPECIFIED\x10\x00\x12\x11\n" +
 	"\rSTATUS_QUEUED\x10\x01\x12\x13\n" +
@@ -900,52 +1927,85 @@ func file_worker_proto_rawDescGZIP() []byte {
 	return file_worker_proto_rawDescData
 }
 
-var file_worker_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_worker_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
+var file_worker_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
+var file_worker_proto_msgTypes = make([]protoimpl.MessageInfo, 25)
 var file_worker_proto_goTypes = []any{
-	(Status)(0),                    // 0: compute.v1.Status
-	(*WorkerID)(nil),               // 1: compute.v1.WorkerID
-	(*JobID)(nil),                  // 2: compute.v1.JobID
-	(*ResourceSpec)(nil),           // 3: compute.v1.ResourceSpec
-	(*Job)(nil),                    // 4: compute.v1.Job
-	(*Result)(nil),                 // 5: compute.v1.Result
-	(*RegisterWorkerRequest)(nil),  // 6: compute.v1.RegisterWorkerRequest
-	(*RegisterWorkerResponse)(nil), // 7: compute.v1.RegisterWorkerResponse
-	(*HeartbeatRequest)(nil),       // 8: compute.v1.HeartbeatRequest
-	(*HeartbeatResponse)(nil),      // 9: compute.v1.HeartbeatResponse
-	(*RequestJobRequest)(nil),      // 10: compute.v1.RequestJobRequest
-	(*RequestJobResponse)(nil),     // 11: compute.v1.RequestJobResponse
-	(*SubmitResultRequest)(nil),    // 12: compute.v1.SubmitResultRequest
-	(*SubmitResultResponse)(nil),   // 13: compute.v1.SubmitResultResponse
+	(JobLifecycleStatus)(0),        // 0: compute.v1.JobLifecycleStatus
+	(WorkerLifecycleStatus)(0),     // 1: compute.v1.WorkerLifecycleStatus
+	(AssignmentLifecycleStatus)(0), // 2: compute.v1.AssignmentLifecycleStatus
+	(Status)(0),                    // 3: compute.v1.Status
+	(*JobImage)(nil),               // 4: compute.v1.JobImage
+	(*JobExecution)(nil),           // 5: compute.v1.JobExecution
+	(*JobTimeouts)(nil),            // 6: compute.v1.JobTimeouts
+	(*JobResultSchema)(nil),        // 7: compute.v1.JobResultSchema
+	(*JobTimestamps)(nil),          // 8: compute.v1.JobTimestamps
+	(*JobSchema)(nil),              // 9: compute.v1.JobSchema
+	(*WorkerResources)(nil),        // 10: compute.v1.WorkerResources
+	(*WorkerCurrentLoad)(nil),      // 11: compute.v1.WorkerCurrentLoad
+	(*WorkerCapabilities)(nil),     // 12: compute.v1.WorkerCapabilities
+	(*WorkerStats)(nil),            // 13: compute.v1.WorkerStats
+	(*WorkerSchema)(nil),           // 14: compute.v1.WorkerSchema
+	(*AssignmentSchema)(nil),       // 15: compute.v1.AssignmentSchema
+	(*WorkerID)(nil),               // 16: compute.v1.WorkerID
+	(*JobID)(nil),                  // 17: compute.v1.JobID
+	(*ResourceSpec)(nil),           // 18: compute.v1.ResourceSpec
+	(*Job)(nil),                    // 19: compute.v1.Job
+	(*Result)(nil),                 // 20: compute.v1.Result
+	(*RegisterWorkerRequest)(nil),  // 21: compute.v1.RegisterWorkerRequest
+	(*RegisterWorkerResponse)(nil), // 22: compute.v1.RegisterWorkerResponse
+	(*HeartbeatRequest)(nil),       // 23: compute.v1.HeartbeatRequest
+	(*HeartbeatResponse)(nil),      // 24: compute.v1.HeartbeatResponse
+	(*RequestJobRequest)(nil),      // 25: compute.v1.RequestJobRequest
+	(*RequestJobResponse)(nil),     // 26: compute.v1.RequestJobResponse
+	(*SubmitResultRequest)(nil),    // 27: compute.v1.SubmitResultRequest
+	(*SubmitResultResponse)(nil),   // 28: compute.v1.SubmitResultResponse
 }
 var file_worker_proto_depIdxs = []int32{
-	2,  // 0: compute.v1.Job.job_id:type_name -> compute.v1.JobID
-	3,  // 1: compute.v1.Job.required_resources:type_name -> compute.v1.ResourceSpec
-	0,  // 2: compute.v1.Job.status:type_name -> compute.v1.Status
-	2,  // 3: compute.v1.Result.job_id:type_name -> compute.v1.JobID
-	0,  // 4: compute.v1.Result.status:type_name -> compute.v1.Status
-	3,  // 5: compute.v1.RegisterWorkerRequest.available_resources:type_name -> compute.v1.ResourceSpec
-	1,  // 6: compute.v1.RegisterWorkerResponse.worker_id:type_name -> compute.v1.WorkerID
-	1,  // 7: compute.v1.HeartbeatRequest.worker_id:type_name -> compute.v1.WorkerID
-	3,  // 8: compute.v1.HeartbeatRequest.available_resources:type_name -> compute.v1.ResourceSpec
-	2,  // 9: compute.v1.HeartbeatRequest.running_jobs:type_name -> compute.v1.JobID
-	1,  // 10: compute.v1.RequestJobRequest.worker_id:type_name -> compute.v1.WorkerID
-	4,  // 11: compute.v1.RequestJobResponse.job:type_name -> compute.v1.Job
-	1,  // 12: compute.v1.SubmitResultRequest.worker_id:type_name -> compute.v1.WorkerID
-	5,  // 13: compute.v1.SubmitResultRequest.result:type_name -> compute.v1.Result
-	6,  // 14: compute.v1.WorkerService.RegisterWorker:input_type -> compute.v1.RegisterWorkerRequest
-	8,  // 15: compute.v1.WorkerService.Heartbeat:input_type -> compute.v1.HeartbeatRequest
-	10, // 16: compute.v1.WorkerService.RequestJob:input_type -> compute.v1.RequestJobRequest
-	12, // 17: compute.v1.WorkerService.SubmitResult:input_type -> compute.v1.SubmitResultRequest
-	7,  // 18: compute.v1.WorkerService.RegisterWorker:output_type -> compute.v1.RegisterWorkerResponse
-	9,  // 19: compute.v1.WorkerService.Heartbeat:output_type -> compute.v1.HeartbeatResponse
-	11, // 20: compute.v1.WorkerService.RequestJob:output_type -> compute.v1.RequestJobResponse
-	13, // 21: compute.v1.WorkerService.SubmitResult:output_type -> compute.v1.SubmitResultResponse
-	18, // [18:22] is the sub-list for method output_type
-	14, // [14:18] is the sub-list for method input_type
-	14, // [14:14] is the sub-list for extension type_name
-	14, // [14:14] is the sub-list for extension extendee
-	0,  // [0:14] is the sub-list for field type_name
+	0,  // 0: compute.v1.JobResultSchema.status:type_name -> compute.v1.JobLifecycleStatus
+	0,  // 1: compute.v1.JobSchema.status:type_name -> compute.v1.JobLifecycleStatus
+	4,  // 2: compute.v1.JobSchema.image:type_name -> compute.v1.JobImage
+	5,  // 3: compute.v1.JobSchema.execution:type_name -> compute.v1.JobExecution
+	6,  // 4: compute.v1.JobSchema.timeouts:type_name -> compute.v1.JobTimeouts
+	7,  // 5: compute.v1.JobSchema.result:type_name -> compute.v1.JobResultSchema
+	8,  // 6: compute.v1.JobSchema.timestamps:type_name -> compute.v1.JobTimestamps
+	1,  // 7: compute.v1.WorkerSchema.status:type_name -> compute.v1.WorkerLifecycleStatus
+	10, // 8: compute.v1.WorkerSchema.resources:type_name -> compute.v1.WorkerResources
+	11, // 9: compute.v1.WorkerSchema.current_load:type_name -> compute.v1.WorkerCurrentLoad
+	12, // 10: compute.v1.WorkerSchema.capabilities:type_name -> compute.v1.WorkerCapabilities
+	13, // 11: compute.v1.WorkerSchema.stats:type_name -> compute.v1.WorkerStats
+	2,  // 12: compute.v1.AssignmentSchema.status:type_name -> compute.v1.AssignmentLifecycleStatus
+	17, // 13: compute.v1.Job.job_id:type_name -> compute.v1.JobID
+	18, // 14: compute.v1.Job.required_resources:type_name -> compute.v1.ResourceSpec
+	3,  // 15: compute.v1.Job.status:type_name -> compute.v1.Status
+	17, // 16: compute.v1.Result.job_id:type_name -> compute.v1.JobID
+	3,  // 17: compute.v1.Result.status:type_name -> compute.v1.Status
+	18, // 18: compute.v1.RegisterWorkerRequest.available_resources:type_name -> compute.v1.ResourceSpec
+	14, // 19: compute.v1.RegisterWorkerRequest.worker:type_name -> compute.v1.WorkerSchema
+	16, // 20: compute.v1.RegisterWorkerResponse.worker_id:type_name -> compute.v1.WorkerID
+	16, // 21: compute.v1.HeartbeatRequest.worker_id:type_name -> compute.v1.WorkerID
+	18, // 22: compute.v1.HeartbeatRequest.available_resources:type_name -> compute.v1.ResourceSpec
+	17, // 23: compute.v1.HeartbeatRequest.running_jobs:type_name -> compute.v1.JobID
+	11, // 24: compute.v1.HeartbeatRequest.current_load:type_name -> compute.v1.WorkerCurrentLoad
+	16, // 25: compute.v1.RequestJobRequest.worker_id:type_name -> compute.v1.WorkerID
+	19, // 26: compute.v1.RequestJobResponse.job:type_name -> compute.v1.Job
+	9,  // 27: compute.v1.RequestJobResponse.job_schema:type_name -> compute.v1.JobSchema
+	15, // 28: compute.v1.RequestJobResponse.assignment:type_name -> compute.v1.AssignmentSchema
+	16, // 29: compute.v1.SubmitResultRequest.worker_id:type_name -> compute.v1.WorkerID
+	20, // 30: compute.v1.SubmitResultRequest.result:type_name -> compute.v1.Result
+	7,  // 31: compute.v1.SubmitResultRequest.result_schema:type_name -> compute.v1.JobResultSchema
+	21, // 32: compute.v1.WorkerService.RegisterWorker:input_type -> compute.v1.RegisterWorkerRequest
+	23, // 33: compute.v1.WorkerService.Heartbeat:input_type -> compute.v1.HeartbeatRequest
+	25, // 34: compute.v1.WorkerService.RequestJob:input_type -> compute.v1.RequestJobRequest
+	27, // 35: compute.v1.WorkerService.SubmitResult:input_type -> compute.v1.SubmitResultRequest
+	22, // 36: compute.v1.WorkerService.RegisterWorker:output_type -> compute.v1.RegisterWorkerResponse
+	24, // 37: compute.v1.WorkerService.Heartbeat:output_type -> compute.v1.HeartbeatResponse
+	26, // 38: compute.v1.WorkerService.RequestJob:output_type -> compute.v1.RequestJobResponse
+	28, // 39: compute.v1.WorkerService.SubmitResult:output_type -> compute.v1.SubmitResultResponse
+	36, // [36:40] is the sub-list for method output_type
+	32, // [32:36] is the sub-list for method input_type
+	32, // [32:32] is the sub-list for extension type_name
+	32, // [32:32] is the sub-list for extension extendee
+	0,  // [0:32] is the sub-list for field type_name
 }
 
 func init() { file_worker_proto_init() }
@@ -958,8 +2018,8 @@ func file_worker_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_worker_proto_rawDesc), len(file_worker_proto_rawDesc)),
-			NumEnums:      1,
-			NumMessages:   13,
+			NumEnums:      4,
+			NumMessages:   25,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

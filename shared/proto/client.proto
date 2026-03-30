@@ -12,11 +12,13 @@ message SubmitJobRequest {
   ResourceSpec required_resources = 3;
   map<string, string> environment = 4;
   int32 max_runtime_seconds = 5;
+  JobSchema job = 6;
 }
 
 message SubmitJobResponse {
   JobID job_id = 1;
   Status status = 2;
+  JobLifecycleStatus job_status = 3;
 }
 
 message GetJobStatusRequest {
@@ -27,6 +29,8 @@ message GetJobStatusResponse {
   Status status = 1;
   string assigned_worker_id = 2;
   int64 updated_at_unix = 3;
+  AssignmentSchema assignment = 4;
+  JobLifecycleStatus job_status = 5;
 }
 
 message GetJobResultRequest {
@@ -37,6 +41,8 @@ message GetJobResultResponse {
   Status status = 1;
   bool result_available = 2;
   Result result = 3;
+  JobResultSchema result_schema = 4;
+  JobLifecycleStatus job_status = 5;
 }
 
 service ClientService {

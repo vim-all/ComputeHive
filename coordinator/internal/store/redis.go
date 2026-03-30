@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"time"
 
+	"crypto/tls"
+
 	pb "coordinator/pkg/pb"
 
 	"github.com/redis/go-redis/v9"
@@ -20,6 +22,7 @@ const (
 	JobStatusQueued    = "queued"
 	JobStatusRunning   = "running"
 	JobStatusCompleted = "completed"
+	JobStatusFailed    = "failed"
 )
 
 type WorkerRecord struct {
@@ -78,8 +81,17 @@ func jobWorkerKey(jobID string) string {
 	return "job_worker:" + jobID
 }
 
-func NewRedisClient(ctx context.Context, addr string) (*redis.Client, error) {
-	client := redis.NewClient(&redis.Options{Addr: addr})
+func NewRedisClient(ctx context.Context, addr, password string, db int, useTLS bool) (*redis.Client, error) {
+	opt := &redis.Options{
+		Addr:     addr,
+		Password: password,
+		DB:       db,
+	}
+	if useTLS {
+		opt.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	}
+
+	client := redis.NewClient(opt)
 
 	pingCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
@@ -90,6 +102,45 @@ func NewRedisClient(ctx context.Context, addr string) (*redis.Client, error) {
 	}
 
 	return client, nil
+}
+
+func ClaimNextQueuedJobForWorker(ctx context.Context, client *redis.Client, workerID string) (string, error) {
+	const script = `
+local queue_key = KEYS[1]
+local status_prefix = ARGV[1]
+local worker_prefix = ARGV[2]
+local worker_id = ARGV[3]
+local running_status = ARGV[4]
+
+local job_id = redis.call('LPOP', queue_key)
+if not job_id then
+  return ''
+end
+
+redis.call('SET', status_prefix .. job_id, running_status)
+redis.call('SET', worker_prefix .. job_id, worker_id)
+return job_id
+`
+
+	res, err := client.Eval(ctx, script, []string{jobQueueKey}, "job_status:", "job_worker:", workerID, JobStatusRunning).Result()
+	if err != nil {
+		return "", fmt.Errorf("claim next queued job for worker %s: %w", workerID, err)
+	}
+
+	if res == nil {
+		return "", nil
+	}
+
+	s, ok := res.(string)
+	if ok {
+		return s, nil
+	}
+
+	if b, ok := res.([]byte); ok {
+		return string(b), nil
+	}
+
+	return fmt.Sprint(res), nil
 }
 
 func SaveWorker(ctx context.Context, client *redis.Client, worker *WorkerRecord) error {
@@ -329,6 +380,39 @@ func SaveResult(ctx context.Context, client *redis.Client, result *ResultRecord)
 
 	if err := client.Set(ctx, resultKey(result.JobID), payload, 0).Err(); err != nil {
 		return fmt.Errorf("save result %s: %w", result.JobID, err)
+	}
+
+	return nil
+}
+
+func FinalizeJobWithResult(ctx context.Context, client *redis.Client, job *JobRecord, result *ResultRecord, terminalStatus string) error {
+	if job == nil {
+		return fmt.Errorf("finalize job: nil job")
+	}
+	if terminalStatus != JobStatusCompleted && terminalStatus != JobStatusFailed {
+		return fmt.Errorf("finalize job %s: invalid terminal status %s", job.ID, terminalStatus)
+	}
+
+	job.Status = terminalStatus
+	job.AssignedWorkerID = ""
+
+	jobPayload, err := json.Marshal(job)
+	if err != nil {
+		return fmt.Errorf("marshal finalized job %s: %w", job.ID, err)
+	}
+
+	resultPayload, err := json.Marshal(result)
+	if err != nil {
+		return fmt.Errorf("marshal finalized result %s: %w", job.ID, err)
+	}
+
+	pipe := client.TxPipeline()
+	pipe.Set(ctx, resultKey(job.ID), resultPayload, 0)
+	pipe.Set(ctx, jobStatusKey(job.ID), terminalStatus, 0)
+	pipe.Del(ctx, jobWorkerKey(job.ID))
+	pipe.Set(ctx, jobKey(job.ID), jobPayload, 0)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return fmt.Errorf("finalize job %s with result: %w", job.ID, err)
 	}
 
 	return nil

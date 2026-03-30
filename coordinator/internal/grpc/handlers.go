@@ -46,20 +46,22 @@ func (s *Server) Heartbeat(ctx context.Context, req *pb.HeartbeatRequest) (*pb.H
 		return nil, status.Error(codes.InvalidArgument, "worker_id is required")
 	}
 
-	if err := store.SetWorkerAlive(ctx, s.redis, workerID, 10*time.Second); err != nil {
-		return nil, status.Errorf(codes.Internal, "set worker heartbeat key: %v", err)
-	}
-
 	worker, err := store.GetWorker(ctx, s.redis, workerID)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "get worker: %v", err)
 	}
-	if worker != nil {
-		worker.AvailableResources = req.GetAvailableResources()
-		worker.LastHeartbeatUnix = time.Now().Unix()
-		if err := store.SaveWorker(ctx, s.redis, worker); err != nil {
-			return nil, status.Errorf(codes.Internal, "update worker heartbeat metadata: %v", err)
-		}
+	if worker == nil {
+		return nil, status.Error(codes.NotFound, "worker not registered")
+	}
+
+	if err := store.SetWorkerAlive(ctx, s.redis, workerID, 10*time.Second); err != nil {
+		return nil, status.Errorf(codes.Internal, "set worker heartbeat key: %v", err)
+	}
+
+	worker.AvailableResources = req.GetAvailableResources()
+	worker.LastHeartbeatUnix = time.Now().Unix()
+	if err := store.SaveWorker(ctx, s.redis, worker); err != nil {
+		return nil, status.Errorf(codes.Internal, "update worker heartbeat metadata: %v", err)
 	}
 
 	return &pb.HeartbeatResponse{
@@ -74,9 +76,25 @@ func (s *Server) RequestJob(ctx context.Context, req *pb.RequestJobRequest) (*pb
 		return nil, status.Error(codes.InvalidArgument, "worker_id is required")
 	}
 
-	jobID, err := store.PopQueuedJobID(ctx, s.redis)
+	worker, err := store.GetWorker(ctx, s.redis, workerID)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "pop job from queue: %v", err)
+		return nil, status.Errorf(codes.Internal, "get worker: %v", err)
+	}
+	if worker == nil {
+		return nil, status.Error(codes.NotFound, "worker not registered")
+	}
+
+	alive, err := store.IsWorkerAlive(ctx, s.redis, workerID)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "check worker heartbeat: %v", err)
+	}
+	if !alive {
+		return &pb.RequestJobResponse{HasJob: false}, nil
+	}
+
+	jobID, err := store.ClaimNextQueuedJobForWorker(ctx, s.redis, workerID)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "claim job from queue: %v", err)
 	}
 	if jobID == "" {
 		return &pb.RequestJobResponse{HasJob: false}, nil
@@ -87,38 +105,15 @@ func (s *Server) RequestJob(ctx context.Context, req *pb.RequestJobRequest) (*pb
 		return nil, status.Errorf(codes.Internal, "load job: %v", err)
 	}
 	if job == nil {
-		return &pb.RequestJobResponse{HasJob: false}, nil
-	}
-
-	pbJob := &pb.Job{
-		JobId:             &pb.JobID{Value: job.ID},
-		ContainerImage:    job.ContainerImage,
-		Command:           job.Command,
-		RequiredResources: job.RequiredResources,
-		CreatedAtUnix:     job.CreatedAtUnix,
-	}
-
-	pickedWorkerID, err := s.scheduler.PickWorker(ctx, pbJob)
-	if err != nil {
 		_ = store.RequeueJobID(ctx, s.redis, jobID)
-		return nil, status.Errorf(codes.Internal, "pick worker: %v", err)
-	}
-	if pickedWorkerID == "" {
-		if err := store.RequeueJobID(ctx, s.redis, jobID); err != nil {
-			return nil, status.Errorf(codes.Internal, "requeue job without eligible worker: %v", err)
-		}
-		return &pb.RequestJobResponse{HasJob: false}, nil
-	}
-	if pickedWorkerID != workerID {
-		if err := store.RequeueJobID(ctx, s.redis, jobID); err != nil {
-			return nil, status.Errorf(codes.Internal, "requeue non-turn job: %v", err)
-		}
 		return &pb.RequestJobResponse{HasJob: false}, nil
 	}
 
-	if err := s.scheduler.AssignJob(ctx, pbJob, workerID); err != nil {
+	job.Status = store.JobStatusRunning
+	job.AssignedWorkerID = workerID
+	if err := store.SaveJob(ctx, s.redis, job); err != nil {
 		_ = store.RequeueJobID(ctx, s.redis, jobID)
-		return nil, status.Errorf(codes.Internal, "assign job: %v", err)
+		return nil, status.Errorf(codes.Internal, "save running job metadata: %v", err)
 	}
 
 	log.Printf("job assigned: job_id=%s worker_id=%s", jobID, workerID)
@@ -126,12 +121,12 @@ func (s *Server) RequestJob(ctx context.Context, req *pb.RequestJobRequest) (*pb
 	return &pb.RequestJobResponse{
 		HasJob: true,
 		Job: &pb.Job{
-			JobId:             pbJob.JobId,
-			ContainerImage:    pbJob.ContainerImage,
-			Command:           pbJob.Command,
-			RequiredResources: pbJob.RequiredResources,
+			JobId:             &pb.JobID{Value: job.ID},
+			ContainerImage:    job.ContainerImage,
+			Command:           job.Command,
+			RequiredResources: job.RequiredResources,
 			Status:            pb.Status_STATUS_RUNNING,
-			CreatedAtUnix:     pbJob.CreatedAtUnix,
+			CreatedAtUnix:     job.CreatedAtUnix,
 		},
 	}, nil
 }
@@ -146,44 +141,80 @@ func (s *Server) SubmitResult(ctx context.Context, req *pb.SubmitResultRequest) 
 	}
 
 	jobID := req.GetResult().GetJobId().GetValue()
+
+	job, err := store.GetJob(ctx, s.redis, jobID)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "load job for result submission: %v", err)
+	}
+	if job == nil {
+		return nil, status.Error(codes.NotFound, "job not found")
+	}
+
+	assignedWorkerID, err := store.GetJobWorker(ctx, s.redis, jobID)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "get assigned worker: %v", err)
+	}
+	if assignedWorkerID == "" {
+		assignedWorkerID = job.AssignedWorkerID
+	}
+	if assignedWorkerID == "" {
+		return nil, status.Error(codes.FailedPrecondition, "job is not assigned")
+	}
+	if assignedWorkerID != workerID {
+		return nil, status.Error(codes.PermissionDenied, "worker is not assigned to this job")
+	}
+
+	currentStatus, err := store.GetJobStatus(ctx, s.redis, jobID)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "get job status: %v", err)
+	}
+	if currentStatus == "" {
+		return nil, status.Error(codes.NotFound, "job status not found")
+	}
+
+	incomingStatus := req.GetResult().GetStatus()
+	if incomingStatus != pb.Status_STATUS_RUNNING && incomingStatus != pb.Status_STATUS_SUCCEEDED && incomingStatus != pb.Status_STATUS_FAILED {
+		return nil, status.Error(codes.InvalidArgument, "result.status must be RUNNING, SUCCEEDED, or FAILED")
+	}
+
+	if incomingStatus != pb.Status_STATUS_RUNNING {
+		if currentStatus == store.JobStatusCompleted || currentStatus == store.JobStatusFailed {
+			return &pb.SubmitResultResponse{Accepted: true}, nil
+		}
+		if currentStatus != store.JobStatusRunning {
+			return nil, status.Error(codes.FailedPrecondition, "job is not in running state")
+		}
+	}
+
 	result := &store.ResultRecord{
 		JobID:          jobID,
 		WorkerID:       workerID,
-		ResultStatus:   req.GetResult().GetStatus().String(),
-		Partial:        req.GetResult().GetStatus() == pb.Status_STATUS_RUNNING,
+		ResultStatus:   incomingStatus.String(),
+		Partial:        incomingStatus == pb.Status_STATUS_RUNNING,
 		ExitCode:       req.GetResult().GetExitCode(),
 		StdoutExcerpt:  req.GetResult().GetStdoutExcerpt(),
 		StderrExcerpt:  req.GetResult().GetStderrExcerpt(),
 		OutputURI:      req.GetResult().GetOutputUri(),
 		FinishedAtUnix: req.GetResult().GetFinishedAtUnix(),
 	}
-
-	if err := store.SaveResult(ctx, s.redis, result); err != nil {
-		return nil, status.Errorf(codes.Internal, "save result: %v", err)
+	if !result.Partial && result.FinishedAtUnix == 0 {
+		result.FinishedAtUnix = time.Now().Unix()
 	}
 
 	if result.Partial {
+		if err := store.SaveResult(ctx, s.redis, result); err != nil {
+			return nil, status.Errorf(codes.Internal, "save result: %v", err)
+		}
 		log.Printf("partial result saved: job_id=%s worker_id=%s", jobID, workerID)
 		return &pb.SubmitResultResponse{Accepted: true}, nil
 	}
 
-	if err := store.SetJobStatus(ctx, s.redis, jobID, store.JobStatusCompleted); err != nil {
-		return nil, status.Errorf(codes.Internal, "set completed job status: %v", err)
+	terminalStatus := store.JobStatusCompleted
+	if incomingStatus == pb.Status_STATUS_FAILED {
+		terminalStatus = store.JobStatusFailed
 	}
-	if err := store.DeleteJobWorker(ctx, s.redis, jobID); err != nil {
-		return nil, status.Errorf(codes.Internal, "clear job-worker assignment: %v", err)
-	}
-
-	job, err := store.GetJob(ctx, s.redis, jobID)
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "load completed job: %v", err)
-	}
-	if job != nil {
-		job.Status = store.JobStatusCompleted
-		job.AssignedWorkerID = ""
-		if err := store.SaveJob(ctx, s.redis, job); err != nil {
-			return nil, status.Errorf(codes.Internal, "save completed job: %v", err)
-		}
+	if err := store.FinalizeJobWithResult(ctx, s.redis, job, result, terminalStatus); err != nil {
+		return nil, status.Errorf(codes.Internal, "finalize job with result: %v", err)
 	}
 
 	log.Printf("result submitted: job_id=%s worker_id=%s", jobID, workerID)
@@ -241,6 +272,9 @@ func (s *Server) GetJobStatus(ctx context.Context, req *pb.GetJobStatusRequest) 
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "get job metadata: %v", err)
 	}
+	if statusStr == "" && job == nil {
+		return nil, status.Error(codes.NotFound, "job not found")
+	}
 
 	assignedWorkerID := ""
 	if mappedWorkerID, mapErr := store.GetJobWorker(ctx, s.redis, jobID); mapErr == nil && mappedWorkerID != "" {
@@ -267,9 +301,17 @@ func (s *Server) GetJobResult(ctx context.Context, req *pb.GetJobResultRequest) 
 		return nil, status.Errorf(codes.Internal, "get job status: %v", err)
 	}
 
+	job, err := store.GetJob(ctx, s.redis, jobID)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "get job metadata: %v", err)
+	}
+
 	resultRecord, err := store.GetResult(ctx, s.redis, jobID)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "get job result: %v", err)
+	}
+	if statusStr == "" && job == nil && resultRecord == nil {
+		return nil, status.Error(codes.NotFound, "job not found")
 	}
 	if resultRecord == nil {
 		return &pb.GetJobResultResponse{
@@ -308,6 +350,8 @@ func redisStatusToPB(state string) pb.Status {
 		return pb.Status_STATUS_RUNNING
 	case store.JobStatusCompleted:
 		return pb.Status_STATUS_SUCCEEDED
+	case store.JobStatusFailed:
+		return pb.Status_STATUS_FAILED
 	default:
 		return pb.Status_STATUS_UNSPECIFIED
 	}

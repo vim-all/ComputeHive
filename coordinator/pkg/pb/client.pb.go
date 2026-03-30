@@ -28,6 +28,7 @@ type SubmitJobRequest struct {
 	RequiredResources *ResourceSpec          `protobuf:"bytes,3,opt,name=required_resources,json=requiredResources,proto3" json:"required_resources,omitempty"`
 	Environment       map[string]string      `protobuf:"bytes,4,rep,name=environment,proto3" json:"environment,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	MaxRuntimeSeconds int32                  `protobuf:"varint,5,opt,name=max_runtime_seconds,json=maxRuntimeSeconds,proto3" json:"max_runtime_seconds,omitempty"`
+	Job               *JobSchema             `protobuf:"bytes,6,opt,name=job,proto3" json:"job,omitempty"`
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
 }
@@ -97,10 +98,18 @@ func (x *SubmitJobRequest) GetMaxRuntimeSeconds() int32 {
 	return 0
 }
 
+func (x *SubmitJobRequest) GetJob() *JobSchema {
+	if x != nil {
+		return x.Job
+	}
+	return nil
+}
+
 type SubmitJobResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	JobId         *JobID                 `protobuf:"bytes,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
 	Status        Status                 `protobuf:"varint,2,opt,name=status,proto3,enum=compute.v1.Status" json:"status,omitempty"`
+	JobStatus     JobLifecycleStatus     `protobuf:"varint,3,opt,name=job_status,json=jobStatus,proto3,enum=compute.v1.JobLifecycleStatus" json:"job_status,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -147,6 +156,13 @@ func (x *SubmitJobResponse) GetStatus() Status {
 		return x.Status
 	}
 	return Status_STATUS_UNSPECIFIED
+}
+
+func (x *SubmitJobResponse) GetJobStatus() JobLifecycleStatus {
+	if x != nil {
+		return x.JobStatus
+	}
+	return JobLifecycleStatus_JOB_LIFECYCLE_STATUS_UNSPECIFIED
 }
 
 type GetJobStatusRequest struct {
@@ -198,6 +214,8 @@ type GetJobStatusResponse struct {
 	Status           Status                 `protobuf:"varint,1,opt,name=status,proto3,enum=compute.v1.Status" json:"status,omitempty"`
 	AssignedWorkerId string                 `protobuf:"bytes,2,opt,name=assigned_worker_id,json=assignedWorkerId,proto3" json:"assigned_worker_id,omitempty"`
 	UpdatedAtUnix    int64                  `protobuf:"varint,3,opt,name=updated_at_unix,json=updatedAtUnix,proto3" json:"updated_at_unix,omitempty"`
+	Assignment       *AssignmentSchema      `protobuf:"bytes,4,opt,name=assignment,proto3" json:"assignment,omitempty"`
+	JobStatus        JobLifecycleStatus     `protobuf:"varint,5,opt,name=job_status,json=jobStatus,proto3,enum=compute.v1.JobLifecycleStatus" json:"job_status,omitempty"`
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache
 }
@@ -253,6 +271,20 @@ func (x *GetJobStatusResponse) GetUpdatedAtUnix() int64 {
 	return 0
 }
 
+func (x *GetJobStatusResponse) GetAssignment() *AssignmentSchema {
+	if x != nil {
+		return x.Assignment
+	}
+	return nil
+}
+
+func (x *GetJobStatusResponse) GetJobStatus() JobLifecycleStatus {
+	if x != nil {
+		return x.JobStatus
+	}
+	return JobLifecycleStatus_JOB_LIFECYCLE_STATUS_UNSPECIFIED
+}
+
 type GetJobResultRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	JobId         *JobID                 `protobuf:"bytes,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
@@ -302,6 +334,8 @@ type GetJobResultResponse struct {
 	Status          Status                 `protobuf:"varint,1,opt,name=status,proto3,enum=compute.v1.Status" json:"status,omitempty"`
 	ResultAvailable bool                   `protobuf:"varint,2,opt,name=result_available,json=resultAvailable,proto3" json:"result_available,omitempty"`
 	Result          *Result                `protobuf:"bytes,3,opt,name=result,proto3" json:"result,omitempty"`
+	ResultSchema    *JobResultSchema       `protobuf:"bytes,4,opt,name=result_schema,json=resultSchema,proto3" json:"result_schema,omitempty"`
+	JobStatus       JobLifecycleStatus     `protobuf:"varint,5,opt,name=job_status,json=jobStatus,proto3,enum=compute.v1.JobLifecycleStatus" json:"job_status,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -357,36 +391,61 @@ func (x *GetJobResultResponse) GetResult() *Result {
 	return nil
 }
 
+func (x *GetJobResultResponse) GetResultSchema() *JobResultSchema {
+	if x != nil {
+		return x.ResultSchema
+	}
+	return nil
+}
+
+func (x *GetJobResultResponse) GetJobStatus() JobLifecycleStatus {
+	if x != nil {
+		return x.JobStatus
+	}
+	return JobLifecycleStatus_JOB_LIFECYCLE_STATUS_UNSPECIFIED
+}
+
 var File_client_proto protoreflect.FileDescriptor
 
 const file_client_proto_rawDesc = "" +
 	"\n" +
 	"\fclient.proto\x12\n" +
-	"compute.v1\x1a\fworker.proto\"\xdf\x02\n" +
+	"compute.v1\x1a\fworker.proto\"\x88\x03\n" +
 	"\x10SubmitJobRequest\x12'\n" +
 	"\x0fcontainer_image\x18\x01 \x01(\tR\x0econtainerImage\x12\x18\n" +
 	"\acommand\x18\x02 \x03(\tR\acommand\x12G\n" +
 	"\x12required_resources\x18\x03 \x01(\v2\x18.compute.v1.ResourceSpecR\x11requiredResources\x12O\n" +
 	"\venvironment\x18\x04 \x03(\v2-.compute.v1.SubmitJobRequest.EnvironmentEntryR\venvironment\x12.\n" +
-	"\x13max_runtime_seconds\x18\x05 \x01(\x05R\x11maxRuntimeSeconds\x1a>\n" +
+	"\x13max_runtime_seconds\x18\x05 \x01(\x05R\x11maxRuntimeSeconds\x12'\n" +
+	"\x03job\x18\x06 \x01(\v2\x15.compute.v1.JobSchemaR\x03job\x1a>\n" +
 	"\x10EnvironmentEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"i\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xa8\x01\n" +
 	"\x11SubmitJobResponse\x12(\n" +
 	"\x06job_id\x18\x01 \x01(\v2\x11.compute.v1.JobIDR\x05jobId\x12*\n" +
-	"\x06status\x18\x02 \x01(\x0e2\x12.compute.v1.StatusR\x06status\"?\n" +
+	"\x06status\x18\x02 \x01(\x0e2\x12.compute.v1.StatusR\x06status\x12=\n" +
+	"\n" +
+	"job_status\x18\x03 \x01(\x0e2\x1e.compute.v1.JobLifecycleStatusR\tjobStatus\"?\n" +
 	"\x13GetJobStatusRequest\x12(\n" +
-	"\x06job_id\x18\x01 \x01(\v2\x11.compute.v1.JobIDR\x05jobId\"\x98\x01\n" +
+	"\x06job_id\x18\x01 \x01(\v2\x11.compute.v1.JobIDR\x05jobId\"\x95\x02\n" +
 	"\x14GetJobStatusResponse\x12*\n" +
 	"\x06status\x18\x01 \x01(\x0e2\x12.compute.v1.StatusR\x06status\x12,\n" +
 	"\x12assigned_worker_id\x18\x02 \x01(\tR\x10assignedWorkerId\x12&\n" +
-	"\x0fupdated_at_unix\x18\x03 \x01(\x03R\rupdatedAtUnix\"?\n" +
+	"\x0fupdated_at_unix\x18\x03 \x01(\x03R\rupdatedAtUnix\x12<\n" +
+	"\n" +
+	"assignment\x18\x04 \x01(\v2\x1c.compute.v1.AssignmentSchemaR\n" +
+	"assignment\x12=\n" +
+	"\n" +
+	"job_status\x18\x05 \x01(\x0e2\x1e.compute.v1.JobLifecycleStatusR\tjobStatus\"?\n" +
 	"\x13GetJobResultRequest\x12(\n" +
-	"\x06job_id\x18\x01 \x01(\v2\x11.compute.v1.JobIDR\x05jobId\"\x99\x01\n" +
+	"\x06job_id\x18\x01 \x01(\v2\x11.compute.v1.JobIDR\x05jobId\"\x9a\x02\n" +
 	"\x14GetJobResultResponse\x12*\n" +
 	"\x06status\x18\x01 \x01(\x0e2\x12.compute.v1.StatusR\x06status\x12)\n" +
 	"\x10result_available\x18\x02 \x01(\bR\x0fresultAvailable\x12*\n" +
-	"\x06result\x18\x03 \x01(\v2\x12.compute.v1.ResultR\x06result2\xff\x01\n" +
+	"\x06result\x18\x03 \x01(\v2\x12.compute.v1.ResultR\x06result\x12@\n" +
+	"\rresult_schema\x18\x04 \x01(\v2\x1b.compute.v1.JobResultSchemaR\fresultSchema\x12=\n" +
+	"\n" +
+	"job_status\x18\x05 \x01(\x0e2\x1e.compute.v1.JobLifecycleStatusR\tjobStatus2\xff\x01\n" +
 	"\rClientService\x12H\n" +
 	"\tSubmitJob\x12\x1c.compute.v1.SubmitJobRequest\x1a\x1d.compute.v1.SubmitJobResponse\x12Q\n" +
 	"\fGetJobStatus\x12\x1f.compute.v1.GetJobStatusRequest\x1a .compute.v1.GetJobStatusResponse\x12Q\n" +
@@ -414,31 +473,41 @@ var file_client_proto_goTypes = []any{
 	(*GetJobResultResponse)(nil), // 5: compute.v1.GetJobResultResponse
 	nil,                          // 6: compute.v1.SubmitJobRequest.EnvironmentEntry
 	(*ResourceSpec)(nil),         // 7: compute.v1.ResourceSpec
-	(*JobID)(nil),                // 8: compute.v1.JobID
-	(Status)(0),                  // 9: compute.v1.Status
-	(*Result)(nil),               // 10: compute.v1.Result
+	(*JobSchema)(nil),            // 8: compute.v1.JobSchema
+	(*JobID)(nil),                // 9: compute.v1.JobID
+	(Status)(0),                  // 10: compute.v1.Status
+	(JobLifecycleStatus)(0),      // 11: compute.v1.JobLifecycleStatus
+	(*AssignmentSchema)(nil),     // 12: compute.v1.AssignmentSchema
+	(*Result)(nil),               // 13: compute.v1.Result
+	(*JobResultSchema)(nil),      // 14: compute.v1.JobResultSchema
 }
 var file_client_proto_depIdxs = []int32{
 	7,  // 0: compute.v1.SubmitJobRequest.required_resources:type_name -> compute.v1.ResourceSpec
 	6,  // 1: compute.v1.SubmitJobRequest.environment:type_name -> compute.v1.SubmitJobRequest.EnvironmentEntry
-	8,  // 2: compute.v1.SubmitJobResponse.job_id:type_name -> compute.v1.JobID
-	9,  // 3: compute.v1.SubmitJobResponse.status:type_name -> compute.v1.Status
-	8,  // 4: compute.v1.GetJobStatusRequest.job_id:type_name -> compute.v1.JobID
-	9,  // 5: compute.v1.GetJobStatusResponse.status:type_name -> compute.v1.Status
-	8,  // 6: compute.v1.GetJobResultRequest.job_id:type_name -> compute.v1.JobID
-	9,  // 7: compute.v1.GetJobResultResponse.status:type_name -> compute.v1.Status
-	10, // 8: compute.v1.GetJobResultResponse.result:type_name -> compute.v1.Result
-	0,  // 9: compute.v1.ClientService.SubmitJob:input_type -> compute.v1.SubmitJobRequest
-	2,  // 10: compute.v1.ClientService.GetJobStatus:input_type -> compute.v1.GetJobStatusRequest
-	4,  // 11: compute.v1.ClientService.GetJobResult:input_type -> compute.v1.GetJobResultRequest
-	1,  // 12: compute.v1.ClientService.SubmitJob:output_type -> compute.v1.SubmitJobResponse
-	3,  // 13: compute.v1.ClientService.GetJobStatus:output_type -> compute.v1.GetJobStatusResponse
-	5,  // 14: compute.v1.ClientService.GetJobResult:output_type -> compute.v1.GetJobResultResponse
-	12, // [12:15] is the sub-list for method output_type
-	9,  // [9:12] is the sub-list for method input_type
-	9,  // [9:9] is the sub-list for extension type_name
-	9,  // [9:9] is the sub-list for extension extendee
-	0,  // [0:9] is the sub-list for field type_name
+	8,  // 2: compute.v1.SubmitJobRequest.job:type_name -> compute.v1.JobSchema
+	9,  // 3: compute.v1.SubmitJobResponse.job_id:type_name -> compute.v1.JobID
+	10, // 4: compute.v1.SubmitJobResponse.status:type_name -> compute.v1.Status
+	11, // 5: compute.v1.SubmitJobResponse.job_status:type_name -> compute.v1.JobLifecycleStatus
+	9,  // 6: compute.v1.GetJobStatusRequest.job_id:type_name -> compute.v1.JobID
+	10, // 7: compute.v1.GetJobStatusResponse.status:type_name -> compute.v1.Status
+	12, // 8: compute.v1.GetJobStatusResponse.assignment:type_name -> compute.v1.AssignmentSchema
+	11, // 9: compute.v1.GetJobStatusResponse.job_status:type_name -> compute.v1.JobLifecycleStatus
+	9,  // 10: compute.v1.GetJobResultRequest.job_id:type_name -> compute.v1.JobID
+	10, // 11: compute.v1.GetJobResultResponse.status:type_name -> compute.v1.Status
+	13, // 12: compute.v1.GetJobResultResponse.result:type_name -> compute.v1.Result
+	14, // 13: compute.v1.GetJobResultResponse.result_schema:type_name -> compute.v1.JobResultSchema
+	11, // 14: compute.v1.GetJobResultResponse.job_status:type_name -> compute.v1.JobLifecycleStatus
+	0,  // 15: compute.v1.ClientService.SubmitJob:input_type -> compute.v1.SubmitJobRequest
+	2,  // 16: compute.v1.ClientService.GetJobStatus:input_type -> compute.v1.GetJobStatusRequest
+	4,  // 17: compute.v1.ClientService.GetJobResult:input_type -> compute.v1.GetJobResultRequest
+	1,  // 18: compute.v1.ClientService.SubmitJob:output_type -> compute.v1.SubmitJobResponse
+	3,  // 19: compute.v1.ClientService.GetJobStatus:output_type -> compute.v1.GetJobStatusResponse
+	5,  // 20: compute.v1.ClientService.GetJobResult:output_type -> compute.v1.GetJobResultResponse
+	18, // [18:21] is the sub-list for method output_type
+	15, // [15:18] is the sub-list for method input_type
+	15, // [15:15] is the sub-list for extension type_name
+	15, // [15:15] is the sub-list for extension extendee
+	0,  // [0:15] is the sub-list for field type_name
 }
 
 func init() { file_client_proto_init() }

@@ -1,0 +1,8 @@
+# Environment and secrets
+.env
+.env.*
+coordinator/.env
+
+# Build artifacts
+bin/
+*.out

@@ -4,6 +4,104 @@ package compute.v1;
 
 option go_package = "coordinator/pkg/pb";
 
+// Canonical job lifecycle for v2 schema.
+enum JobLifecycleStatus {
+  JOB_LIFECYCLE_STATUS_UNSPECIFIED = 0;
+  JOB_LIFECYCLE_STATUS_PENDING = 1;
+  JOB_LIFECYCLE_STATUS_ASSIGNED = 2;
+  JOB_LIFECYCLE_STATUS_RUNNING = 3;
+  JOB_LIFECYCLE_STATUS_COMPLETED = 4;
+  JOB_LIFECYCLE_STATUS_FAILED = 5;
+}
+
+enum WorkerLifecycleStatus {
+  WORKER_LIFECYCLE_STATUS_UNSPECIFIED = 0;
+  WORKER_LIFECYCLE_STATUS_AVAILABLE = 1;
+  WORKER_LIFECYCLE_STATUS_BUSY = 2;
+  WORKER_LIFECYCLE_STATUS_OFFLINE = 3;
+}
+
+enum AssignmentLifecycleStatus {
+  ASSIGNMENT_LIFECYCLE_STATUS_UNSPECIFIED = 0;
+  ASSIGNMENT_LIFECYCLE_STATUS_ASSIGNED = 1;
+  ASSIGNMENT_LIFECYCLE_STATUS_RUNNING = 2;
+}
+
+message JobImage {
+  string ref = 1;
+  string source_url = 2;
+  string hash = 3;
+}
+
+message JobExecution {
+  repeated string command = 1;
+}
+
+message JobTimeouts {
+  int32 max_execution_seconds = 1;
+}
+
+message JobResultSchema {
+  JobLifecycleStatus status = 1;
+  string output = 2;
+  string error = 3;
+  int32 exit_code = 4;
+}
+
+message JobTimestamps {
+  int64 created_at = 1;
+  int64 assigned_at = 2;
+  int64 started_at = 3;
+  int64 completed_at = 4;
+}
+
+message JobSchema {
+  string id = 1;
+  JobLifecycleStatus status = 2;
+  JobImage image = 3;
+  JobExecution execution = 4;
+  JobTimeouts timeouts = 5;
+  JobResultSchema result = 6;
+  JobTimestamps timestamps = 7;
+}
+
+message WorkerResources {
+  int32 cpu_cores = 1;
+  int32 memory_mb = 2;
+  bool gpu = 3;
+}
+
+message WorkerCurrentLoad {
+  int32 cpu_used = 1;
+  int32 memory_used = 2;
+}
+
+message WorkerCapabilities {
+  bool docker = 1;
+  bool gpu_supported = 2;
+}
+
+message WorkerStats {
+  int32 jobs_completed = 1;
+  int32 jobs_failed = 2;
+}
+
+message WorkerSchema {
+  string id = 1;
+  WorkerLifecycleStatus status = 2;
+  WorkerResources resources = 3;
+  WorkerCurrentLoad current_load = 4;
+  WorkerCapabilities capabilities = 5;
+  int64 last_heartbeat = 6;
+  WorkerStats stats = 7;
+}
+
+message AssignmentSchema {
+  string job_id = 1;
+  string worker_id = 2;
+  AssignmentLifecycleStatus status = 3;
+}
+
 // Stable identifier for a registered worker node.
 message WorkerID {
   string value = 1;
@@ -56,6 +154,7 @@ message Result {
 message RegisterWorkerRequest {
   ResourceSpec available_resources = 1;
   string worker_version = 2;
+  WorkerSchema worker = 3;
 }
 
 message RegisterWorkerResponse {
@@ -67,6 +166,7 @@ message HeartbeatRequest {
   WorkerID worker_id = 1;
   ResourceSpec available_resources = 2;
   repeated JobID running_jobs = 3;
+  WorkerCurrentLoad current_load = 4;
 }
 
 message HeartbeatResponse {
@@ -81,11 +181,14 @@ message RequestJobRequest {
 message RequestJobResponse {
   bool has_job = 1;
   Job job = 2;
+  JobSchema job_schema = 3;
+  AssignmentSchema assignment = 4;
 }
 
 message SubmitResultRequest {
   WorkerID worker_id = 1;
   Result result = 2;
+  JobResultSchema result_schema = 3;
 }
 
 message SubmitResultResponse {
