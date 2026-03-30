@@ -90,13 +90,35 @@ func (s *Server) RequestJob(ctx context.Context, req *pb.RequestJobRequest) (*pb
 		return &pb.RequestJobResponse{HasJob: false}, nil
 	}
 
-	job.Status = store.JobStatusRunning
-	job.AssignedWorkerID = workerID
-	if err := store.SaveJob(ctx, s.redis, job); err != nil {
-		return nil, status.Errorf(codes.Internal, "save running job: %v", err)
+	pbJob := &pb.Job{
+		JobId:             &pb.JobID{Value: job.ID},
+		ContainerImage:    job.ContainerImage,
+		Command:           job.Command,
+		RequiredResources: job.RequiredResources,
+		CreatedAtUnix:     job.CreatedAtUnix,
 	}
-	if err := store.SetJobStatus(ctx, s.redis, jobID, store.JobStatusRunning); err != nil {
-		return nil, status.Errorf(codes.Internal, "set running job status: %v", err)
+
+	pickedWorkerID, err := s.scheduler.PickWorker(ctx, pbJob)
+	if err != nil {
+		_ = store.RequeueJobID(ctx, s.redis, jobID)
+		return nil, status.Errorf(codes.Internal, "pick worker: %v", err)
+	}
+	if pickedWorkerID == "" {
+		if err := store.RequeueJobID(ctx, s.redis, jobID); err != nil {
+			return nil, status.Errorf(codes.Internal, "requeue job without eligible worker: %v", err)
+		}
+		return &pb.RequestJobResponse{HasJob: false}, nil
+	}
+	if pickedWorkerID != workerID {
+		if err := store.RequeueJobID(ctx, s.redis, jobID); err != nil {
+			return nil, status.Errorf(codes.Internal, "requeue non-turn job: %v", err)
+		}
+		return &pb.RequestJobResponse{HasJob: false}, nil
+	}
+
+	if err := s.scheduler.AssignJob(ctx, pbJob, workerID); err != nil {
+		_ = store.RequeueJobID(ctx, s.redis, jobID)
+		return nil, status.Errorf(codes.Internal, "assign job: %v", err)
 	}
 
 	log.Printf("job assigned: job_id=%s worker_id=%s", jobID, workerID)
@@ -104,12 +126,12 @@ func (s *Server) RequestJob(ctx context.Context, req *pb.RequestJobRequest) (*pb
 	return &pb.RequestJobResponse{
 		HasJob: true,
 		Job: &pb.Job{
-			JobId:             &pb.JobID{Value: job.ID},
-			ContainerImage:    job.ContainerImage,
-			Command:           job.Command,
-			RequiredResources: job.RequiredResources,
+			JobId:             pbJob.JobId,
+			ContainerImage:    pbJob.ContainerImage,
+			Command:           pbJob.Command,
+			RequiredResources: pbJob.RequiredResources,
 			Status:            pb.Status_STATUS_RUNNING,
-			CreatedAtUnix:     job.CreatedAtUnix,
+			CreatedAtUnix:     pbJob.CreatedAtUnix,
 		},
 	}, nil
 }
@@ -128,6 +150,7 @@ func (s *Server) SubmitResult(ctx context.Context, req *pb.SubmitResultRequest) 
 		JobID:          jobID,
 		WorkerID:       workerID,
 		ResultStatus:   req.GetResult().GetStatus().String(),
+		Partial:        req.GetResult().GetStatus() == pb.Status_STATUS_RUNNING,
 		ExitCode:       req.GetResult().GetExitCode(),
 		StdoutExcerpt:  req.GetResult().GetStdoutExcerpt(),
 		StderrExcerpt:  req.GetResult().GetStderrExcerpt(),
@@ -138,8 +161,17 @@ func (s *Server) SubmitResult(ctx context.Context, req *pb.SubmitResultRequest) 
 	if err := store.SaveResult(ctx, s.redis, result); err != nil {
 		return nil, status.Errorf(codes.Internal, "save result: %v", err)
 	}
+
+	if result.Partial {
+		log.Printf("partial result saved: job_id=%s worker_id=%s", jobID, workerID)
+		return &pb.SubmitResultResponse{Accepted: true}, nil
+	}
+
 	if err := store.SetJobStatus(ctx, s.redis, jobID, store.JobStatusCompleted); err != nil {
 		return nil, status.Errorf(codes.Internal, "set completed job status: %v", err)
+	}
+	if err := store.DeleteJobWorker(ctx, s.redis, jobID); err != nil {
+		return nil, status.Errorf(codes.Internal, "clear job-worker assignment: %v", err)
 	}
 
 	job, err := store.GetJob(ctx, s.redis, jobID)
@@ -148,6 +180,7 @@ func (s *Server) SubmitResult(ctx context.Context, req *pb.SubmitResultRequest) 
 	}
 	if job != nil {
 		job.Status = store.JobStatusCompleted
+		job.AssignedWorkerID = ""
 		if err := store.SaveJob(ctx, s.redis, job); err != nil {
 			return nil, status.Errorf(codes.Internal, "save completed job: %v", err)
 		}
@@ -210,7 +243,9 @@ func (s *Server) GetJobStatus(ctx context.Context, req *pb.GetJobStatusRequest) 
 	}
 
 	assignedWorkerID := ""
-	if job != nil {
+	if mappedWorkerID, mapErr := store.GetJobWorker(ctx, s.redis, jobID); mapErr == nil && mappedWorkerID != "" {
+		assignedWorkerID = mappedWorkerID
+	} else if job != nil {
 		assignedWorkerID = job.AssignedWorkerID
 	}
 
