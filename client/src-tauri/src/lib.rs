@@ -1,46 +1,439 @@
-use serde::Serialize;
+use flate2::{write::GzEncoder, Compression};
+use redis::Commands;
+use reqwest::blocking::{Body as ReqwestBody, Client as BlockingHttpClient};
+use rusty_s3::{Bucket, Credentials as S3Credentials, S3Action, UrlStyle};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeSet,
+    collections::HashMap,
     fs::{self, File},
-    io,
-    path::{Component, Path, PathBuf},
+    io::{self, BufReader, BufWriter, ErrorKind, Read},
+    path::{Path, PathBuf},
+    process::{Command, Output},
+    sync::OnceLock,
+    thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use walkdir::{DirEntry, WalkDir};
-use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
+use url::Url;
+use uuid::Uuid;
 
-const SKIPPED_NAMES: &[&str] = &[
-    ".git",
-    ".idea",
-    ".next",
-    ".nuxt",
-    ".turbo",
-    ".venv",
-    "__pycache__",
-    "build",
-    "coverage",
-    "dist",
-    "node_modules",
-    "target",
-    "venv",
-];
+const JOB_QUEUE_KEY: &str = "job_queue";
+const JOB_STATUS_QUEUED: &str = "queued";
+const ARTIFACT_RECORD_PREFIX: &str = "computehive_job_artifact:";
+const DEFAULT_MAX_RUNTIME_SECONDS: i32 = 3600;
+const DEFAULT_REQUIRED_CPU_CORES: i32 = 1;
+const DEFAULT_REQUIRED_GPU_COUNT: i32 = 0;
+const DEFAULT_REQUIRED_MEMORY_MB: i32 = 1024;
+const DEFAULT_R2_REGION: &str = "auto";
+
+static APP_CONFIG: OnceLock<Result<AppConfig, String>> = OnceLock::new();
+static ENV_FILE_LOADED: OnceLock<()> = OnceLock::new();
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct DockerImageResult {
+    project_name: String,
+    project_root: String,
+    dockerfile_path: String,
+    image_archive_path: String,
+    image_tag: String,
+    image_size_bytes: u64,
+    detected_stack: String,
+    docker_setup_source: String,
+    generated_files: Vec<String>,
+    summary: String,
+    notes: Vec<String>,
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct BundleResult {
+struct RunRequestResult {
+    image: DockerImageResult,
+    gzip_archive_path: String,
+    gzip_size_bytes: u64,
+    artifact_sha256: String,
+    artifact_object_key: String,
+    artifact_uri: String,
+    artifact_api_url: String,
+    artifact_public_url: String,
+    artifact_record_key: String,
+    artifact_etag: Option<String>,
+    redis_job_id: String,
+    redis_job_key: String,
+    redis_status_key: String,
+    redis_queue_key: String,
+    summary: String,
+    notes: Vec<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct IncomingRunRequest {
+    job_id: String,
+    project_name: String,
+    detected_stack: String,
+    status: String,
+    container_image: String,
+    artifact_sha256: String,
+    artifact_object_key: String,
+    artifact_uri: String,
+    artifact_api_url: String,
+    artifact_public_url: String,
+    gzip_archive_path: String,
+    gzip_size_bytes: u64,
+    created_at_unix: i64,
+    project_root: String,
+}
+
+struct DockerSetup {
+    dockerfile_path: PathBuf,
+    detected_stack: String,
+    docker_setup_source: String,
+    generated_files: Vec<PathBuf>,
+    notes: Vec<String>,
+    dockerfile_generated_by_app: bool,
+}
+
+enum DetectedProject {
+    Node(NodeProject),
+    Python(PythonProject),
+    Rust(RustProject),
+    Generic,
+}
+
+struct NodeProject {
+    package_manager: PackageManager,
+    framework_label: String,
+    install_command: String,
+    build_command: Option<String>,
+    run_command: String,
+    port: u16,
+}
+
+enum PackageManager {
+    Npm,
+    Pnpm,
+    Yarn,
+    Bun,
+}
+
+struct PythonProject {
+    install_step: String,
+    run_command: String,
+}
+
+struct RustProject {
+    binary_name: String,
+}
+
+#[derive(Clone)]
+struct AppConfig {
+    object_storage: ObjectStorageConfig,
+    redis_url: String,
+}
+
+#[derive(Clone)]
+struct ObjectStorageConfig {
+    endpoint_url: String,
+    bucket_name: String,
+    bucket_api_url: String,
+    bucket_public_url: String,
+    access_key_id: String,
+    secret_access_key: String,
+    region: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct RedisResourceSpec {
+    cpu_cores: i32,
+    gpu_count: i32,
+    memory_mb: i32,
+}
+
+#[derive(Serialize, Deserialize)]
+struct RedisJobRecord {
+    id: String,
+    container_image: String,
+    command: Vec<String>,
+    required_resources: Option<RedisResourceSpec>,
+    environment: HashMap<String, String>,
+    max_runtime_seconds: i32,
+    status: String,
+    created_at_unix: i64,
+    assigned_worker_id: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ArtifactRecord {
+    job_id: String,
     project_name: String,
     project_root: String,
-    archive_path: String,
-    source_size_bytes: u64,
-    archive_size_bytes: u64,
-    included_files: usize,
-    skipped_entries: Vec<String>,
-    summary: String,
-    space_saved_percent: f64,
+    detected_stack: String,
+    dockerfile_path: String,
+    image_archive_path: String,
+    gzip_archive_path: String,
+    container_image: String,
+    artifact_sha256: String,
+    artifact_object_key: String,
+    artifact_uri: String,
+    artifact_api_url: String,
+    artifact_public_url: String,
+    gzip_size_bytes: u64,
+    image_size_bytes: u64,
+    docker_setup_source: String,
+    created_at_unix: i64,
+}
+
+struct UploadedArtifact {
+    artifact_uri: String,
+    artifact_api_url: String,
+    artifact_public_url: String,
+    artifact_object_key: String,
+    artifact_etag: Option<String>,
+}
+
+enum DockerInfoStatus {
+    Ready,
+    DaemonUnavailable(String),
+    OtherFailure(String),
 }
 
 #[tauri::command]
-fn prepare_project_bundle(project_path: String) -> Result<BundleResult, String> {
-    let project_root = PathBuf::from(&project_path);
+fn create_project_docker_image(project_path: String) -> Result<DockerImageResult, String> {
+    build_project_docker_image(&project_path)
+}
+
+#[tauri::command]
+async fn request_project_run(project_path: String) -> Result<RunRequestResult, String> {
+    let config = app_config()?;
+    let image = build_project_docker_image(&project_path)?;
+    let project_root = PathBuf::from(&image.project_root);
+    let gzip_archive_path = tar_gz_path_for_project(&project_root, &image.project_name);
+
+    if gzip_archive_path.exists() {
+        fs::remove_file(&gzip_archive_path)
+            .map_err(|error| format!("Failed to replace the existing compressed image: {error}"))?;
+    }
+
+    gzip_file(Path::new(&image.image_archive_path), &gzip_archive_path)?;
+
+    let gzip_size_bytes = fs::metadata(&gzip_archive_path)
+        .map_err(|error| format!("Failed to inspect the compressed image: {error}"))?
+        .len();
+    let artifact_sha256 = sha256_for_file(&gzip_archive_path)?;
+    let job_id = Uuid::new_v4().to_string();
+    let object_key = object_key_for_artifact(&image.project_name, &job_id, &artifact_sha256);
+
+    let uploaded_artifact = upload_artifact_to_object_storage(
+        config,
+        &gzip_archive_path,
+        &object_key,
+        &artifact_sha256,
+    )
+    .await?;
+
+    let artifact_record = ArtifactRecord {
+        job_id: job_id.clone(),
+        project_name: image.project_name.clone(),
+        project_root: image.project_root.clone(),
+        detected_stack: image.detected_stack.clone(),
+        dockerfile_path: image.dockerfile_path.clone(),
+        image_archive_path: image.image_archive_path.clone(),
+        gzip_archive_path: gzip_archive_path.display().to_string(),
+        container_image: image.image_tag.clone(),
+        artifact_sha256: artifact_sha256.clone(),
+        artifact_object_key: uploaded_artifact.artifact_object_key.clone(),
+        artifact_uri: uploaded_artifact.artifact_uri.clone(),
+        artifact_api_url: uploaded_artifact.artifact_api_url.clone(),
+        artifact_public_url: uploaded_artifact.artifact_public_url.clone(),
+        gzip_size_bytes,
+        image_size_bytes: image.image_size_bytes,
+        docker_setup_source: image.docker_setup_source.clone(),
+        created_at_unix: current_unix_timestamp(),
+    };
+
+    if let Err(error) = enqueue_run_request(config, &job_id, &image, &artifact_record) {
+        let cleanup_result = delete_artifact_from_object_storage(config, &object_key).await;
+        let cleanup_message = match cleanup_result {
+            Ok(()) => "The uploaded artifact was cleaned up automatically.".to_string(),
+            Err(cleanup_error) => format!(
+                "The uploaded artifact could not be cleaned up automatically: {cleanup_error}"
+            ),
+        };
+
+        return Err(format!(
+            "Failed to queue the run request in Redis after uploading the artifact. {error} {cleanup_message}"
+        ));
+    }
+
+    let mut notes = image.notes.clone();
+    notes.push(format!(
+        "Compressed the Docker image archive to {}.",
+        gzip_archive_path.display()
+    ));
+    notes.push(format!(
+        "Calculated SHA-256 for the compressed artifact: {}.",
+        artifact_sha256
+    ));
+    notes.push(format!(
+        "Uploaded the compressed artifact to object storage as {}.",
+        uploaded_artifact.artifact_object_key
+    ));
+    notes.push(format!(
+        "Public artifact link: {}.",
+        uploaded_artifact.artifact_public_url
+    ));
+    if config.object_storage.bucket_public_url == config.object_storage.bucket_api_url {
+        notes.push(
+            "S3_PUBLIC_BUCKET_URL is not configured, so the public artifact link currently uses the same bucket base URL as S3_BUCKET."
+                .to_string(),
+        );
+    }
+    notes.push(format!(
+        "Queued a coordinator-compatible Redis job under {} and pushed it onto {}.",
+        job_key(&job_id),
+        JOB_QUEUE_KEY
+    ));
+    notes.push(
+        "The queued job carries the artifact hash and object storage location in its environment for future contributor actions."
+            .to_string(),
+    );
+    notes.push(
+        "ComputeHive intentionally did not create or run a container during this request."
+            .to_string(),
+    );
+
+    let summary = format!(
+        "Built the Docker image, compressed it to a tar.gz artifact, uploaded it to object storage, and queued run request {} in Redis.",
+        job_id
+    );
+
+    Ok(RunRequestResult {
+        image,
+        gzip_archive_path: gzip_archive_path.display().to_string(),
+        gzip_size_bytes,
+        artifact_sha256,
+        artifact_object_key: uploaded_artifact.artifact_object_key,
+        artifact_uri: uploaded_artifact.artifact_uri,
+        artifact_api_url: uploaded_artifact.artifact_api_url,
+        artifact_public_url: uploaded_artifact.artifact_public_url,
+        artifact_record_key: artifact_record_key(&job_id),
+        artifact_etag: uploaded_artifact.artifact_etag,
+        redis_job_id: job_id.clone(),
+        redis_job_key: job_key(&job_id),
+        redis_status_key: job_status_key(&job_id),
+        redis_queue_key: JOB_QUEUE_KEY.to_string(),
+        summary,
+        notes,
+    })
+}
+
+#[tauri::command]
+fn list_incoming_run_requests() -> Result<Vec<IncomingRunRequest>, String> {
+    let config = app_config()?;
+    let client = redis::Client::open(config.redis_url.as_str())
+        .map_err(|error| format!("Failed to parse the Redis URL: {error}"))?;
+    let mut connection = client
+        .get_connection()
+        .map_err(|error| format!("Failed to connect to Redis: {error}"))?;
+
+    let queued_job_ids = connection
+        .lrange::<_, Vec<String>>(JOB_QUEUE_KEY, 0, 49)
+        .map_err(|error| format!("Failed to read the Redis job queue: {error}"))?;
+
+    let mut requests = Vec::with_capacity(queued_job_ids.len());
+
+    for job_id in queued_job_ids {
+        let job_payload = connection
+            .get::<_, Option<String>>(job_key(&job_id))
+            .map_err(|error| format!("Failed to load {}: {error}", job_key(&job_id)))?;
+        let artifact_payload = connection
+            .get::<_, Option<String>>(artifact_record_key(&job_id))
+            .map_err(|error| format!("Failed to load {}: {error}", artifact_record_key(&job_id)))?;
+        let status = connection
+            .get::<_, Option<String>>(job_status_key(&job_id))
+            .map_err(|error| format!("Failed to load {}: {error}", job_status_key(&job_id)))?
+            .unwrap_or_else(|| JOB_STATUS_QUEUED.to_string());
+
+        let Some(job_payload) = job_payload else {
+            continue;
+        };
+
+        let job: RedisJobRecord = serde_json::from_str(&job_payload).map_err(|error| {
+            format!(
+                "Failed to parse the queued job record {}: {error}",
+                job_key(&job_id)
+            )
+        })?;
+
+        let artifact = artifact_payload
+            .as_deref()
+            .map(serde_json::from_str::<ArtifactRecord>)
+            .transpose()
+            .map_err(|error| {
+                format!(
+                    "Failed to parse the queued artifact record {}: {error}",
+                    artifact_record_key(&job_id)
+                )
+            })?;
+
+        requests.push(IncomingRunRequest {
+            job_id: job.id,
+            project_name: artifact
+                .as_ref()
+                .map(|record| record.project_name.clone())
+                .unwrap_or_else(|| "Unknown project".to_string()),
+            detected_stack: artifact
+                .as_ref()
+                .map(|record| record.detected_stack.clone())
+                .unwrap_or_else(|| "Unknown stack".to_string()),
+            status,
+            container_image: job.container_image,
+            artifact_sha256: artifact
+                .as_ref()
+                .map(|record| record.artifact_sha256.clone())
+                .unwrap_or_default(),
+            artifact_object_key: artifact
+                .as_ref()
+                .map(|record| record.artifact_object_key.clone())
+                .unwrap_or_default(),
+            artifact_uri: artifact
+                .as_ref()
+                .map(|record| record.artifact_uri.clone())
+                .unwrap_or_default(),
+            artifact_api_url: artifact
+                .as_ref()
+                .map(|record| record.artifact_api_url.clone())
+                .unwrap_or_default(),
+            artifact_public_url: artifact
+                .as_ref()
+                .map(|record| record.artifact_public_url.clone())
+                .unwrap_or_default(),
+            gzip_archive_path: artifact
+                .as_ref()
+                .map(|record| record.gzip_archive_path.clone())
+                .unwrap_or_default(),
+            gzip_size_bytes: artifact
+                .as_ref()
+                .map(|record| record.gzip_size_bytes)
+                .unwrap_or_default(),
+            created_at_unix: artifact
+                .as_ref()
+                .map(|record| record.created_at_unix)
+                .unwrap_or(job.created_at_unix),
+            project_root: artifact
+                .as_ref()
+                .map(|record| record.project_root.clone())
+                .unwrap_or_default(),
+        });
+    }
+
+    Ok(requests)
+}
+
+fn build_project_docker_image(project_path: &str) -> Result<DockerImageResult, String> {
+    let project_root = PathBuf::from(project_path);
 
     if !project_root.exists() {
         return Err("The selected folder does not exist.".to_string());
@@ -57,155 +450,1035 @@ fn prepare_project_bundle(project_path: String) -> Result<BundleResult, String> 
         .and_then(|name| name.to_str())
         .unwrap_or("project")
         .to_string();
-    let archive_name = format!("{}-computehive-upload.zip", sanitize_name(&project_name));
-    let archive_path = project_root.join(&archive_name);
+    let sanitized_name = sanitize_name(&project_name);
+    let image_tag = format!("computehive-{}:latest", sanitized_name);
+    let image_file_name = format!("{sanitized_name}-computehive-image.tar");
+    let image_archive_path = project_root.join(&image_file_name);
 
-    let mut skipped_entries = BTreeSet::new();
-    let files_to_archive = collect_files(&project_root, &archive_path, &mut skipped_entries)?;
+    let mut docker_setup = ensure_docker_setup(&project_root, &project_name)?;
+    docker_setup
+        .notes
+        .extend(ensure_docker_runtime_available()?);
 
-    if files_to_archive.is_empty() {
-        return Err(
-            "No files remained after removing common generated folders. Pick a source folder with project files."
-                .to_string(),
-        );
+    if image_archive_path.exists() {
+        fs::remove_file(&image_archive_path)
+            .map_err(|error| format!("Failed to replace the existing image archive: {error}"))?;
     }
 
-    let archive_file = File::create(&archive_path)
-        .map_err(|error| format!("Failed to create the archive file: {error}"))?;
-    let mut zip_writer = ZipWriter::new(archive_file);
-    let options = SimpleFileOptions::default()
-        .compression_method(CompressionMethod::Deflated)
-        .unix_permissions(0o644);
+    if let Err(primary_error) =
+        build_docker_image(&project_root, &docker_setup.dockerfile_path, &image_tag)
+    {
+        if docker_setup.dockerfile_generated_by_app {
+            let fallback_contents = generic_dockerfile(&project_name);
+            fs::write(&docker_setup.dockerfile_path, fallback_contents)
+                .map_err(|error| format!("Failed to write the fallback Dockerfile: {error}"))?;
+            docker_setup.docker_setup_source = "App generated fallback".to_string();
+            docker_setup.notes.push(
+                "The initial auto-generated Dockerfile did not build cleanly, so ComputeHive replaced it with a generic fallback Dockerfile and retried the image build."
+                    .to_string(),
+            );
 
-    let mut source_size_bytes = 0_u64;
-
-    for file_path in &files_to_archive {
-        let relative_path = file_path
-            .strip_prefix(&project_root)
-            .map_err(|error| format!("Failed to build a relative path for the archive: {error}"))?;
-        let relative_path = normalize_for_zip(relative_path);
-
-        zip_writer
-            .start_file(relative_path, options)
-            .map_err(|error| format!("Failed to write a file into the archive: {error}"))?;
-
-        let mut source_file = File::open(file_path)
-            .map_err(|error| format!("Failed to open a project file for compression: {error}"))?;
-        source_size_bytes += io::copy(&mut source_file, &mut zip_writer)
-            .map_err(|error| format!("Failed while compressing project files: {error}"))?;
+            build_docker_image(&project_root, &docker_setup.dockerfile_path, &image_tag).map_err(
+                |fallback_error| {
+                    format!("{primary_error} The fallback Dockerfile also failed. {fallback_error}")
+                },
+            )?;
+        } else {
+            return Err(primary_error);
+        }
     }
 
-    zip_writer
-        .finish()
-        .map_err(|error| format!("Failed to finalize the archive: {error}"))?;
+    save_docker_image(&image_archive_path, &image_tag)?;
 
-    let archive_size_bytes = fs::metadata(&archive_path)
-        .map_err(|error| format!("Failed to inspect the archive file: {error}"))?
+    let image_size_bytes = fs::metadata(&image_archive_path)
+        .map_err(|error| format!("Failed to inspect the exported Docker image: {error}"))?
         .len();
-    let skipped_entries = skipped_entries.into_iter().collect::<Vec<_>>();
-    let space_saved_percent = if source_size_bytes == 0 {
-        0.0
-    } else {
-        ((source_size_bytes as f64 - archive_size_bytes as f64) / source_size_bytes as f64
-            * 100.0)
-            .max(0.0)
-    };
 
+    let generated_files = docker_setup
+        .generated_files
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>();
+    let generated_summary = if generated_files.is_empty() {
+        "Used the existing Docker setup in the selected project.".to_string()
+    } else {
+        format!(
+            "Generated {} Docker setup file(s) before building the image.",
+            generated_files.len()
+        )
+    };
     let summary = format!(
-        "Compressed {} files from {} into {} and skipped {} bulky paths.",
-        files_to_archive.len(),
-        project_name,
-        archive_name,
-        skipped_entries.len()
+        "{generated_summary} Built Docker image {} and saved it as {} in the selected project root.",
+        image_tag, image_file_name
     );
 
-    Ok(BundleResult {
+    docker_setup
+        .notes
+        .push("No container was created by this action.".to_string());
+    docker_setup.notes.push(format!(
+        "Saved the Docker image archive to {}.",
+        image_archive_path.display()
+    ));
+
+    Ok(DockerImageResult {
         project_name,
         project_root: project_root.display().to_string(),
-        archive_path: archive_path.display().to_string(),
-        source_size_bytes,
-        archive_size_bytes,
-        included_files: files_to_archive.len(),
-        skipped_entries,
+        dockerfile_path: docker_setup.dockerfile_path.display().to_string(),
+        image_archive_path: image_archive_path.display().to_string(),
+        image_tag,
+        image_size_bytes,
+        detected_stack: docker_setup.detected_stack,
+        docker_setup_source: docker_setup.docker_setup_source,
+        generated_files,
         summary,
-        space_saved_percent,
+        notes: docker_setup.notes,
     })
 }
 
-fn collect_files(
-    project_root: &Path,
-    archive_path: &Path,
-    skipped_entries: &mut BTreeSet<String>,
-) -> Result<Vec<PathBuf>, String> {
-    let walker = WalkDir::new(project_root)
-        .follow_links(false)
-        .into_iter()
-        .filter_entry(|entry| keep_entry(entry, project_root, archive_path, skipped_entries));
+fn ensure_docker_setup(project_root: &Path, project_name: &str) -> Result<DockerSetup, String> {
+    let detected_project = detect_project(project_root)?;
+    let dockerfile_path = project_root.join("Dockerfile");
+    let dockerignore_path = project_root.join(".dockerignore");
+    let dockerfile_generated_by_app = !dockerfile_path.exists();
 
-    let mut files = Vec::new();
+    let mut generated_files = Vec::new();
+    let mut notes = vec![format!(
+        "Detected project stack: {}.",
+        detected_project.label()
+    )];
 
-    for entry in walker {
-        let entry =
-            entry.map_err(|error| format!("Failed while scanning the selected folder: {error}"))?;
-
-        if entry.path() == project_root {
-            continue;
-        }
-
-        if entry.file_type().is_file() {
-            files.push(entry.into_path());
-        }
+    if dockerfile_generated_by_app {
+        let dockerfile_contents = detected_project.primary_dockerfile(project_name);
+        fs::write(&dockerfile_path, dockerfile_contents)
+            .map_err(|error| format!("Failed to create the Dockerfile: {error}"))?;
+        generated_files.push(dockerfile_path.clone());
+        notes.push(format!(
+            "Generated a Dockerfile for the detected {} project.",
+            detected_project.label()
+        ));
+    } else {
+        notes.push("Used the existing Dockerfile from the selected project root.".to_string());
     }
 
-    Ok(files)
-}
-
-fn keep_entry(
-    entry: &DirEntry,
-    project_root: &Path,
-    archive_path: &Path,
-    skipped_entries: &mut BTreeSet<String>,
-) -> bool {
-    if entry.path() == project_root {
-        return true;
+    if !dockerignore_path.exists() {
+        fs::write(&dockerignore_path, default_dockerignore())
+            .map_err(|error| format!("Failed to create the .dockerignore file: {error}"))?;
+        generated_files.push(dockerignore_path.clone());
+        notes.push(
+            "Generated a .dockerignore file to keep the Docker build context lean.".to_string(),
+        );
+    } else {
+        notes.push("Used the existing .dockerignore from the selected project root.".to_string());
     }
 
-    let Ok(relative_path) = entry.path().strip_prefix(project_root) else {
-        return true;
+    notes.extend(detected_project.notes());
+
+    let docker_setup_source = if dockerfile_generated_by_app {
+        "App generated".to_string()
+    } else if generated_files.is_empty() {
+        "Existing setup".to_string()
+    } else {
+        "Existing Dockerfile + generated ignore".to_string()
     };
 
-    if entry.path() == archive_path || should_skip(relative_path) {
-        skipped_entries.insert(relative_path.display().to_string());
-        return false;
-    }
-
-    true
+    Ok(DockerSetup {
+        dockerfile_path,
+        detected_stack: detected_project.label().to_string(),
+        docker_setup_source,
+        generated_files,
+        notes,
+        dockerfile_generated_by_app,
+    })
 }
 
-fn should_skip(relative_path: &Path) -> bool {
-    for component in relative_path.components() {
-        let Component::Normal(name) = component else {
-            continue;
-        };
+fn detect_project(project_root: &Path) -> Result<DetectedProject, String> {
+    if project_root.join("package.json").exists() {
+        return detect_node_project(project_root).map(DetectedProject::Node);
+    }
 
-        let Some(name) = name.to_str() else {
-            continue;
-        };
+    if project_root.join("requirements.txt").exists()
+        || project_root.join("pyproject.toml").exists()
+        || project_root.join("manage.py").exists()
+        || project_root.join("app.py").exists()
+        || project_root.join("main.py").exists()
+    {
+        return Ok(DetectedProject::Python(detect_python_project(project_root)));
+    }
 
-        if SKIPPED_NAMES.contains(&name) || name == ".DS_Store" {
-            return true;
+    if project_root.join("Cargo.toml").exists() {
+        return Ok(DetectedProject::Rust(detect_rust_project(project_root)?));
+    }
+
+    Ok(DetectedProject::Generic)
+}
+
+fn detect_node_project(project_root: &Path) -> Result<NodeProject, String> {
+    let package_json_path = project_root.join("package.json");
+    let package_json = fs::read_to_string(&package_json_path)
+        .map_err(|error| format!("Failed to read package.json: {error}"))?;
+    let package_json: Value = serde_json::from_str(&package_json)
+        .map_err(|error| format!("Failed to parse package.json: {error}"))?;
+    let package_manager = detect_package_manager(project_root, &package_json);
+    let has_build = script_exists(&package_json, "build");
+    let has_start = script_exists(&package_json, "start");
+    let has_preview = script_exists(&package_json, "preview");
+    let has_dev = script_exists(&package_json, "dev");
+    let uses_next =
+        dependency_exists(&package_json, "next") || script_contains(&package_json, "next");
+    let uses_vite =
+        dependency_exists(&package_json, "vite") || script_contains(&package_json, "vite");
+    let uses_nest = dependency_exists(&package_json, "@nestjs/core");
+    let framework_label = if uses_next {
+        "Node.js (Next.js)"
+    } else if uses_nest {
+        "Node.js (NestJS)"
+    } else if uses_vite {
+        "Node.js (Vite)"
+    } else {
+        "Node.js"
+    }
+    .to_string();
+    let port = if uses_next || has_start {
+        3000
+    } else if uses_vite {
+        4173
+    } else {
+        3000
+    };
+
+    let run_command = if has_start {
+        package_manager.run_script_command("start")
+    } else if has_preview {
+        format!(
+            "{} -- --host 0.0.0.0 --port {}",
+            package_manager.run_script_command("preview"),
+            port
+        )
+    } else if has_dev {
+        format!(
+            "{} -- --host 0.0.0.0 --port {}",
+            package_manager.run_script_command("dev"),
+            port
+        )
+    } else {
+        "node -e 'console.log(\"ComputeHive built this image. Add a start script before running the container.\")'".to_string()
+    };
+
+    Ok(NodeProject {
+        install_command: package_manager.install_command(project_root),
+        build_command: has_build.then(|| package_manager.run_script_command("build")),
+        package_manager,
+        framework_label,
+        run_command,
+        port,
+    })
+}
+
+fn detect_python_project(project_root: &Path) -> PythonProject {
+    let install_step = if project_root.join("requirements.txt").exists() {
+        "RUN pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir -r requirements.txt"
+            .to_string()
+    } else if project_root.join("pyproject.toml").exists() {
+        "RUN pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir .".to_string()
+    } else {
+        "RUN pip install --no-cache-dir --upgrade pip".to_string()
+    };
+
+    let run_command = if project_root.join("manage.py").exists() {
+        "python manage.py runserver 0.0.0.0:8000".to_string()
+    } else if project_root.join("app.py").exists() {
+        "python app.py".to_string()
+    } else if project_root.join("main.py").exists() {
+        "python main.py".to_string()
+    } else {
+        "python -m http.server 8000".to_string()
+    };
+
+    PythonProject {
+        install_step,
+        run_command,
+    }
+}
+
+fn detect_rust_project(project_root: &Path) -> Result<RustProject, String> {
+    let cargo_toml_path = project_root.join("Cargo.toml");
+    let cargo_toml = fs::read_to_string(&cargo_toml_path)
+        .map_err(|error| format!("Failed to read Cargo.toml: {error}"))?;
+    let binary_name = extract_cargo_package_name(&cargo_toml).unwrap_or_else(|| "app".to_string());
+    Ok(RustProject { binary_name })
+}
+
+impl DetectedProject {
+    fn label(&self) -> &str {
+        match self {
+            Self::Node(project) => &project.framework_label,
+            Self::Python(_) => "Python",
+            Self::Rust(_) => "Rust",
+            Self::Generic => "Generic project",
         }
     }
 
-    false
+    fn primary_dockerfile(&self, project_name: &str) -> String {
+        match self {
+            Self::Node(project) => node_dockerfile(project),
+            Self::Python(project) => python_dockerfile(project),
+            Self::Rust(project) => rust_dockerfile(project),
+            Self::Generic => generic_dockerfile(project_name),
+        }
+    }
+
+    fn notes(&self) -> Vec<String> {
+        match self {
+            Self::Node(project) => vec![
+                format!(
+                    "Generated Node.js Docker setup using {} commands.",
+                    project.package_manager.label()
+                ),
+                format!(
+                    "The generated image exposes port {} and runs {} by default.",
+                    project.port, project.run_command
+                ),
+            ],
+            Self::Python(_) => vec![
+                "Generated Python Docker setup with a Python 3.11 slim base image.".to_string(),
+                "The generated Python image defaults to port 8000.".to_string(),
+            ],
+            Self::Rust(project) => vec![
+                "Generated Rust Docker setup with a release build step.".to_string(),
+                format!(
+                    "The generated Rust image targets the binary `{}` by default.",
+                    project.binary_name
+                ),
+            ],
+            Self::Generic => vec![
+                "Generated a generic fallback Dockerfile because no specific project stack was detected."
+                    .to_string(),
+            ],
+        }
+    }
+}
+
+impl PackageManager {
+    fn label(&self) -> &str {
+        match self {
+            Self::Npm => "npm",
+            Self::Pnpm => "pnpm",
+            Self::Yarn => "yarn",
+            Self::Bun => "bun",
+        }
+    }
+
+    fn base_image(&self) -> &str {
+        match self {
+            Self::Bun => "oven/bun:1.1-alpine",
+            _ => "node:20-alpine",
+        }
+    }
+
+    fn requires_corepack(&self) -> bool {
+        matches!(self, Self::Pnpm | Self::Yarn)
+    }
+
+    fn run_script_command(&self, script: &str) -> String {
+        match self {
+            Self::Npm => format!("npm run {script}"),
+            Self::Pnpm => format!("pnpm run {script}"),
+            Self::Yarn => format!("yarn {script}"),
+            Self::Bun => format!("bun run {script}"),
+        }
+    }
+
+    fn install_command(&self, project_root: &Path) -> String {
+        match self {
+            Self::Npm => {
+                if project_root.join("package-lock.json").exists() {
+                    "npm ci".to_string()
+                } else {
+                    "npm install".to_string()
+                }
+            }
+            Self::Pnpm => {
+                if project_root.join("pnpm-lock.yaml").exists() {
+                    "pnpm install --frozen-lockfile".to_string()
+                } else {
+                    "pnpm install".to_string()
+                }
+            }
+            Self::Yarn => {
+                if project_root.join("yarn.lock").exists() {
+                    "yarn install --frozen-lockfile".to_string()
+                } else {
+                    "yarn install".to_string()
+                }
+            }
+            Self::Bun => {
+                if project_root.join("bun.lockb").exists() || project_root.join("bun.lock").exists()
+                {
+                    "bun install --frozen-lockfile".to_string()
+                } else {
+                    "bun install".to_string()
+                }
+            }
+        }
+    }
+}
+
+fn detect_package_manager(project_root: &Path, package_json: &Value) -> PackageManager {
+    let package_manager = package_json
+        .get("packageManager")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+
+    if package_manager.starts_with("bun")
+        || project_root.join("bun.lockb").exists()
+        || project_root.join("bun.lock").exists()
+    {
+        PackageManager::Bun
+    } else if package_manager.starts_with("pnpm") || project_root.join("pnpm-lock.yaml").exists() {
+        PackageManager::Pnpm
+    } else if package_manager.starts_with("yarn") || project_root.join("yarn.lock").exists() {
+        PackageManager::Yarn
+    } else {
+        PackageManager::Npm
+    }
+}
+
+fn dependency_exists(package_json: &Value, dependency_name: &str) -> bool {
+    package_json
+        .get("dependencies")
+        .and_then(Value::as_object)
+        .and_then(|dependencies| dependencies.get(dependency_name))
+        .is_some()
+        || package_json
+            .get("devDependencies")
+            .and_then(Value::as_object)
+            .and_then(|dependencies| dependencies.get(dependency_name))
+            .is_some()
+}
+
+fn script_exists(package_json: &Value, script_name: &str) -> bool {
+    package_json
+        .get("scripts")
+        .and_then(Value::as_object)
+        .and_then(|scripts| scripts.get(script_name))
+        .is_some()
+}
+
+fn script_contains(package_json: &Value, needle: &str) -> bool {
+    package_json
+        .get("scripts")
+        .and_then(Value::as_object)
+        .map(|scripts| {
+            scripts
+                .values()
+                .filter_map(Value::as_str)
+                .any(|script| script.contains(needle))
+        })
+        .unwrap_or(false)
+}
+
+fn node_dockerfile(project: &NodeProject) -> String {
+    let corepack_step = if project.package_manager.requires_corepack() {
+        "RUN corepack enable\n"
+    } else {
+        ""
+    };
+    let build_step = project
+        .build_command
+        .as_ref()
+        .map(|command| format!("RUN {command}\n"))
+        .unwrap_or_default();
+
+    format!(
+        "FROM {}\nWORKDIR /app\n{}COPY . .\nRUN {}\n{}EXPOSE {}\nCMD sh -c \"{}\"\n",
+        project.package_manager.base_image(),
+        corepack_step,
+        project.install_command,
+        build_step,
+        project.port,
+        escape_for_docker_shell(&project.run_command),
+    )
+}
+
+fn python_dockerfile(project: &PythonProject) -> String {
+    format!(
+        "FROM python:3.11-slim\nWORKDIR /app\nENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1\nCOPY . .\n{}\nEXPOSE 8000\nCMD sh -c \"{}\"\n",
+        project.install_step,
+        escape_for_docker_shell(&project.run_command),
+    )
+}
+
+fn rust_dockerfile(project: &RustProject) -> String {
+    format!(
+        "FROM rust:1.81-slim\nWORKDIR /app\nCOPY . .\nRUN cargo build --release\nCMD sh -c \"if [ -x target/release/{0} ]; then ./target/release/{0}; else echo 'ComputeHive built the Rust image but could not find the expected binary.'; fi\"\n",
+        escape_for_docker_shell(&project.binary_name),
+    )
+}
+
+fn generic_dockerfile(project_name: &str) -> String {
+    format!(
+        "FROM alpine:3.20\nWORKDIR /workspace\nCOPY . .\nCMD sh -c \"echo 'ComputeHive created a generic Docker image for {}.'\"\n",
+        escape_for_docker_shell(project_name),
+    )
+}
+
+fn default_dockerignore() -> &'static str {
+    ".git\n.gitignore\n.DS_Store\nnode_modules\ndist\nbuild\ncoverage\ntarget\n.venv\nvenv\n__pycache__\n.next\n.nuxt\n.turbo\n*.log\n*.pid\n*.tar\n*.tar.gz\n*.zip\n*-computehive-image.tar\n*-computehive-image.tar.gz\n"
+}
+
+fn ensure_docker_runtime_available() -> Result<Vec<String>, String> {
+    match docker_info_status()? {
+        DockerInfoStatus::Ready => Ok(vec![
+            "Docker daemon is available and ready for image build.".to_string(),
+        ]),
+        DockerInfoStatus::DaemonUnavailable(details) => {
+            let runtime = launch_docker_runtime()?;
+            wait_for_docker_daemon(&runtime)?;
+            Ok(vec![
+                format!("Docker daemon was not running, so ComputeHive launched {runtime}."),
+                format!("Docker reported before startup: {details}"),
+                "Docker daemon became ready and the app continued automatically.".to_string(),
+            ])
+        }
+        DockerInfoStatus::OtherFailure(details) => Err(format!(
+            "Docker is installed but not usable in the current environment. {}",
+            details
+        )),
+    }
+}
+
+fn docker_info_status() -> Result<DockerInfoStatus, String> {
+    let output = Command::new("docker")
+        .arg("info")
+        .output()
+        .map_err(|error| command_invocation_error("docker", error))?;
+
+    if output.status.success() {
+        return Ok(DockerInfoStatus::Ready);
+    }
+
+    let details = summarize_command_output(&output);
+    let lower = details.to_ascii_lowercase();
+
+    if lower.contains("cannot connect to the docker daemon")
+        || lower.contains("is the docker daemon running")
+        || lower.contains("error during connect")
+        || lower.contains("docker.sock")
+    {
+        Ok(DockerInfoStatus::DaemonUnavailable(details))
+    } else {
+        Ok(DockerInfoStatus::OtherFailure(details))
+    }
+}
+
+fn launch_docker_runtime() -> Result<String, String> {
+    for candidate in docker_runtime_candidates() {
+        let status = Command::new("open")
+            .arg("-a")
+            .arg(&candidate)
+            .status()
+            .map_err(|error| format!("Failed to launch {candidate}: {error}"))?;
+
+        if status.success() {
+            return Ok(candidate);
+        }
+    }
+
+    Err(
+        "Docker daemon is not running and ComputeHive could not find a supported local runtime to launch automatically. Install or enable OrbStack or Docker Desktop."
+            .to_string(),
+    )
+}
+
+fn docker_runtime_candidates() -> Vec<String> {
+    let mut candidates = Vec::new();
+
+    if app_exists_in_common_locations("OrbStack.app") {
+        candidates.push("OrbStack".to_string());
+    }
+
+    if app_exists_in_common_locations("Docker.app") {
+        candidates.push("Docker".to_string());
+    }
+
+    candidates
+}
+
+fn app_exists_in_common_locations(app_name: &str) -> bool {
+    let applications_path = Path::new("/Applications").join(app_name);
+    if applications_path.exists() {
+        return true;
+    }
+
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join("Applications").join(app_name).exists())
+        .unwrap_or(false)
+}
+
+fn wait_for_docker_daemon(runtime_name: &str) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(45);
+    let mut last_details = String::new();
+
+    while Instant::now() < deadline {
+        match docker_info_status()? {
+            DockerInfoStatus::Ready => return Ok(()),
+            DockerInfoStatus::DaemonUnavailable(details)
+            | DockerInfoStatus::OtherFailure(details) => {
+                last_details = details;
+            }
+        }
+
+        thread::sleep(Duration::from_secs(1));
+    }
+
+    if last_details.is_empty() {
+        Err(format!(
+            "{runtime_name} was launched, but Docker did not become ready in time."
+        ))
+    } else {
+        Err(format!(
+            "{runtime_name} was launched, but Docker did not become ready in time. Last Docker response: {last_details}"
+        ))
+    }
+}
+
+fn build_docker_image(
+    project_root: &Path,
+    dockerfile_path: &Path,
+    image_tag: &str,
+) -> Result<(), String> {
+    let output = Command::new("docker")
+        .arg("build")
+        .arg("-t")
+        .arg(image_tag)
+        .arg("-f")
+        .arg(dockerfile_path)
+        .arg(project_root)
+        .output()
+        .map_err(|error| command_invocation_error("docker build", error))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Docker build failed. {}",
+            summarize_command_output(&output)
+        ))
+    }
+}
+
+fn save_docker_image(image_archive_path: &Path, image_tag: &str) -> Result<(), String> {
+    let output = Command::new("docker")
+        .arg("save")
+        .arg("-o")
+        .arg(image_archive_path)
+        .arg(image_tag)
+        .output()
+        .map_err(|error| command_invocation_error("docker save", error))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Docker image export failed. {}",
+            summarize_command_output(&output)
+        ))
+    }
+}
+
+fn gzip_file(source_path: &Path, target_path: &Path) -> Result<(), String> {
+    let input = File::open(source_path)
+        .map_err(|error| format!("Failed to open the Docker image tar for compression: {error}"))?;
+    let output = File::create(target_path).map_err(|error| {
+        format!("Failed to create the compressed Docker image archive: {error}")
+    })?;
+
+    let mut encoder = GzEncoder::new(BufWriter::new(output), Compression::best());
+    io::copy(&mut BufReader::new(input), &mut encoder)
+        .map_err(|error| format!("Failed to compress the Docker image archive: {error}"))?;
+    encoder
+        .finish()
+        .map_err(|error| format!("Failed to finalize the compressed image archive: {error}"))?;
+
+    Ok(())
+}
+
+fn sha256_for_file(path: &Path) -> Result<String, String> {
+    let file = File::open(path)
+        .map_err(|error| format!("Failed to open the compressed image for hashing: {error}"))?;
+    let mut reader = BufReader::new(file);
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 16 * 1024];
+
+    loop {
+        let bytes_read = reader
+            .read(&mut buffer)
+            .map_err(|error| format!("Failed to read the compressed image for hashing: {error}"))?;
+        if bytes_read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..bytes_read]);
+    }
+
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+async fn upload_artifact_to_object_storage(
+    config: &AppConfig,
+    artifact_path: &Path,
+    object_key: &str,
+    artifact_sha256: &str,
+) -> Result<UploadedArtifact, String> {
+    let config = config.clone();
+    let artifact_path = artifact_path.to_path_buf();
+    let object_key = object_key.to_string();
+    let artifact_sha256 = artifact_sha256.to_string();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        upload_artifact_to_object_storage_blocking(
+            &config,
+            &artifact_path,
+            &object_key,
+            &artifact_sha256,
+        )
+    })
+    .await
+    .map_err(|error| format!("The object storage upload task failed: {error}"))?
+}
+
+async fn delete_artifact_from_object_storage(
+    config: &AppConfig,
+    object_key: &str,
+) -> Result<(), String> {
+    let config = config.clone();
+    let object_key = object_key.to_string();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let (bucket, credentials) = object_storage_bucket(&config.object_storage)?;
+        let action = bucket.delete_object(Some(&credentials), &object_key);
+        let signed_url = action.sign(Duration::from_secs(900));
+        let response = BlockingHttpClient::new()
+            .delete(signed_url)
+            .send()
+            .map_err(|error| {
+                format!("Failed to delete the uploaded artifact from object storage: {error}")
+            })?;
+
+        if response.status().is_success() || response.status().as_u16() == 404 {
+            Ok(())
+        } else {
+            let status = response.status();
+            let body = response
+                .text()
+                .unwrap_or_else(|_| "Object storage did not return an error body.".to_string());
+            Err(format!(
+                "Object storage cleanup failed with status {}. {}",
+                status, body
+            ))
+        }
+    })
+    .await
+    .map_err(|error| format!("The object storage cleanup task failed: {error}"))?
+}
+
+fn upload_artifact_to_object_storage_blocking(
+    config: &AppConfig,
+    artifact_path: &Path,
+    object_key: &str,
+    artifact_sha256: &str,
+) -> Result<UploadedArtifact, String> {
+    let (bucket, credentials) = object_storage_bucket(&config.object_storage)?;
+    let mut action = bucket.put_object(Some(&credentials), object_key);
+    action
+        .headers_mut()
+        .insert("content-type", "application/gzip");
+    action
+        .headers_mut()
+        .insert("x-amz-meta-artifact-sha256", artifact_sha256);
+    let signed_url = action.sign(Duration::from_secs(900));
+
+    let file = File::open(artifact_path)
+        .map_err(|error| format!("Failed to open the compressed artifact for upload: {error}"))?;
+    let response = BlockingHttpClient::new()
+        .put(signed_url)
+        .header("content-type", "application/gzip")
+        .header("x-amz-meta-artifact-sha256", artifact_sha256)
+        .body(ReqwestBody::from(file))
+        .send()
+        .map_err(|error| format!("Failed to upload the artifact to object storage: {error}"))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response
+            .text()
+            .unwrap_or_else(|_| "Object storage did not return an error body.".to_string());
+        return Err(format!(
+            "Object storage upload failed with status {}. {}",
+            status, body
+        ));
+    }
+
+    Ok(UploadedArtifact {
+        artifact_uri: format!("s3://{}/{}", config.object_storage.bucket_name, object_key),
+        artifact_api_url: join_bucket_api_url(&config.object_storage.bucket_api_url, object_key),
+        artifact_public_url: join_bucket_api_url(
+            &config.object_storage.bucket_public_url,
+            object_key,
+        ),
+        artifact_object_key: object_key.to_string(),
+        artifact_etag: response
+            .headers()
+            .get("etag")
+            .and_then(|value| value.to_str().ok())
+            .map(ToString::to_string),
+    })
+}
+
+fn object_storage_bucket(config: &ObjectStorageConfig) -> Result<(Bucket, S3Credentials), String> {
+    let endpoint = Url::parse(&config.endpoint_url)
+        .map_err(|error| format!("Failed to parse the object storage endpoint: {error}"))?;
+    let bucket = Bucket::new(
+        endpoint,
+        UrlStyle::Path,
+        config.bucket_name.clone(),
+        config.region.clone(),
+    )
+    .map_err(|error| format!("Failed to create the object storage bucket client: {error}"))?;
+    let credentials = S3Credentials::new(
+        config.access_key_id.clone(),
+        config.secret_access_key.clone(),
+    );
+
+    Ok((bucket, credentials))
+}
+
+fn enqueue_run_request(
+    config: &AppConfig,
+    job_id: &str,
+    image: &DockerImageResult,
+    artifact_record: &ArtifactRecord,
+) -> Result<(), String> {
+    let client = redis::Client::open(config.redis_url.as_str())
+        .map_err(|error| format!("Failed to parse the Redis URL: {error}"))?;
+    let mut connection = client
+        .get_connection()
+        .map_err(|error| format!("Failed to connect to Redis: {error}"))?;
+
+    let mut environment = HashMap::new();
+    environment.insert(
+        "COMPUTEHIVE_ARTIFACT_SHA256".to_string(),
+        artifact_record.artifact_sha256.clone(),
+    );
+    environment.insert(
+        "COMPUTEHIVE_ARTIFACT_URI".to_string(),
+        artifact_record.artifact_uri.clone(),
+    );
+    environment.insert(
+        "COMPUTEHIVE_ARTIFACT_API_URL".to_string(),
+        artifact_record.artifact_api_url.clone(),
+    );
+    environment.insert(
+        "COMPUTEHIVE_ARTIFACT_OBJECT_KEY".to_string(),
+        artifact_record.artifact_object_key.clone(),
+    );
+    environment.insert(
+        "COMPUTEHIVE_PROJECT_NAME".to_string(),
+        artifact_record.project_name.clone(),
+    );
+    environment.insert(
+        "COMPUTEHIVE_DETECTED_STACK".to_string(),
+        artifact_record.detected_stack.clone(),
+    );
+    environment.insert("COMPUTEHIVE_IMAGE_TAG".to_string(), image.image_tag.clone());
+    environment.insert(
+        "COMPUTEHIVE_IMAGE_ARCHIVE_PATH".to_string(),
+        artifact_record.gzip_archive_path.clone(),
+    );
+
+    let job_record = RedisJobRecord {
+        id: job_id.to_string(),
+        container_image: image.image_tag.clone(),
+        command: placeholder_contributor_command(),
+        required_resources: Some(default_required_resources()),
+        environment,
+        max_runtime_seconds: DEFAULT_MAX_RUNTIME_SECONDS,
+        status: JOB_STATUS_QUEUED.to_string(),
+        created_at_unix: artifact_record.created_at_unix,
+        assigned_worker_id: String::new(),
+    };
+
+    let job_payload = serde_json::to_string(&job_record)
+        .map_err(|error| format!("Failed to encode the Redis job record: {error}"))?;
+    let artifact_payload = serde_json::to_string(artifact_record)
+        .map_err(|error| format!("Failed to encode the artifact metadata record: {error}"))?;
+
+    redis::pipe()
+        .atomic()
+        .set(job_key(job_id), job_payload)
+        .ignore()
+        .set(job_status_key(job_id), JOB_STATUS_QUEUED)
+        .ignore()
+        .rpush(JOB_QUEUE_KEY, job_id)
+        .ignore()
+        .set(artifact_record_key(job_id), artifact_payload)
+        .ignore()
+        .query::<()>(&mut connection)
+        .map_err(|error| format!("Failed to enqueue the run request in Redis: {error}"))?;
+
+    Ok(())
+}
+
+fn default_required_resources() -> RedisResourceSpec {
+    RedisResourceSpec {
+        cpu_cores: DEFAULT_REQUIRED_CPU_CORES,
+        gpu_count: DEFAULT_REQUIRED_GPU_COUNT,
+        memory_mb: DEFAULT_REQUIRED_MEMORY_MB,
+    }
+}
+
+fn placeholder_contributor_command() -> Vec<String> {
+    vec![
+        "/bin/sh".to_string(),
+        "-lc".to_string(),
+        "echo 'ComputeHive artifact verified and queued. Contributor actions will load and run this image in a later pass.'"
+            .to_string(),
+    ]
+}
+
+fn tar_gz_path_for_project(project_root: &Path, project_name: &str) -> PathBuf {
+    let sanitized_name = sanitize_name(project_name);
+    project_root.join(format!("{sanitized_name}-computehive-image.tar.gz"))
+}
+
+fn object_key_for_artifact(project_name: &str, job_id: &str, artifact_sha256: &str) -> String {
+    let sanitized_name = sanitize_name(project_name);
+    let hash_prefix = artifact_sha256.chars().take(16).collect::<String>();
+    format!(
+        "computehive/run-requests/{sanitized_name}/{job_id}/{sanitized_name}-{hash_prefix}.tar.gz"
+    )
+}
+
+fn app_config() -> Result<&'static AppConfig, String> {
+    match APP_CONFIG.get_or_init(load_app_config) {
+        Ok(config) => Ok(config),
+        Err(error) => Err(error.clone()),
+    }
+}
+
+fn load_app_config() -> Result<AppConfig, String> {
+    ensure_env_file_loaded();
+
+    let bucket_url = required_env("S3_BUCKET")?;
+    let access_key_id = required_env("S3_ACCESS_KEY_ID")?;
+    let secret_access_key = required_env("S3_SECRET_ACCESS_KEY")?;
+    let redis_url = required_env("REDIS_URL")?;
+    let (endpoint_url, bucket_name, bucket_api_url) = parse_bucket_url(&bucket_url)?;
+    let bucket_public_url =
+        optional_env("S3_PUBLIC_BUCKET_URL").unwrap_or_else(|| bucket_api_url.clone());
+
+    Ok(AppConfig {
+        object_storage: ObjectStorageConfig {
+            endpoint_url,
+            bucket_name,
+            bucket_api_url,
+            bucket_public_url,
+            access_key_id,
+            secret_access_key,
+            region: DEFAULT_R2_REGION.to_string(),
+        },
+        redis_url,
+    })
+}
+
+fn ensure_env_file_loaded() {
+    ENV_FILE_LOADED.get_or_init(|| {
+        for path in env_file_candidates() {
+            if path.exists() {
+                let _ = dotenvy::from_path_override(path);
+                break;
+            }
+        }
+    });
+}
+
+fn env_file_candidates() -> Vec<PathBuf> {
+    let mut paths = vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("../.env")];
+
+    if let Ok(current_dir) = std::env::current_dir() {
+        paths.push(current_dir.join(".env"));
+    }
+
+    paths
+}
+
+fn required_env(key: &str) -> Result<String, String> {
+    std::env::var(key)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| format!("Missing required configuration value: {key}"))
+}
+
+fn optional_env(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn parse_bucket_url(bucket_url: &str) -> Result<(String, String, String), String> {
+    let url =
+        Url::parse(bucket_url).map_err(|error| format!("Failed to parse S3_BUCKET: {error}"))?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| "S3_BUCKET is missing a host.".to_string())?;
+    let endpoint_url = match url.port() {
+        Some(port) => format!("{}://{}:{}", url.scheme(), host, port),
+        None => format!("{}://{}", url.scheme(), host),
+    };
+    let bucket_name = url.path().trim_matches('/').to_string();
+
+    if bucket_name.is_empty() {
+        return Err("S3_BUCKET must include the bucket name in the path.".to_string());
+    }
+
+    let bucket_api_url = format!("{}/{}", endpoint_url, bucket_name);
+    Ok((endpoint_url, bucket_name, bucket_api_url))
+}
+
+fn join_bucket_api_url(bucket_api_url: &str, object_key: &str) -> String {
+    format!(
+        "{}/{}",
+        bucket_api_url.trim_end_matches('/'),
+        object_key.trim_start_matches('/')
+    )
+}
+
+fn current_unix_timestamp() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
+fn job_key(job_id: &str) -> String {
+    format!("job:{job_id}")
+}
+
+fn job_status_key(job_id: &str) -> String {
+    format!("job_status:{job_id}")
+}
+
+fn artifact_record_key(job_id: &str) -> String {
+    format!("{ARTIFACT_RECORD_PREFIX}{job_id}")
 }
 
 fn sanitize_name(name: &str) -> String {
     let sanitized = name
         .chars()
         .map(|character| {
-            if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
-                character
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_lowercase()
             } else {
                 '-'
             }
@@ -221,14 +1494,63 @@ fn sanitize_name(name: &str) -> String {
     }
 }
 
-fn normalize_for_zip(path: &Path) -> String {
-    path.components()
-        .filter_map(|component| match component {
-            Component::Normal(part) => part.to_str(),
-            _ => None,
-        })
+fn extract_cargo_package_name(cargo_toml: &str) -> Option<String> {
+    let mut in_package_section = false;
+
+    for line in cargo_toml.lines() {
+        let trimmed = line.trim();
+
+        if trimmed.starts_with('[') {
+            in_package_section = trimmed == "[package]";
+            continue;
+        }
+
+        if in_package_section && trimmed.starts_with("name") {
+            let name = trimmed.split('=').nth(1)?.trim().trim_matches('"');
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+        }
+    }
+
+    None
+}
+
+fn escape_for_docker_shell(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn command_invocation_error(command_name: &str, error: std::io::Error) -> String {
+    if error.kind() == ErrorKind::NotFound {
+        format!(
+            "{command_name} is not available. Install Docker and make sure the docker CLI is in PATH."
+        )
+    } else {
+        format!("Failed to run {command_name}: {error}")
+    }
+}
+
+fn summarize_command_output(output: &Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let combined = if stderr.trim().is_empty() {
+        stdout.trim()
+    } else {
+        stderr.trim()
+    };
+
+    let summarized = combined
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .take(8)
         .collect::<Vec<_>>()
-        .join("/")
+        .join(" ");
+
+    if summarized.is_empty() {
+        "Docker did not return additional output.".to_string()
+    } else {
+        summarized
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -236,7 +1558,11 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![prepare_project_bundle])
+        .invoke_handler(tauri::generate_handler![
+            create_project_docker_image,
+            request_project_run,
+            list_incoming_run_requests
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

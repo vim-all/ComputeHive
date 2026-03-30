@@ -332,6 +332,12 @@ h3 {
   margin-top: 1rem;
 }
 
+.button-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.8rem;
+}
+
 .status-card,
 .future-block,
 .future-notes {
@@ -417,6 +423,7 @@ h3 {
 .metric-block strong {
   font-size: 1.32rem;
   letter-spacing: -0.04em;
+  word-break: break-word;
 }
 
 .detail-stack {
@@ -432,6 +439,25 @@ h3 {
 .detail-value {
   margin-top: 0.45rem;
   word-break: break-word;
+}
+
+.detail-link,
+.queue-link a {
+  color: var(--accent);
+  word-break: break-all;
+}
+
+.detail-link {
+  display: inline-block;
+  margin-top: 0.45rem;
+  line-height: 1.65;
+  text-decoration-thickness: 0.08em;
+  text-underline-offset: 0.14em;
+}
+
+.detail-link.is-placeholder {
+  pointer-events: none;
+  text-decoration: none;
 }
 
 .muted {
@@ -460,6 +486,10 @@ h3 {
   border-radius: 1.4rem;
   background: rgba(255, 252, 246, 0.86);
   border: 1px solid rgba(29, 26, 23, 0.08);
+}
+
+.queue-card-empty {
+  padding: 1.35rem;
 }
 
 .queue-top {
@@ -496,6 +526,23 @@ h3 {
   font-size: 0.96rem;
   line-height: 1.45;
   word-break: break-word;
+}
+
+.queue-link {
+  margin: 0.95rem 0 0;
+  padding-top: 0.95rem;
+  border-top: 1px solid rgba(29, 26, 23, 0.08);
+  line-height: 1.6;
+}
+
+.queue-link-label {
+  display: block;
+  margin-bottom: 0.35rem;
+  color: rgba(29, 26, 23, 0.58);
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
 
 .contributor-aside {
@@ -597,7 +644,8 @@ h3 {
   .panel-header,
   .status-head,
   .queue-top,
-  .action-row {
+  .action-row,
+  .button-group {
     flex-direction: column;
     align-items: flex-start;
   }

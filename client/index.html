@@ -18,15 +18,16 @@
     <div class="app-shell">
       <header class="masthead reveal">
         <div class="brand-column">
-          <p class="eyebrow" id="mode-eyebrow">Project Upload Flow</p>
+          <p class="eyebrow" id="mode-eyebrow">Project Image Flow</p>
           <h1 id="mode-heading">
-            Prepare project folders for compute handoff without leaving the
-            desktop app.
+            Build locally, then request a queued run with a hashed tar.gz artifact.
           </h1>
           <p class="lead" id="mode-copy">
-            Choose a project directory, compress it into a lean archive that
-            stays beside the source folder, and keep the contributor Docker work
-            reserved under Contributor Actions.
+            Choose a project directory and let ComputeHive generate Docker setup
+            when it is missing. You can build the Docker image locally, then
+            request a run so the app compresses the image to a tar.gz artifact,
+            hashes it, uploads it to object storage, and writes the queue
+            records into Redis.
           </p>
         </div>
 
@@ -54,8 +55,8 @@
         <section class="panel workflow-panel is-active reveal" data-panel="user">
           <div class="panel-header">
             <div>
-              <p class="eyebrow">Upload Surface</p>
-              <h2>Folder input and bundle preparation</h2>
+              <p class="eyebrow">Image Builder</p>
+              <h2>Folder input, Docker setup, image creation, and run requests</h2>
             </div>
 
             <button id="clear-selection" class="ghost-button" type="button">
@@ -67,11 +68,14 @@
             <div class="upload-region">
               <div class="upload-dropzone" id="folder-dropzone">
                 <p class="upload-kicker">Project Directory</p>
-                <h3>Choose the folder you want to prepare for compute upload</h3>
+                <h3>Choose the project folder you want the app to Dockerize</h3>
                 <p class="support-copy">
-                  The archive is written inside the selected folder itself.
-                  ComputeHive skips common generated directories so the upload
-                  bundle stays lighter than the raw project tree.
+                  ComputeHive checks for Docker setup in the selected project,
+                  creates Docker files when they are missing, builds the Docker
+                  image locally, and saves the image as a tar archive inside
+                  that same project root. Use the second action when you want
+                  the app to compress that image to a tar.gz artifact, hash it,
+                  upload it, and enqueue the Redis run request.
                 </p>
 
                 <button id="pick-folder" class="primary-button" type="button">
@@ -84,17 +88,30 @@
               </div>
 
               <div class="action-row">
-                <button
-                  id="prepare-bundle"
-                  class="primary-button"
-                  type="button"
-                  disabled
-                >
-                  Prepare upload bundle
-                </button>
+                <div class="button-group">
+                  <button
+                    id="create-image"
+                    class="primary-button"
+                    type="button"
+                    disabled
+                  >
+                    Create Docker image
+                  </button>
+                  <button
+                    id="request-run"
+                    class="ghost-button"
+                    type="button"
+                    disabled
+                  >
+                    Request for run
+                  </button>
+                </div>
                 <p class="action-copy">
-                  Stored in-place as a compressed archive inside the chosen
-                  directory.
+                  The first action stays local. The second action builds if
+                  needed, compresses the Docker image to a tar.gz file in the
+                  same project root, uploads it to object storage, and creates
+                  the coordinator queue records in Redis with the matching
+                  SHA-256 hash.
                 </p>
               </div>
             </div>
@@ -103,7 +120,7 @@
               <div class="status-card">
                 <div class="status-head">
                   <div>
-                    <p class="eyebrow">Bundle Status</p>
+                    <p class="eyebrow">Image Status</p>
                     <h3 id="bundle-summary-title">Waiting for a folder</h3>
                   </div>
                   <span id="bundle-status" class="status-pill status-idle">
@@ -112,40 +129,76 @@
                 </div>
 
                 <p id="bundle-summary" class="support-copy">
-                  Pick a project directory to prepare a compressed upload bundle.
+                  Pick a project directory and let the app prepare Docker setup, build the image, and optionally queue a run request with an uploaded tar.gz artifact.
                 </p>
 
                 <div class="metric-grid">
                   <div class="metric-block">
-                    <span class="metric-label">Included files</span>
-                    <strong id="included-files">0</strong>
+                    <span class="metric-label">Detected stack</span>
+                    <strong id="detected-stack">Not detected yet</strong>
                   </div>
                   <div class="metric-block">
-                    <span class="metric-label">Source footprint</span>
-                    <strong id="source-size">0 B</strong>
+                    <span class="metric-label">Image tag</span>
+                    <strong id="image-tag">Not built yet</strong>
                   </div>
                   <div class="metric-block">
-                    <span class="metric-label">Archive footprint</span>
-                    <strong id="archive-size">0 B</strong>
+                    <span class="metric-label">Image file size</span>
+                    <strong id="image-size">0 B</strong>
                   </div>
                   <div class="metric-block">
-                    <span class="metric-label">Space saved</span>
-                    <strong id="space-saved">0%</strong>
+                    <span class="metric-label">Docker setup</span>
+                    <strong id="docker-setup-source">Auto-generate if needed</strong>
                   </div>
                 </div>
 
                 <div class="detail-stack">
                   <div class="detail-section">
-                    <span class="detail-label">Archive output</span>
-                    <p id="archive-path" class="detail-value muted">
-                      The archive path will appear here after compression.
+                    <span class="detail-label">Image output</span>
+                    <p id="image-output-path" class="detail-value muted">
+                      The Docker image archive path will appear here after the build.
                     </p>
                   </div>
 
                   <div class="detail-section">
-                    <span class="detail-label">Skipped bulky paths</span>
-                    <ul id="skipped-list" class="detail-list">
-                      <li>Generated folders like `node_modules` and `target` are skipped automatically.</li>
+                    <span class="detail-label">Compressed artifact</span>
+                    <p id="gzip-output-path" class="detail-value muted">
+                      The tar.gz artifact path will appear here after a run request.
+                    </p>
+                  </div>
+
+                  <div class="detail-section">
+                    <span class="detail-label">Artifact hash</span>
+                    <p id="artifact-hash" class="detail-value muted">
+                      The SHA-256 hash will appear here after upload.
+                    </p>
+                  </div>
+
+                  <div class="detail-section">
+                    <span class="detail-label">Run request</span>
+                    <p id="run-request-details" class="detail-value muted">
+                      The Redis job id and object storage key will appear here after you request a run.
+                    </p>
+                  </div>
+
+                  <div class="detail-section">
+                    <span class="detail-label">Public bucket link</span>
+                    <a
+                      id="artifact-public-link"
+                      class="detail-link muted is-placeholder"
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      The public artifact link will appear here after upload.
+                    </a>
+                  </div>
+
+                  <div class="detail-section">
+                    <span class="detail-label">Build notes</span>
+                    <ul id="build-notes" class="detail-list">
+                      <li>The app creates Docker setup files automatically when they are missing.</li>
+                      <li>The local build action does not upload anything.</li>
+                      <li>The run request action uploads only the tar.gz image artifact.</li>
+                      <li>No container is created by this action.</li>
                     </ul>
                   </div>
                 </div>
@@ -158,19 +211,22 @@
           <div class="panel-header">
             <div>
               <p class="eyebrow">Contributor Dashboard</p>
-              <h2>Incoming workers queued for local execution</h2>
+              <h2>Incoming run requests queued for local contributor execution</h2>
             </div>
 
-            <span class="status-pill status-muted">Contributor Actions</span>
+            <button id="refresh-workers" class="ghost-button" type="button">
+              Refresh queue
+            </button>
           </div>
 
           <div class="contributor-grid">
             <div class="queue-column">
               <p class="support-copy contributor-copy">
                 This surface is for contributors who offer their compute
-                resources. Incoming worker packages appear here, and the future
-                Docker build and run lifecycle stays grouped under
-                <strong>Contributor Actions</strong>.
+                resources. Incoming run requests are loaded from Redis here,
+                including the queued image tag, compressed artifact, and
+                matching SHA-256 hash. The future Docker execution lifecycle
+                stays grouped under <strong>Contributor Actions</strong>.
               </p>
 
               <div id="worker-queue" class="queue-list"></div>
