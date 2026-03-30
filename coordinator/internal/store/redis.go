@@ -46,6 +46,7 @@ type ResultRecord struct {
 	JobID          string `json:"job_id"`
 	WorkerID       string `json:"worker_id"`
 	ResultStatus   string `json:"result_status,omitempty"`
+	Partial        bool   `json:"partial,omitempty"`
 	ExitCode       int32  `json:"exit_code,omitempty"`
 	StdoutExcerpt  string `json:"stdout_excerpt,omitempty"`
 	StderrExcerpt  string `json:"stderr_excerpt,omitempty"`
@@ -71,6 +72,10 @@ func jobStatusKey(jobID string) string {
 
 func resultKey(jobID string) string {
 	return "result:" + jobID
+}
+
+func jobWorkerKey(jobID string) string {
+	return "job_worker:" + jobID
 }
 
 func NewRedisClient(ctx context.Context, addr string) (*redis.Client, error) {
@@ -100,6 +105,33 @@ func SaveWorker(ctx context.Context, client *redis.Client, worker *WorkerRecord)
 		return fmt.Errorf("save worker %s: %w", worker.ID, err)
 	}
 
+	return nil
+}
+
+func ListWorkers(ctx context.Context, client *redis.Client) ([]string, error) {
+	workers, err := client.SMembers(ctx, workersKey).Result()
+	if err != nil {
+		return nil, fmt.Errorf("list workers: %w", err)
+	}
+	return workers, nil
+}
+
+func IsWorkerAlive(ctx context.Context, client *redis.Client, workerID string) (bool, error) {
+	exists, err := client.Exists(ctx, workerAliveKey(workerID)).Result()
+	if err != nil {
+		return false, fmt.Errorf("check worker alive %s: %w", workerID, err)
+	}
+	return exists == 1, nil
+}
+
+func RemoveWorker(ctx context.Context, client *redis.Client, workerID string) error {
+	pipe := client.TxPipeline()
+	pipe.SRem(ctx, workersKey, workerID)
+	pipe.Del(ctx, workerKey(workerID))
+	pipe.Del(ctx, workerAliveKey(workerID))
+	if _, err := pipe.Exec(ctx); err != nil {
+		return fmt.Errorf("remove worker %s: %w", workerID, err)
+	}
 	return nil
 }
 
@@ -156,6 +188,17 @@ func PopQueuedJobID(ctx context.Context, client *redis.Client) (string, error) {
 	return jobID, nil
 }
 
+func RequeueJobID(ctx context.Context, client *redis.Client, jobID string) error {
+	pipe := client.TxPipeline()
+	pipe.Set(ctx, jobStatusKey(jobID), JobStatusQueued, 0)
+	pipe.Del(ctx, jobWorkerKey(jobID))
+	pipe.RPush(ctx, jobQueueKey, jobID)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return fmt.Errorf("requeue job id %s: %w", jobID, err)
+	}
+	return nil
+}
+
 func SaveJob(ctx context.Context, client *redis.Client, job *JobRecord) error {
 	payload, err := json.Marshal(job)
 	if err != nil {
@@ -167,6 +210,79 @@ func SaveJob(ctx context.Context, client *redis.Client, job *JobRecord) error {
 	}
 
 	return nil
+}
+
+func SetJobWorker(ctx context.Context, client *redis.Client, jobID, workerID string) error {
+	if err := client.Set(ctx, jobWorkerKey(jobID), workerID, 0).Err(); err != nil {
+		return fmt.Errorf("set job worker %s: %w", jobID, err)
+	}
+	return nil
+}
+
+func GetJobWorker(ctx context.Context, client *redis.Client, jobID string) (string, error) {
+	workerID, err := client.Get(ctx, jobWorkerKey(jobID)).Result()
+	if err == redis.Nil {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("get job worker %s: %w", jobID, err)
+	}
+	return workerID, nil
+}
+
+func DeleteJobWorker(ctx context.Context, client *redis.Client, jobID string) error {
+	if err := client.Del(ctx, jobWorkerKey(jobID)).Err(); err != nil {
+		return fmt.Errorf("delete job worker %s: %w", jobID, err)
+	}
+	return nil
+}
+
+func ListJobWorkerAssignments(ctx context.Context, client *redis.Client) (map[string]string, error) {
+	assignments := make(map[string]string)
+	var cursor uint64
+	for {
+		keys, next, err := client.Scan(ctx, cursor, "job_worker:*", 100).Result()
+		if err != nil {
+			return nil, fmt.Errorf("scan job_worker:*: %w", err)
+		}
+		if len(keys) > 0 {
+			vals, err := client.MGet(ctx, keys...).Result()
+			if err != nil {
+				return nil, fmt.Errorf("mget job worker assignments: %w", err)
+			}
+			for i, key := range keys {
+				if vals[i] == nil {
+					continue
+				}
+				workerID, ok := vals[i].(string)
+				if !ok || workerID == "" {
+					continue
+				}
+				jobID := key[len("job_worker:"):]
+				assignments[jobID] = workerID
+			}
+		}
+		cursor = next
+		if cursor == 0 {
+			break
+		}
+	}
+	return assignments, nil
+}
+
+func JobsForWorker(ctx context.Context, client *redis.Client, workerID string) ([]string, error) {
+	assignments, err := ListJobWorkerAssignments(ctx, client)
+	if err != nil {
+		return nil, err
+	}
+
+	jobs := make([]string, 0)
+	for jobID, assignedWorker := range assignments {
+		if assignedWorker == workerID {
+			jobs = append(jobs, jobID)
+		}
+	}
+	return jobs, nil
 }
 
 func GetJob(ctx context.Context, client *redis.Client, jobID string) (*JobRecord, error) {
@@ -233,4 +349,39 @@ func GetResult(ctx context.Context, client *redis.Client, jobID string) (*Result
 	}
 
 	return &result, nil
+}
+
+func RequeueRunningJob(ctx context.Context, client *redis.Client, jobID string) error {
+	job, err := GetJob(ctx, client, jobID)
+	if err != nil {
+		return err
+	}
+	if job == nil {
+		return nil
+	}
+
+	status, err := GetJobStatus(ctx, client, jobID)
+	if err != nil {
+		return err
+	}
+	if status != JobStatusRunning {
+		return nil
+	}
+
+	job.Status = JobStatusQueued
+	job.AssignedWorkerID = ""
+	payload, err := json.Marshal(job)
+	if err != nil {
+		return fmt.Errorf("marshal requeue job %s: %w", jobID, err)
+	}
+
+	pipe := client.TxPipeline()
+	pipe.Set(ctx, jobKey(jobID), payload, 0)
+	pipe.Set(ctx, jobStatusKey(jobID), JobStatusQueued, 0)
+	pipe.Del(ctx, jobWorkerKey(jobID))
+	pipe.RPush(ctx, jobQueueKey, jobID)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return fmt.Errorf("requeue running job %s: %w", jobID, err)
+	}
+	return nil
 }
