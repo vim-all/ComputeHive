@@ -81,6 +81,7 @@ func jobWorkerKey(jobID string) string {
 	return "job_worker:" + jobID
 }
 
+<<<<<<< Updated upstream
 func NewRedisClient(ctx context.Context, addr, password string, db int, useTLS bool) (*redis.Client, error) {
 	opt := &redis.Options{
 		Addr:     addr,
@@ -92,6 +93,10 @@ func NewRedisClient(ctx context.Context, addr, password string, db int, useTLS b
 	}
 
 	client := redis.NewClient(opt)
+=======
+func NewRedisClient(ctx context.Context, addr string, pw string) (*redis.Client, error) {
+	client := redis.NewClient(&redis.Options{Addr: addr, Password: pw})
+>>>>>>> Stashed changes
 
 	pingCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
