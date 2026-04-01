@@ -14,7 +14,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
-	"github.com/adhyan-jain/ComputeHive/worker/internal/domain"
+	"github.com/vim-all/ComputeHive/worker/internal/domain"
 )
 
 type Bundle struct {

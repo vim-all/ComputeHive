@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adhyan-jain/ComputeHive/worker/internal/domain"
+	"github.com/vim-all/ComputeHive/worker/internal/domain"
 )
 
 func TestFetchDownloadsAndVerifiesArtifact(t *testing.T) {

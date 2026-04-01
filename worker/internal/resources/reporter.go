@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/adhyan-jain/ComputeHive/worker/internal/domain"
+	"github.com/vim-all/ComputeHive/worker/internal/domain"
 )
 
 type Reporter struct {

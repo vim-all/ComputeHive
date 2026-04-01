@@ -5,7 +5,7 @@ use reqwest::blocking::Client as BlockingHttpClient;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use tonic::transport::Channel;
+use tonic::transport::Endpoint;
 use std::{
     collections::HashMap,
     error::Error as StdError,
@@ -349,13 +349,18 @@ fn create_project_docker_image(project_path: String) -> Result<DockerImageResult
 #[tauri::command]
 async fn request_project_run(project_path: String, command: Vec<String>) -> Result<RunRequestResult, String> {
     let config = app_config()?;
+    let request_started = Instant::now();
     let command_line_count = command
         .iter()
         .map(|segment| segment.trim())
         .filter(|segment| !segment.is_empty())
         .count();
     let normalized_command = normalize_client_command(command)?;
+
+    let build_started = Instant::now();
     let image = build_project_docker_image(&project_path)?;
+    let build_elapsed = build_started.elapsed();
+
     let project_root = PathBuf::from(&image.project_root);
     let gzip_archive_path = tar_gz_path_for_project(&project_root, &image.project_name);
 
@@ -364,15 +369,21 @@ async fn request_project_run(project_path: String, command: Vec<String>) -> Resu
             .map_err(|error| format!("Failed to replace the existing compressed image: {error}"))?;
     }
 
+    let compress_started = Instant::now();
     gzip_file(Path::new(&image.image_archive_path), &gzip_archive_path)?;
+    let compress_elapsed = compress_started.elapsed();
 
     let gzip_size_bytes = fs::metadata(&gzip_archive_path)
         .map_err(|error| format!("Failed to inspect the compressed image: {error}"))?
         .len();
+    let hash_started = Instant::now();
     let artifact_sha256 = sha256_for_file(&gzip_archive_path)?;
+    let hash_elapsed = hash_started.elapsed();
+
     let job_id = Uuid::new_v4().to_string();
     let object_key = object_key_for_artifact(&image.project_name, &job_id, &artifact_sha256);
 
+    let upload_started = Instant::now();
     let uploaded_artifact = upload_artifact_to_object_storage(
         config,
         &gzip_archive_path,
@@ -380,6 +391,7 @@ async fn request_project_run(project_path: String, command: Vec<String>) -> Resu
         &artifact_sha256,
     )
     .await?;
+    let upload_elapsed = upload_started.elapsed();
 
     let artifact_record = ArtifactRecord {
         job_id: job_id.clone(),
@@ -401,20 +413,56 @@ async fn request_project_run(project_path: String, command: Vec<String>) -> Resu
         created_at_unix: current_unix_timestamp(),
     };
 
-    if let Err(error) = enqueue_run_request(config, &job_id, &image, &artifact_record, &normalized_command) {
-        let cleanup_result = delete_artifact_from_object_storage(config, &object_key).await;
-        let cleanup_message = match cleanup_result {
-            Ok(()) => "The uploaded artifact was cleaned up automatically.".to_string(),
-            Err(cleanup_error) => format!(
-                "The uploaded artifact could not be cleaned up automatically: {cleanup_error}"
-            ),
-        };
+    let mut environment = HashMap::new();
+    environment.insert(
+        "COMPUTEHIVE_ARTIFACT_SHA256".to_string(),
+        artifact_record.artifact_sha256.clone(),
+    );
+    environment.insert(
+        "COMPUTEHIVE_ARTIFACT_URI".to_string(),
+        artifact_record.artifact_uri.clone(),
+    );
+    environment.insert(
+        "COMPUTEHIVE_ARTIFACT_API_URL".to_string(),
+        artifact_record.artifact_api_url.clone(),
+    );
+    environment.insert(
+        "COMPUTEHIVE_ARTIFACT_OBJECT_KEY".to_string(),
+        artifact_record.artifact_object_key.clone(),
+    );
+    environment.insert(
+        "COMPUTEHIVE_PROJECT_NAME".to_string(),
+        artifact_record.project_name.clone(),
+    );
+    environment.insert(
+        "COMPUTEHIVE_DETECTED_STACK".to_string(),
+        artifact_record.detected_stack.clone(),
+    );
+    environment.insert("COMPUTEHIVE_IMAGE_TAG".to_string(), image.image_tag.clone());
+    environment.insert(
+        "COMPUTEHIVE_IMAGE_ARCHIVE_PATH".to_string(),
+        artifact_record.gzip_archive_path.clone(),
+    );
 
-            return Err(format!(
-                "Failed to submit the run request to the coordinator after uploading the artifact. {error} {cleanup_message}"
-            ));
-        }
-    };
+    let submit_started = Instant::now();
+    let coordinator_job_id =
+        match submit_job_to_coordinator(config, &image, environment, &normalized_command).await {
+            Ok(job_id) => job_id,
+            Err(error) => {
+                let cleanup_result = delete_artifact_from_object_storage(config, &object_key).await;
+                let cleanup_message = match cleanup_result {
+                    Ok(()) => "The uploaded artifact was cleaned up automatically.".to_string(),
+                    Err(cleanup_error) => format!(
+                        "The uploaded artifact could not be cleaned up automatically: {cleanup_error}"
+                    ),
+                };
+
+                return Err(format!(
+                    "Failed to submit the run request to the coordinator after uploading the artifact. {error} {cleanup_message}"
+                ));
+            }
+        };
+    let submit_elapsed = submit_started.elapsed();
 
     let mut notes = image.notes.clone();
     notes.push(format!(
@@ -440,30 +488,30 @@ async fn request_project_run(project_path: String, command: Vec<String>) -> Resu
         );
     }
     notes.push(format!(
-        "Queued a coordinator-compatible Redis job under {} and pushed it onto {}.",
-        job_key(&job_id),
-        JOB_QUEUE_KEY
+        "Submitted the job with job id {}.",
+        coordinator_job_id
+    ));
+    notes.push(
+        "The submit payload contains metadata only (artifact URI/object key/hash, image tag, command, resources); the tar.gz image bytes are not sent to the coordinator."
+            .to_string(),
+    );
+    notes.push(format!(
+        "Timing: image build {} ms, compression {} ms, hash {} ms, upload {} ms, coordinator submit {} ms, total {} ms.",
+        build_elapsed.as_millis(),
+        compress_elapsed.as_millis(),
+        hash_elapsed.as_millis(),
+        upload_elapsed.as_millis(),
+        submit_elapsed.as_millis(),
+        request_started.elapsed().as_millis(),
     ));
     notes.push(format!(
         "Stored {} client command line(s) in the queued job record.",
         command_line_count
     ));
-    notes.push(
-        "Worker executes the command list via /bin/sh -lc so full command lines (for example: python3 train_model.py) work as expected."
-            .to_string(),
-    );
-    notes.push(
-        "The queued job carries the artifact hash and object storage location in its environment for future contributor actions."
-            .to_string(),
-    );
-    notes.push(
-        "ComputeHive intentionally did not create or run a container during this request."
-            .to_string(),
-    );
 
     let summary = format!(
         "Built the Docker image, compressed it to a tar.gz artifact, uploaded it to object storage, and submitted run request {} to the coordinator.",
-        coordinator_job_id
+        job_id
     );
 
     Ok(RunRequestResult {
@@ -1660,9 +1708,6 @@ fn upload_artifact_to_object_storage_blocking(
         .map_err(|error| format!("Failed to inspect the compressed artifact for upload: {error}"))?
         .len();
 
-    let file = File::open(artifact_path)
-        .map_err(|error| format!("Failed to open the compressed artifact for upload: {error}"))?;
-
     let signed_request = sign_object_storage_request(
         &config.object_storage,
         "PUT",
@@ -1674,18 +1719,42 @@ fn upload_artifact_to_object_storage_blocking(
         ],
     )?;
 
-    let response = build_object_storage_http_client()?
-        .put(&signed_request.url)
-        .headers(reqwest_headers(&signed_request.headers)?)
-        .header("content-length", artifact_size_bytes.to_string())
-        .body(file)
-        .send()
-        .map_err(|error| {
-            format!(
-                "Failed to upload the artifact to object storage: {}",
-                format_reqwest_error(&error)
-            )
-        })?;
+    let headers = reqwest_headers(&signed_request.headers)?;
+    let client = build_object_storage_http_client()?;
+    let mut last_error = String::new();
+    let mut response = None;
+
+    for attempt in 1..=3 {
+        let file = File::open(artifact_path)
+            .map_err(|error| format!("Failed to open the compressed artifact for upload: {error}"))?;
+        let body = reqwest::blocking::Body::sized(file, artifact_size_bytes);
+
+        match client
+            .put(&signed_request.url)
+            .headers(headers.clone())
+            .body(body)
+            .send()
+        {
+            Ok(ok_response) => {
+                response = Some(ok_response);
+                break;
+            }
+            Err(error) => {
+                last_error = format_reqwest_error(&error);
+                if attempt < 3 {
+                    thread::sleep(Duration::from_millis((attempt as u64) * 500));
+                }
+            }
+        }
+    }
+
+    let response = response.ok_or_else(|| {
+        format!(
+            "Failed to upload the artifact to object storage after 3 attempts ({} bytes): {}",
+            artifact_size_bytes,
+            last_error
+        )
+    })?;
 
     if !response.status().is_success() {
         let status = response.status();
@@ -1800,9 +1869,9 @@ fn sign_object_storage_request(
 
 fn build_object_storage_http_client() -> Result<BlockingHttpClient, String> {
     BlockingHttpClient::builder()
-        .http1_only()
         .connect_timeout(Duration::from_secs(20))
         .timeout(None::<Duration>)
+    .tcp_keepalive(Duration::from_secs(30))
         .build()
         .map_err(|error| format!("Failed to initialize the object storage HTTP client: {error}"))
 }
@@ -1922,89 +1991,70 @@ fn format_reqwest_error(error: &reqwest::Error) -> String {
     message
 }
 
-fn enqueue_run_request(
-    config: &AppConfig,
-    job_id: &str,
-    image: &DockerImageResult,
-    artifact_record: &ArtifactRecord,
-    command: &[String],
-) -> Result<(), String> {
-    let client = redis::Client::open(config.redis_url.as_str())
-        .map_err(|error| format!("Failed to parse the Redis URL: {error}"))?;
-    let mut connection = client
-        .get_connection()
-        .map_err(|error| format!("Failed to connect to Redis: {error}"))?;
-
-    let mut environment = HashMap::new();
-    environment.insert(
-        "COMPUTEHIVE_ARTIFACT_SHA256".to_string(),
-        artifact_record.artifact_sha256.clone(),
-    );
-    environment.insert(
-        "COMPUTEHIVE_ARTIFACT_URI".to_string(),
-        artifact_record.artifact_uri.clone(),
-    );
-    environment.insert(
-        "COMPUTEHIVE_ARTIFACT_API_URL".to_string(),
-        artifact_record.artifact_api_url.clone(),
-    );
-    environment.insert(
-        "COMPUTEHIVE_ARTIFACT_OBJECT_KEY".to_string(),
-        artifact_record.artifact_object_key.clone(),
-    );
-    environment.insert(
-        "COMPUTEHIVE_PROJECT_NAME".to_string(),
-        artifact_record.project_name.clone(),
-    );
-    environment.insert(
-        "COMPUTEHIVE_DETECTED_STACK".to_string(),
-        artifact_record.detected_stack.clone(),
-    );
-    environment.insert("COMPUTEHIVE_IMAGE_TAG".to_string(), image.image_tag.clone());
-    environment.insert(
-        "COMPUTEHIVE_IMAGE_ARCHIVE_PATH".to_string(),
-        artifact_record.gzip_archive_path.clone(),
-    );
-
-    let job_record = RedisJobRecord {
-        id: job_id.to_string(),
-        container_image: image.image_tag.clone(),
-        command: command.to_vec(),
-        required_resources: Some(default_required_resources()),
-        environment,
-        max_runtime_seconds: DEFAULT_MAX_RUNTIME_SECONDS,
-        status: JOB_STATUS_QUEUED.to_string(),
-        created_at_unix: artifact_record.created_at_unix,
-        assigned_worker_id: String::new(),
-    };
-
-    let job_payload = serde_json::to_string(&job_record)
-        .map_err(|error| format!("Failed to encode the Redis job record: {error}"))?;
-    let artifact_payload = serde_json::to_string(artifact_record)
-        .map_err(|error| format!("Failed to encode the artifact metadata record: {error}"))?;
-
-    redis::pipe()
-        .atomic()
-        .set(job_key(job_id), job_payload)
-        .ignore()
-        .set(job_status_key(job_id), JOB_STATUS_QUEUED)
-        .ignore()
-        .rpush(JOB_QUEUE_KEY, job_id)
-        .ignore()
-        .set(artifact_record_key(job_id), artifact_payload)
-        .ignore()
-        .query::<()>(&mut connection)
-        .map_err(|error| format!("Failed to enqueue the run request in Redis: {error}"))?;
-
-    Ok(())
+fn current_unix_timestamp() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0)
 }
 
-fn default_required_resources() -> RedisResourceSpec {
-    RedisResourceSpec {
-        cpu_cores: DEFAULT_REQUIRED_CPU_CORES,
-        gpu_count: DEFAULT_REQUIRED_GPU_COUNT,
-        memory_mb: DEFAULT_REQUIRED_MEMORY_MB,
-    }
+fn worker_auth_key(worker_name: &str) -> String {
+    format!("{WORKER_AUTH_PREFIX}{worker_name}")
+}
+
+fn redis_worker_key(worker_id: &str) -> String {
+    format!("worker:{worker_id}")
+}
+
+fn redis_worker_alive_key(worker_id: &str) -> String {
+    format!("worker_alive:{worker_id}")
+}
+
+fn job_key(job_id: &str) -> String {
+    format!("job:{job_id}")
+}
+
+fn job_status_key(job_id: &str) -> String {
+    format!("job_status:{job_id}")
+}
+
+fn result_key(job_id: &str) -> String {
+    format!("result:{job_id}")
+}
+
+fn artifact_record_key(job_id: &str) -> String {
+    format!("{ARTIFACT_RECORD_PREFIX}{job_id}")
+}
+
+fn join_bucket_api_url(base_url: &str, object_key: &str) -> String {
+    format!(
+        "{}/{}",
+        base_url.trim_end_matches('/'),
+        object_key.trim_start_matches('/'),
+    )
+}
+
+fn parse_bucket_url(bucket_url: &str) -> Result<(String, String, String), String> {
+    let parsed = Url::parse(bucket_url)
+        .map_err(|error| format!("Failed to parse S3_BUCKET URL: {error}"))?;
+
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "S3_BUCKET URL must include a host.".to_string())?;
+
+    let bucket_name = parsed
+        .path_segments()
+        .and_then(|mut segments| segments.find(|segment| !segment.trim().is_empty()))
+        .map(|segment| segment.trim().to_string())
+        .ok_or_else(|| "S3_BUCKET URL must include a bucket name in the path.".to_string())?;
+
+    let endpoint_url = match parsed.port() {
+        Some(port) => format!("{}://{}:{}", parsed.scheme(), host, port),
+        None => format!("{}://{}", parsed.scheme(), host),
+    };
+    let bucket_api_url = format!("{}/{}", endpoint_url, bucket_name);
+
+    Ok((endpoint_url, bucket_name, bucket_api_url))
 }
 
 fn normalize_client_command(command: Vec<String>) -> Result<Vec<String>, String> {
@@ -2074,10 +2124,13 @@ async fn submit_job_to_coordinator(
     config: &AppConfig,
     image: &DockerImageResult,
     environment: HashMap<String, String>,
+    command: &[String],
 ) -> Result<String, String> {
     let endpoint = coordinator_endpoint(&config.coordinator_addr);
-    let channel = Channel::from_shared(endpoint.clone())
+    let channel = Endpoint::from_shared(endpoint.clone())
         .map_err(|error| format!("Failed to parse coordinator address {endpoint}: {error}"))?
+        .connect_timeout(Duration::from_secs(3))
+        .timeout(Duration::from_secs(5))
         .connect()
         .await
         .map_err(|error| format!("Failed to connect to coordinator at {endpoint}: {error}"))?;
@@ -2086,7 +2139,7 @@ async fn submit_job_to_coordinator(
     let response = client
         .submit_job(SubmitJobRequest {
             container_image: image.image_tag.clone(),
-            command: placeholder_contributor_command(),
+            command: command.to_vec(),
             required_resources: Some(CoordinatorResourceSpec {
                 cpu_cores: DEFAULT_REQUIRED_CPU_CORES,
                 gpu_count: DEFAULT_REQUIRED_GPU_COUNT,
@@ -2149,69 +2202,6 @@ fn optional_env(key: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-}
-
-fn parse_bucket_url(bucket_url: &str) -> Result<(String, String, String), String> {
-    let url =
-        Url::parse(bucket_url).map_err(|error| format!("Failed to parse S3_BUCKET: {error}"))?;
-    let host = url
-        .host_str()
-        .ok_or_else(|| "S3_BUCKET is missing a host.".to_string())?;
-    let endpoint_url = match url.port() {
-        Some(port) => format!("{}://{}:{}", url.scheme(), host, port),
-        None => format!("{}://{}", url.scheme(), host),
-    };
-    let bucket_name = url.path().trim_matches('/').to_string();
-
-    if bucket_name.is_empty() {
-        return Err("S3_BUCKET must include the bucket name in the path.".to_string());
-    }
-
-    let bucket_api_url = format!("{}/{}", endpoint_url, bucket_name);
-    Ok((endpoint_url, bucket_name, bucket_api_url))
-}
-
-fn join_bucket_api_url(bucket_api_url: &str, object_key: &str) -> String {
-    format!(
-        "{}/{}",
-        bucket_api_url.trim_end_matches('/'),
-        object_key.trim_start_matches('/')
-    )
-}
-
-fn current_unix_timestamp() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
-}
-
-fn job_key(job_id: &str) -> String {
-    format!("job:{job_id}")
-}
-
-fn job_status_key(job_id: &str) -> String {
-    format!("job_status:{job_id}")
-}
-
-fn result_key(job_id: &str) -> String {
-    format!("result:{job_id}")
-}
-
-fn artifact_record_key(job_id: &str) -> String {
-    format!("{ARTIFACT_RECORD_PREFIX}{job_id}")
-}
-
-fn redis_worker_key(worker_id: &str) -> String {
-    format!("worker:{worker_id}")
-}
-
-fn redis_worker_alive_key(worker_id: &str) -> String {
-    format!("worker_alive:{worker_id}")
-}
-
-fn worker_auth_key(worker_name: &str) -> String {
-    format!("{WORKER_AUTH_PREFIX}{worker_name}")
 }
 
 fn to_contributor_worker_record(worker_record: &RedisWorkerRecord) -> ContributorWorkerRecord {

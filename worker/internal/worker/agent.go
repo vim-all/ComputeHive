@@ -8,9 +8,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/adhyan-jain/ComputeHive/worker/internal/artifact"
-	"github.com/adhyan-jain/ComputeHive/worker/internal/config"
-	"github.com/adhyan-jain/ComputeHive/worker/internal/domain"
+	"github.com/vim-all/ComputeHive/worker/internal/artifact"
+	"github.com/vim-all/ComputeHive/worker/internal/config"
+	"github.com/vim-all/ComputeHive/worker/internal/domain"
 )
 
 type storeAPI interface {

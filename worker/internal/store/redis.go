@@ -7,8 +7,8 @@ import (
 	"sync"
 
 	pb "coordinator/pkg/pb"
-	"github.com/adhyan-jain/ComputeHive/worker/internal/config"
-	"github.com/adhyan-jain/ComputeHive/worker/internal/domain"
+	"github.com/vim-all/ComputeHive/worker/internal/config"
+	"github.com/vim-all/ComputeHive/worker/internal/domain"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"

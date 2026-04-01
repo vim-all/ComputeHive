@@ -3,7 +3,7 @@ package executor
 import (
 	"testing"
 
-	"github.com/adhyan-jain/ComputeHive/worker/internal/domain"
+	"github.com/vim-all/ComputeHive/worker/internal/domain"
 )
 
 func TestBuildArgsAddsExpectedDockerFlags(t *testing.T) {

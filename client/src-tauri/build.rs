@@ -10,6 +10,10 @@ fn main() {
 }
 
 fn compile_proto_bindings() {
+    let protoc_path = protoc_bin_vendored::protoc_bin_path()
+        .expect("failed to locate vendored protoc binary for proto compilation");
+    env::set_var("PROTOC", protoc_path);
+
     let manifest_dir = PathBuf::from(
         env::var("CARGO_MANIFEST_DIR").expect("missing CARGO_MANIFEST_DIR in build script"),
     );

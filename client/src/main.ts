@@ -92,13 +92,13 @@ interface InterfaceCopy {
 const interfaceCopy: Record<Mode, InterfaceCopy> = {
   user: {
     eyebrow: "Project flow",
-    heading: "Compile Hive",
+    heading: "Compute Hive",
     copy:
       "Choose a project directory. ComputeHive prepares Docker when needed, builds the image, compresses the artifact, uploads it, and writes the queue record.",
   },
   contributor: {
     eyebrow: "Contributor flow",
-    heading: "Compile Hive",
+    heading: "Compute Hive",
     copy:
       "Register or log in with a worker name and password. The contributor surface unlocks only when the local worker hash matches this device.",
   },
@@ -563,7 +563,7 @@ function stageRequestLog(): void {
   scheduleProcessLog(
     4220,
     "working",
-    "Writing the Redis job record and queue entry.",
+    "Submitting the job to the coordinator gRPC server.",
   );
 }
 
@@ -581,7 +581,7 @@ function appendResultLogs(result: RunRequestResult): void {
   );
   addProcessLog(
     "success",
-    `Redis job ${result.redisJobId} was queued with object key ${result.artifactObjectKey}.`,
+    `Coordinator accepted job ${result.redisJobId} with object key ${result.artifactObjectKey}.`,
   );
 
   const seen = new Set<string>();
@@ -887,7 +887,7 @@ function pickProjectFolder(): void {
       addProcessLog("info", `Project folder selected: ${folder}`);
       addProcessLog(
         "info",
-        "Request for run will handle Docker setup, image export, compression, upload, and Redis queueing in one pass.",
+        "Request for run will handle Docker setup, image export, compression, upload, and coordinator submission in one pass.",
       );
       renderUserState();
     })

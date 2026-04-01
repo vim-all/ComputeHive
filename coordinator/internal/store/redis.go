@@ -2,11 +2,10 @@ package store
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"time"
-
-	"crypto/tls"
 
 	pb "coordinator/pkg/pb"
 
@@ -81,22 +80,13 @@ func jobWorkerKey(jobID string) string {
 	return "job_worker:" + jobID
 }
 
-<<<<<<< Updated upstream
-func NewRedisClient(ctx context.Context, addr, password string, db int, useTLS bool) (*redis.Client, error) {
-	opt := &redis.Options{
-		Addr:     addr,
-		Password: password,
-		DB:       db,
-	}
+func NewRedisClient(ctx context.Context, addr string, pw string, db int, useTLS bool) (*redis.Client, error) {
+	options := &redis.Options{Addr: addr, Password: pw, DB: db}
 	if useTLS {
-		opt.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+		options.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
 	}
 
-	client := redis.NewClient(opt)
-=======
-func NewRedisClient(ctx context.Context, addr string, pw string) (*redis.Client, error) {
-	client := redis.NewClient(&redis.Options{Addr: addr, Password: pw})
->>>>>>> Stashed changes
+	client := redis.NewClient(options)
 
 	pingCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()

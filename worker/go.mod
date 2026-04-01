@@ -1,4 +1,4 @@
-module github.com/adhyan-jain/ComputeHive/worker
+module github.com/vim-all/ComputeHive/worker
 
 go 1.25.0
 

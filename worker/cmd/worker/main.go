@@ -8,12 +8,12 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/adhyan-jain/ComputeHive/worker/internal/artifact"
-	"github.com/adhyan-jain/ComputeHive/worker/internal/config"
-	"github.com/adhyan-jain/ComputeHive/worker/internal/executor"
-	"github.com/adhyan-jain/ComputeHive/worker/internal/resources"
-	"github.com/adhyan-jain/ComputeHive/worker/internal/store"
-	workerapp "github.com/adhyan-jain/ComputeHive/worker/internal/worker"
+	"github.com/vim-all/ComputeHive/worker/internal/artifact"
+	"github.com/vim-all/ComputeHive/worker/internal/config"
+	"github.com/vim-all/ComputeHive/worker/internal/executor"
+	"github.com/vim-all/ComputeHive/worker/internal/resources"
+	"github.com/vim-all/ComputeHive/worker/internal/store"
+	workerapp "github.com/vim-all/ComputeHive/worker/internal/worker"
 )
 
 func main() {
