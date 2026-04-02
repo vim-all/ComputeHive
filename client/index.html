@@ -1,316 +1,257 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <link rel="stylesheet" href="/src/styles.css" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>ComputeHive Desktop</title>
-    <script type="module" src="/src/main.ts" defer></script>
-  </head>
 
-  <body>
-    <div class="backdrop">
-      <div class="glow glow-one"></div>
-      <div class="glow glow-two"></div>
-      <div class="glow glow-three"></div>
-    </div>
+<head>
+  <meta charset="UTF-8" />
+  <link rel="stylesheet" href="/src/styles.css" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ComputeHive Desktop</title>
+  <script type="module" src="/src/main.ts" defer></script>
+</head>
 
-    <div class="app-shell">
-      <header class="masthead reveal">
-        <div class="brand-column">
-          <p class="eyebrow" id="mode-eyebrow">Project Image Flow</p>
-          <div class="title-orbit">
-            <h1 id="mode-heading">Compute Hive</h1>
+<body>
+  <div class="backdrop">
+    <div class="glow glow-one"></div>
+    <div class="glow glow-two"></div>
+    <div class="glow glow-three"></div>
+  </div>
+
+  <div class="app-shell">
+    <header class="masthead reveal">
+      <div class="brand-column">
+        <p class="eyebrow" id="mode-eyebrow">Project Image Flow</p>
+        <div class="title-orbit">
+          <h1 id="mode-heading">Compute Hive</h1>
+        </div>
+        <p class="lead" id="mode-copy">
+          Choose a project directory. ComputeHive prepares Docker when needed,
+          builds the image, compresses it, uploads the artifact, and queues
+          the run request.
+        </p>
+      </div>
+
+      <div class="mode-switch" role="tablist" aria-label="Choose interface">
+        <button class="mode-chip is-active" type="button" data-mode="user" aria-selected="true">
+          Project User
+        </button>
+        <button class="mode-chip" type="button" data-mode="contributor" aria-selected="false">
+          Contributor
+        </button>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <section class="panel workflow-panel is-active reveal" data-panel="user">
+        <div class="panel-header">
+          <div>
+            <p class="eyebrow">Image Builder</p>
+            <h2>Folder input, Docker setup, image creation, and run request</h2>
           </div>
-          <p class="lead" id="mode-copy">
-            Choose a project directory. ComputeHive prepares Docker when needed,
-            builds the image, compresses it, uploads the artifact, and queues
-            the run request.
-          </p>
-        </div>
 
-        <div class="mode-switch" role="tablist" aria-label="Choose interface">
-          <button
-            class="mode-chip is-active"
-            type="button"
-            data-mode="user"
-            aria-selected="true"
-          >
-            Project User
-          </button>
-          <button
-            class="mode-chip"
-            type="button"
-            data-mode="contributor"
-            aria-selected="false"
-          >
-            Contributor
+          <button id="clear-selection" class="ghost-button" type="button">
+            Clear
           </button>
         </div>
-      </header>
 
-      <main class="workspace">
-        <section class="panel workflow-panel is-active reveal" data-panel="user">
-          <div class="panel-header">
-            <div>
-              <p class="eyebrow">Image Builder</p>
-              <h2>Folder input, Docker setup, image creation, and run request</h2>
+        <div class="user-grid">
+          <div class="upload-region">
+            <div class="upload-dropzone" id="folder-dropzone">
+              <p class="upload-kicker">Project Directory</p>
+              <h3>Choose the project folder you want the app to Dockerize</h3>
+              <p class="support-copy">
+                ComputeHive inspects the selected project, fills in Docker
+                setup if it is missing, builds the image locally, compresses
+                the exported archive, and queues the run request.
+              </p>
+
+              <button id="pick-folder" class="primary-button" type="button">
+                Select project folder
+              </button>
+
+              <p id="selected-path" class="path-pill is-empty">
+                No folder selected yet
+              </p>
             </div>
 
-            <button id="clear-selection" class="ghost-button" type="button">
-              Clear
-            </button>
+            <div class="action-row">
+              <div class="button-group button-group-single">
+                <button id="request-run" class="primary-button" type="button" disabled>
+                  Request for run
+                </button>
+                <button id="reveal-folder" class="ghost-button" type="button" disabled>
+                  Open selected folder
+                </button>
+              </div>
+            </div>
+
+            <section class="terminal-shell" aria-label="Request log">
+              <div class="terminal-toolbar">
+                <div class="terminal-dots" aria-hidden="true">
+                  <span></span>
+                  <span></span>
+                  <span></span>
+                </div>
+                <strong class="terminal-title">Request log</strong>
+                <span id="process-log-status" class="terminal-status terminal-status-idle">
+                  Idle
+                </span>
+              </div>
+
+              <div id="process-log" class="terminal-output" aria-live="polite">
+                <p class="terminal-placeholder">
+                  Select a project folder to let ComputeHive build the Docker
+                  image and request the run.
+                </p>
+              </div>
+            </section>
           </div>
 
-          <div class="user-grid">
-            <div class="upload-region">
-              <div class="upload-dropzone" id="folder-dropzone">
-                <p class="upload-kicker">Project Directory</p>
-                <h3>Choose the project folder you want the app to Dockerize</h3>
-                <p class="support-copy">
-                  ComputeHive inspects the selected project, fills in Docker
-                  setup if it is missing, builds the image locally, compresses
-                  the exported archive, and queues the run request.
-                </p>
-
-                <button id="pick-folder" class="primary-button" type="button">
-                  Select project folder
-                </button>
-
-                <p id="selected-path" class="path-pill is-empty">
-                  No folder selected yet
-                </p>
-              </div>
-
-              <div class="action-row">
-                <div class="button-group button-group-single">
-                  <button
-                    id="request-run"
-                    class="primary-button"
-                    type="button"
-                    disabled
-                  >
-                    Request for run
-                  </button>
-                  <button
-                    id="reveal-folder"
-                    class="ghost-button"
-                    type="button"
-                    disabled
-                  >
-                    Open selected folder
-                  </button>
+          <div class="status-region">
+            <div class="status-card">
+              <div class="status-head">
+                <div>
+                  <p class="eyebrow">Request Status</p>
+                  <h3 id="bundle-summary-title">Waiting for a folder</h3>
                 </div>
+                <span id="bundle-status" class="status-pill status-idle">
+                  Idle
+                </span>
               </div>
 
-              <section class="terminal-shell" aria-label="Request log">
-                <div class="terminal-toolbar">
-                  <div class="terminal-dots" aria-hidden="true">
-                    <span></span>
-                    <span></span>
-                    <span></span>
+              <p id="bundle-summary" class="support-copy bundle-summary-text">
+                Pick a project directory and let the app prepare Docker setup,
+                build the image, and queue the uploaded tar.gz artifact.
+              </p>
+
+              <div class="command-editor">
+                <div class="command-editor-head">
+                  <div>
+                    <span class="detail-label">Command list</span>
+                    <p class="support-copy bundle-summary-text">
+                      Add one shell command line per row. The worker executes
+                      the list via <code>/bin/sh -lc</code> inside the container.
+                    </p>
                   </div>
-                  <strong class="terminal-title">Request log</strong>
-                  <span
-                    id="process-log-status"
-                    class="terminal-status terminal-status-idle"
-                  >
-                    Idle
-                  </span>
+                  <button id="add-command" class="icon-button" type="button" aria-label="Add command">
+                    +
+                  </button>
                 </div>
 
-                <div id="process-log" class="terminal-output" aria-live="polite">
-                  <p class="terminal-placeholder">
-                    Select a project folder to let ComputeHive build the Docker
-                    image and request the run.
+                <div id="command-list" class="command-list" aria-live="polite"></div>
+              </div>
+
+              <div class="metric-grid">
+                <div class="metric-block">
+                  <span class="metric-label">Detected stack</span>
+                  <strong id="detected-stack">Not detected yet</strong>
+                </div>
+                <div class="metric-block">
+                  <span class="metric-label">Image tag</span>
+                  <strong id="image-tag">Not built yet</strong>
+                </div>
+                <div class="metric-block">
+                  <span class="metric-label">Image file size</span>
+                  <strong id="image-size">0 B</strong>
+                </div>
+                <div class="metric-block">
+                  <span class="metric-label">Docker setup</span>
+                  <strong id="docker-setup-source">Auto-generate if needed</strong>
+                </div>
+              </div>
+
+              <div class="detail-stack">
+                <div class="detail-section">
+                  <span class="detail-label">Job result</span>
+                  <p id="run-result-status" class="detail-value muted">
+                    Worker output will appear here after the job is completed.
                   </p>
                 </div>
-              </section>
-            </div>
 
-            <div class="status-region">
-              <div class="status-card">
-                <div class="status-head">
-                  <div>
-                    <p class="eyebrow">Request Status</p>
-                    <h3 id="bundle-summary-title">Waiting for a folder</h3>
-                  </div>
-                  <span id="bundle-status" class="status-pill status-idle">
-                    Idle
-                  </span>
-                </div>
-
-                <p id="bundle-summary" class="support-copy bundle-summary-text">
-                  Pick a project directory and let the app prepare Docker setup,
-                  build the image, and queue the uploaded tar.gz artifact.
-                </p>
-
-                <div class="command-editor">
-                  <div class="command-editor-head">
-                    <div>
-                      <span class="detail-label">Command list</span>
-                      <p class="support-copy bundle-summary-text">
-                        Add one shell command line per row. The worker executes
-                        the list via <code>/bin/sh -lc</code> inside the container.
-                      </p>
-                    </div>
-                    <button
-                      id="add-command"
-                      class="icon-button"
-                      type="button"
-                      aria-label="Add command"
-                    >
-                      +
-                    </button>
-                  </div>
-
-                  <div id="command-list" class="command-list" aria-live="polite"></div>
-                </div>
-
-                <div class="metric-grid">
-                  <div class="metric-block">
-                    <span class="metric-label">Detected stack</span>
-                    <strong id="detected-stack">Not detected yet</strong>
-                  </div>
-                  <div class="metric-block">
-                    <span class="metric-label">Image tag</span>
-                    <strong id="image-tag">Not built yet</strong>
-                  </div>
-                  <div class="metric-block">
-                    <span class="metric-label">Image file size</span>
-                    <strong id="image-size">0 B</strong>
-                  </div>
-                  <div class="metric-block">
-                    <span class="metric-label">Docker setup</span>
-                    <strong id="docker-setup-source">Auto-generate if needed</strong>
-                  </div>
-                </div>
-
-                <div class="detail-stack">
-                  <div class="detail-section">
-                    <span class="detail-label">Image output</span>
-                    <p id="image-output-path" class="detail-value muted">
-                      The Docker image archive path will appear here after the build.
-                    </p>
-                  </div>
-
-                  <div class="detail-section">
-                    <span class="detail-label">Compressed artifact</span>
-                    <p id="gzip-output-path" class="detail-value muted">
-                      The tar.gz artifact path will appear here after a run request.
-                    </p>
-                  </div>
-
-                  <div class="detail-section">
-                    <span class="detail-label">Artifact hash</span>
-                    <p id="artifact-hash" class="detail-value muted">
-                      The SHA-256 hash will appear here after upload.
-                    </p>
-                  </div>
-
-                  <div class="detail-section">
-                    <span class="detail-label">Run request</span>
-                    <p id="run-request-details" class="detail-value muted">
-                      The Redis job id and object storage key will appear here after you request a run.
-                    </p>
-                  </div>
-
-                  <div class="detail-section">
-                    <span class="detail-label">Job result</span>
-                    <p id="run-result-status" class="detail-value muted">
-                      Worker output will appear here after the job is completed.
-                    </p>
-                  </div>
-
-                  <div class="detail-section">
-                    <span class="detail-label">Worker stdout excerpt</span>
-                    <pre id="run-result-output" class="detail-output muted">
+                <div class="detail-section">
+                  <span class="detail-label">Worker stdout excerpt</span>
+                  <pre id="run-result-output" class="detail-output muted">
 Waiting for job execution output.
                     </pre>
-                  </div>
+                </div>
 
-                  <div class="detail-section">
-                    <span class="detail-label">Public bucket link</span>
-                    <a
-                      id="artifact-public-link"
-                      class="detail-link muted is-placeholder"
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      The public artifact link will appear here after upload.
-                    </a>
+                <div class="detail-section">
+                  <span class="detail-label">Returned files</span>
+                  <div id="run-result-artifacts" class="detail-artifacts muted">
+                    Returned files will appear here after the job completes.
                   </div>
+                </div>
 
-                  <div class="detail-section">
-                    <span class="detail-label">Build notes</span>
-                    <ul id="build-notes" class="detail-list">
-                      <li>The app creates Docker setup files automatically when they are missing.</li>
-                      <li>Request for run first builds the Docker image in the selected project root.</li>
-                      <li>The app uploads only the tar.gz image artifact after compression.</li>
-                      <li>No container is created by this action.</li>
-                    </ul>
-                  </div>
+                <div class="detail-section">
+                  <span class="detail-label">Build notes</span>
+                  <ul id="build-notes" class="detail-list">
+                    <li>The app creates Docker setup files automatically when they are missing.</li>
+                    <li>Request for run first builds the Docker image in the selected project root.</li>
+                    <li>The app uploads only the tar.gz image artifact after compression.</li>
+                    <li>No container is created by this action.</li>
+                  </ul>
                 </div>
               </div>
             </div>
           </div>
-        </section>
+        </div>
+      </section>
 
-        <section class="panel workflow-panel reveal" data-panel="contributor" hidden>
-          <div class="panel-header">
-            <div>
-              <p class="eyebrow">Contributor Dashboard</p>
-              <h2>Local worker sharing</h2>
-            </div>
+      <section class="panel workflow-panel reveal" data-panel="contributor" hidden>
+        <div class="panel-header">
+          <div>
+            <p class="eyebrow">Contributor Dashboard</p>
+            <h2>Local worker sharing</h2>
           </div>
+        </div>
 
-          <div class="contributor-grid">
-            <aside class="contributor-aside">
-              <div class="future-notes contributor-profile">
-                <div class="panel-header contributor-dashboard-head">
-                  <div>
-                    <p class="eyebrow">Worker Runtime</p>
-                    <h3>Share this machine</h3>
-                  </div>
-
-                  <button id="contribute-button" class="primary-button" type="button">
-                    Start sharing
-                  </button>
+        <div class="contributor-grid">
+          <aside class="contributor-aside">
+            <div class="future-notes contributor-profile">
+              <div class="panel-header contributor-dashboard-head">
+                <div>
+                  <p class="eyebrow">Worker Runtime</p>
+                  <h3>Share this machine</h3>
                 </div>
 
-                <p id="contributor-setup-status" class="support-copy contributor-setup-status">
-                  Start sharing to run the local worker process.
-                </p>
-
-                <div class="note-row">
-                  <span class="note-label">Status</span>
-                  <p id="profile-worker-status">Stopped</p>
-                </div>
-                <div class="note-row">
-                  <span class="note-label">Process</span>
-                  <p id="profile-worker-resources">Worker PID: not running</p>
-                </div>
-                <div class="note-row">
-                  <span class="note-label">Job state</span>
-                  <p id="profile-worker-load">Job state: idle</p>
-                </div>
-                <div class="note-row">
-                  <span class="note-label">Current job</span>
-                  <p id="profile-worker-capabilities">Current job: none</p>
-                </div>
-                <div class="note-row">
-                  <span class="note-label">Last job</span>
-                  <p id="profile-worker-heartbeat">Last job: none</p>
-                </div>
-                <div class="note-row">
-                  <span class="note-label">Details</span>
-                  <p id="profile-worker-stats">No sharing activity yet.</p>
-                </div>
+                <button id="contribute-button" class="primary-button" type="button">
+                  Start sharing
+                </button>
               </div>
-            </aside>
-          </div>
-        </section>
-      </main>
-    </div>
-  </body>
+
+              <p id="contributor-setup-status" class="support-copy contributor-setup-status">
+                Start sharing to run the local worker process.
+              </p>
+
+              <div class="note-row">
+                <span class="note-label">Status</span>
+                <p id="profile-worker-status">Stopped</p>
+              </div>
+              <div class="note-row">
+                <span class="note-label">Process</span>
+                <p id="profile-worker-resources">Worker PID: not running</p>
+              </div>
+              <div class="note-row">
+                <span class="note-label">Job state</span>
+                <p id="profile-worker-load">Job state: idle</p>
+              </div>
+              <div class="note-row">
+                <span class="note-label">Current job</span>
+                <p id="profile-worker-capabilities">Current job: none</p>
+              </div>
+              <div class="note-row">
+                <span class="note-label">Last job</span>
+                <p id="profile-worker-heartbeat">Last job: none</p>
+              </div>
+              <div class="note-row">
+                <span class="note-label">Details</span>
+                <p id="profile-worker-stats">No sharing activity yet.</p>
+              </div>
+            </div>
+          </aside>
+        </div>
+      </section>
+    </main>
+  </div>
+</body>
+
 </html>

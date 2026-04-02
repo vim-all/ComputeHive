@@ -700,6 +700,36 @@ h3 {
   text-decoration: none;
 }
 
+.detail-artifacts {
+  display: grid;
+  gap: 0.7rem;
+  margin-top: 0.55rem;
+}
+
+.detail-artifact-item {
+  display: grid;
+  gap: 0.2rem;
+  padding: 0.8rem 0.9rem;
+  border-radius: 0.9rem;
+  border: 1px solid rgba(29, 26, 23, 0.08);
+  background: rgba(243, 237, 226, 0.56);
+}
+
+.detail-artifact-link {
+  color: var(--accent);
+  font-weight: 600;
+  text-decoration-thickness: 0.08em;
+  text-underline-offset: 0.14em;
+  word-break: break-word;
+}
+
+.detail-artifact-meta {
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
 .muted {
   color: rgba(29, 26, 23, 0.56);
 }

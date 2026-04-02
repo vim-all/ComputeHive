@@ -39,21 +39,38 @@ type JobRecord struct {
 	RequiredResources *pb.ResourceSpec  `json:"required_resources,omitempty"`
 	Environment       map[string]string `json:"environment,omitempty"`
 	MaxRuntimeSeconds int32             `json:"max_runtime_seconds,omitempty"`
+	ArtifactURL       string            `json:"artifact_url,omitempty"`
+	ArtifactSHA256    string            `json:"artifact_sha256,omitempty"`
 	Status            string            `json:"status"`
 	CreatedAtUnix     int64             `json:"created_at_unix"`
 	AssignedWorkerID  string            `json:"assigned_worker_id,omitempty"`
 }
 
+type OutputArtifactRecord struct {
+	RelativePath string `json:"relative_path,omitempty"`
+	ObjectKey    string `json:"object_key,omitempty"`
+	URI          string `json:"uri,omitempty"`
+	APIURL       string `json:"api_url,omitempty"`
+	PublicURL    string `json:"public_url,omitempty"`
+	SHA256       string `json:"sha256,omitempty"`
+	SizeBytes    int64  `json:"size_bytes,omitempty"`
+	ContentType  string `json:"content_type,omitempty"`
+}
+
 type ResultRecord struct {
-	JobID          string `json:"job_id"`
-	WorkerID       string `json:"worker_id"`
-	ResultStatus   string `json:"result_status,omitempty"`
-	Partial        bool   `json:"partial,omitempty"`
-	ExitCode       int32  `json:"exit_code,omitempty"`
-	StdoutExcerpt  string `json:"stdout_excerpt,omitempty"`
-	StderrExcerpt  string `json:"stderr_excerpt,omitempty"`
-	OutputURI      string `json:"output_uri,omitempty"`
-	FinishedAtUnix int64  `json:"finished_at_unix,omitempty"`
+	JobID           string                 `json:"job_id"`
+	WorkerID        string                 `json:"worker_id"`
+	ResultStatus    string                 `json:"result_status,omitempty"`
+	Partial         bool                   `json:"partial,omitempty"`
+	ExitCode        int32                  `json:"exit_code,omitempty"`
+	StdoutExcerpt   string                 `json:"stdout_excerpt,omitempty"`
+	StderrExcerpt   string                 `json:"stderr_excerpt,omitempty"`
+	OutputURI       string                 `json:"output_uri,omitempty"`
+	OutputAPIURL    string                 `json:"output_api_url,omitempty"`
+	OutputPublicURL string                 `json:"output_public_url,omitempty"`
+	OutputSizeBytes int64                  `json:"output_size_bytes,omitempty"`
+	OutputArtifacts []OutputArtifactRecord `json:"output_artifacts,omitempty"`
+	FinishedAtUnix  int64                  `json:"finished_at_unix,omitempty"`
 }
 
 func workerKey(workerID string) string {

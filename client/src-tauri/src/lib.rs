@@ -5,7 +5,8 @@ use reqwest::blocking::Client as BlockingHttpClient;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use tonic::transport::Endpoint;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::{
     collections::HashMap,
     error::Error as StdError,
@@ -17,9 +18,8 @@ use std::{
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-#[cfg(unix)]
-use std::os::unix::process::CommandExt;
 use time::{macros::format_description, OffsetDateTime};
+use tonic::transport::Endpoint;
 use url::Url;
 use uuid::Uuid;
 
@@ -28,7 +28,9 @@ pub mod coordinatorpb {
 }
 
 use coordinatorpb::client_service_client::ClientServiceClient;
-use coordinatorpb::{ResourceSpec as CoordinatorResourceSpec, SubmitJobRequest};
+use coordinatorpb::{
+    GetJobResultRequest, ResourceSpec as CoordinatorResourceSpec, SubmitJobRequest,
+};
 
 const JOB_QUEUE_KEY: &str = "job_queue";
 const JOB_STATUS_QUEUED: &str = "queued";
@@ -39,6 +41,7 @@ const DEFAULT_REQUIRED_GPU_COUNT: i32 = 0;
 const DEFAULT_REQUIRED_MEMORY_MB: i32 = 1024;
 const DEFAULT_R2_REGION: &str = "auto";
 const DEFAULT_COORDINATOR_ADDR: &str = "127.0.0.1:50051";
+const DEFAULT_SIGNED_DOWNLOAD_EXPIRY_SECONDS: u32 = 3600;
 const EMPTY_PAYLOAD_SHA256: &str =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
@@ -159,6 +162,7 @@ struct ObjectStorageConfig {
     bucket_public_url: String,
     access_key_id: String,
     secret_access_key: String,
+    session_token: String,
     region: String,
 }
 
@@ -182,20 +186,6 @@ struct RedisJobRecord {
     assigned_worker_id: String,
 }
 
-#[derive(Serialize, Deserialize, Default)]
-#[serde(default)]
-struct RedisResultRecord {
-    job_id: String,
-    worker_id: String,
-    result_status: String,
-    partial: bool,
-    exit_code: i32,
-    stdout_excerpt: String,
-    stderr_excerpt: String,
-    output_uri: String,
-    finished_at_unix: i64,
-}
-
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RunRequestJobResult {
@@ -208,8 +198,25 @@ struct RunRequestJobResult {
     stdout_excerpt: String,
     stderr_excerpt: String,
     output_uri: String,
+    output_api_url: String,
+    output_public_url: String,
+    output_size_bytes: i64,
+    output_artifacts: Vec<RunRequestOutputArtifact>,
     finished_at_unix: i64,
     completed: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RunRequestOutputArtifact {
+    relative_path: String,
+    object_key: String,
+    uri: String,
+    api_url: String,
+    public_url: String,
+    sha256: String,
+    size_bytes: i64,
+    content_type: String,
 }
 
 #[derive(Serialize)]
@@ -276,7 +283,10 @@ fn create_project_docker_image(project_path: String) -> Result<DockerImageResult
 }
 
 #[tauri::command]
-async fn request_project_run(project_path: String, command: Vec<String>) -> Result<RunRequestResult, String> {
+async fn request_project_run(
+    project_path: String,
+    command: Vec<String>,
+) -> Result<RunRequestResult, String> {
     let config = app_config()?;
     let request_started = Instant::now();
     let command_line_count = command
@@ -322,7 +332,7 @@ async fn request_project_run(project_path: String, command: Vec<String>) -> Resu
     .await?;
     let upload_elapsed = upload_started.elapsed();
 
-    let artifact_record = ArtifactRecord {
+    let mut artifact_record = ArtifactRecord {
         job_id: job_id.clone(),
         project_name: image.project_name.clone(),
         project_root: image.project_root.clone(),
@@ -374,24 +384,33 @@ async fn request_project_run(project_path: String, command: Vec<String>) -> Resu
     );
 
     let submit_started = Instant::now();
-    let coordinator_job_id =
-        match submit_job_to_coordinator(config, &image, environment, &normalized_command).await {
-            Ok(job_id) => job_id,
-            Err(error) => {
-                let cleanup_result = delete_artifact_from_object_storage(config, &object_key).await;
-                let cleanup_message = match cleanup_result {
-                    Ok(()) => "The uploaded artifact was cleaned up automatically.".to_string(),
-                    Err(cleanup_error) => format!(
-                        "The uploaded artifact could not be cleaned up automatically: {cleanup_error}"
-                    ),
-                };
+    let coordinator_job_id = match submit_job_to_coordinator(
+        config,
+        &image,
+        environment,
+        &normalized_command,
+        &artifact_record.artifact_api_url,
+        &artifact_record.artifact_sha256,
+    )
+    .await
+    {
+        Ok(job_id) => job_id,
+        Err(error) => {
+            let cleanup_result = delete_artifact_from_object_storage(config, &object_key).await;
+            let cleanup_message = match cleanup_result {
+                Ok(()) => "The uploaded artifact was cleaned up automatically.".to_string(),
+                Err(cleanup_error) => format!(
+                    "The uploaded artifact could not be cleaned up automatically: {cleanup_error}"
+                ),
+            };
 
-                return Err(format!(
+            return Err(format!(
                     "Failed to submit the run request to the coordinator after uploading the artifact. {error} {cleanup_message}"
                 ));
-            }
-        };
+        }
+    };
     let submit_elapsed = submit_started.elapsed();
+    artifact_record.job_id = coordinator_job_id.clone();
 
     let mut notes = image.notes.clone();
     notes.push(format!(
@@ -420,6 +439,16 @@ async fn request_project_run(project_path: String, command: Vec<String>) -> Resu
         "Submitted the job with job id {}.",
         coordinator_job_id
     ));
+    match persist_artifact_record(config, &coordinator_job_id, &artifact_record) {
+        Ok(()) => notes.push(format!(
+            "Stored the uploaded artifact metadata at {}.",
+            artifact_record_key(&coordinator_job_id)
+        )),
+        Err(error) => notes.push(format!(
+            "The run request was queued, but the client could not persist the local artifact metadata: {}.",
+            error
+        )),
+    }
     notes.push(
         "The submit payload contains metadata only (artifact URI/object key/hash, image tag, command, resources); the tar.gz image bytes are not sent to the coordinator."
             .to_string(),
@@ -440,7 +469,7 @@ async fn request_project_run(project_path: String, command: Vec<String>) -> Resu
 
     let summary = format!(
         "Built the Docker image, compressed it to a tar.gz artifact, uploaded it to object storage, and submitted run request {} to the coordinator.",
-        job_id
+        coordinator_job_id
     );
 
     Ok(RunRequestResult {
@@ -591,71 +620,118 @@ fn list_incoming_run_requests() -> Result<Vec<IncomingRunRequest>, String> {
 }
 
 #[tauri::command]
-fn get_run_request_result(job_id: String) -> Result<Option<RunRequestJobResult>, String> {
+async fn get_run_request_result(job_id: String) -> Result<Option<RunRequestJobResult>, String> {
     let trimmed_job_id = job_id.trim();
     if trimmed_job_id.is_empty() {
         return Err("job_id is required".to_string());
     }
 
     let config = app_config()?;
-    let client = redis::Client::open(config.redis_url.as_str())
-        .map_err(|error| format!("Failed to parse the Redis URL: {error}"))?;
-    let mut connection = client
-        .get_connection()
-        .map_err(|error| format!("Failed to connect to Redis: {error}"))?;
+    let endpoint = coordinator_endpoint(&config.coordinator_addr);
+    let channel = Endpoint::from_shared(endpoint.clone())
+        .map_err(|error| format!("Failed to parse coordinator address {endpoint}: {error}"))?
+        .connect_timeout(Duration::from_secs(3))
+        .timeout(Duration::from_secs(5))
+        .connect()
+        .await
+        .map_err(|error| format!("Failed to connect to coordinator at {endpoint}: {error}"))?;
 
-    let status = connection
-        .get::<_, Option<String>>(job_status_key(trimmed_job_id))
-        .map_err(|error| {
-            format!(
-                "Failed to read job status {}: {error}",
-                job_status_key(trimmed_job_id)
-            )
-        })?
-        .unwrap_or_default();
+    let mut client = ClientServiceClient::new(channel);
+    let response = client
+        .get_job_result(GetJobResultRequest {
+            job_id: Some(coordinatorpb::JobId {
+                value: trimmed_job_id.to_string(),
+            }),
+        })
+        .await;
 
-    let result_payload = connection
-        .get::<_, Option<String>>(result_key(trimmed_job_id))
-        .map_err(|error| format!("Failed to read job result {}: {error}", result_key(trimmed_job_id)))?;
+    let response = match response {
+        Ok(response) => response.into_inner(),
+        Err(error) if error.code() == tonic::Code::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "Coordinator GetJobResult request failed for {}: {error}",
+                trimmed_job_id
+            ))
+        }
+    };
 
-    if status.trim().is_empty() && result_payload.is_none() {
-        return Ok(None);
+    let status = coordinator_job_status_label(response.status);
+    let mut job_result = RunRequestJobResult {
+        job_id: trimmed_job_id.to_string(),
+        worker_id: String::new(),
+        status: status.to_string(),
+        result_status: String::new(),
+        partial: false,
+        exit_code: 0,
+        stdout_excerpt: String::new(),
+        stderr_excerpt: String::new(),
+        output_uri: String::new(),
+        output_api_url: String::new(),
+        output_public_url: String::new(),
+        output_size_bytes: 0,
+        output_artifacts: Vec::new(),
+        finished_at_unix: 0,
+        completed: coordinator_job_status_terminal(response.status),
+    };
+
+    if let Some(result) = response.result {
+        let result_status = coordinator_result_status_name(result.status);
+        let job_id = result
+            .job_id
+            .as_ref()
+            .map(|id| id.value.trim())
+            .filter(|value| !value.is_empty())
+            .unwrap_or(trimmed_job_id);
+
+        job_result.job_id = job_id.to_string();
+        job_result.result_status = result_status.to_string();
+        job_result.exit_code = result.exit_code;
+        job_result.stdout_excerpt = result.stdout_excerpt;
+        job_result.stderr_excerpt = result.stderr_excerpt;
+        job_result.output_uri = result.output_uri;
+        job_result.output_api_url = result.output_api_url;
+        job_result.output_public_url = result.output_public_url;
+        job_result.output_size_bytes = result.output_size_bytes;
+        job_result.finished_at_unix = result.finished_at_unix;
+        job_result.output_artifacts = result
+            .output_artifacts
+            .into_iter()
+            .map(|artifact| RunRequestOutputArtifact {
+                relative_path: artifact.relative_path,
+                object_key: artifact.object_key,
+                uri: artifact.uri,
+                api_url: artifact.api_url,
+                public_url: artifact.public_url,
+                sha256: artifact.sha256,
+                size_bytes: artifact.size_bytes,
+                content_type: artifact.content_type,
+            })
+            .collect();
+        job_result.completed =
+            job_result.completed || coordinator_result_status_terminal(result.status);
     }
 
-    let result_record = result_payload
-        .as_deref()
-        .map(serde_json::from_str::<RedisResultRecord>)
-        .transpose()
-        .map_err(|error| {
-            format!(
-                "Failed to parse result record {}: {error}",
-                result_key(trimmed_job_id)
-            )
-        })?
-        .unwrap_or_default();
+    if !response.result_available && !job_result.completed {
+        job_result.exit_code = 0;
+    }
 
-    let is_terminal_status = matches!(status.as_str(), "completed" | "failed");
-    let is_terminal_result =
-        matches!(result_record.result_status.as_str(), "STATUS_SUCCEEDED" | "STATUS_FAILED")
-            && !result_record.partial;
+    Ok(Some(job_result))
+}
 
-    Ok(Some(RunRequestJobResult {
-        job_id: if result_record.job_id.trim().is_empty() {
-            trimmed_job_id.to_string()
-        } else {
-            result_record.job_id
-        },
-        worker_id: result_record.worker_id,
-        status,
-        result_status: result_record.result_status,
-        partial: result_record.partial,
-        exit_code: result_record.exit_code,
-        stdout_excerpt: result_record.stdout_excerpt,
-        stderr_excerpt: result_record.stderr_excerpt,
-        output_uri: result_record.output_uri,
-        finished_at_unix: result_record.finished_at_unix,
-        completed: is_terminal_status || is_terminal_result,
-    }))
+#[tauri::command]
+fn get_signed_result_artifact_url(object_key: String) -> Result<String, String> {
+    let trimmed_object_key = object_key.trim();
+    if trimmed_object_key.is_empty() {
+        return Err("object_key is required".to_string());
+    }
+
+    let config = app_config()?;
+    presign_object_storage_download_url(
+        &config.object_storage,
+        trimmed_object_key,
+        DEFAULT_SIGNED_DOWNLOAD_EXPIRY_SECONDS,
+    )
 }
 
 #[tauri::command]
@@ -851,7 +927,10 @@ where
 fn track_worker_runtime_from_log_line(line: &str) {
     let job_id = extract_log_field(line, "job_id");
 
-    if line.contains("job received") || line.contains("starting job") || line.contains("starting container execution") {
+    if line.contains("job received")
+        || line.contains("starting job")
+        || line.contains("starting container execution")
+    {
         if let Ok(mut runtime) = contributor_runtime_slot().lock() {
             runtime.job_running = true;
             if let Some(id) = job_id.clone() {
@@ -918,7 +997,10 @@ fn resolve_worker_command() -> Result<Command, String> {
     }
 
     let mut command = Command::new("go");
-    command.current_dir(worker_dir).arg("run").arg("./cmd/worker");
+    command
+        .current_dir(worker_dir)
+        .arg("run")
+        .arg("./cmd/worker");
     Ok(command)
 }
 
@@ -987,7 +1069,10 @@ fn workspace_worker_dir() -> Result<PathBuf, String> {
         }
     }
 
-    Err("Could not locate worker directory. Set COMPUTEHIVE_WORKER_DIR or COMPUTEHIVE_WORKER_BIN.".to_string())
+    Err(
+        "Could not locate worker directory. Set COMPUTEHIVE_WORKER_DIR or COMPUTEHIVE_WORKER_BIN."
+            .to_string(),
+    )
 }
 
 fn build_project_docker_image(project_path: &str) -> Result<DockerImageResult, String> {
@@ -1775,8 +1860,9 @@ fn upload_artifact_to_object_storage_blocking(
     let mut response = None;
 
     for attempt in 1..=3 {
-        let file = File::open(artifact_path)
-            .map_err(|error| format!("Failed to open the compressed artifact for upload: {error}"))?;
+        let file = File::open(artifact_path).map_err(|error| {
+            format!("Failed to open the compressed artifact for upload: {error}")
+        })?;
         let body = reqwest::blocking::Body::sized(file, artifact_size_bytes);
 
         match client
@@ -1801,8 +1887,7 @@ fn upload_artifact_to_object_storage_blocking(
     let response = response.ok_or_else(|| {
         format!(
             "Failed to upload the artifact to object storage after 3 attempts ({} bytes): {}",
-            artifact_size_bytes,
-            last_error
+            artifact_size_bytes, last_error
         )
     })?;
 
@@ -1883,10 +1968,7 @@ fn sign_object_storage_request(
         .map(|(name, _)| name.as_str())
         .collect::<Vec<_>>()
         .join(";");
-    let credential_scope = format!(
-        "{}/{}/s3/aws4_request",
-        timestamp.date_stamp, config.region
-    );
+    let credential_scope = format!("{}/{}/s3/aws4_request", timestamp.date_stamp, config.region);
     let canonical_request = format!(
         "{method}\n{canonical_uri}\n\n{canonical_headers_text}\n{signed_headers}\n{payload_sha256}"
     );
@@ -1917,11 +1999,84 @@ fn sign_object_storage_request(
     })
 }
 
+fn presign_object_storage_download_url(
+    config: &ObjectStorageConfig,
+    object_key: &str,
+    expires_seconds: u32,
+) -> Result<String, String> {
+    if expires_seconds == 0 {
+        return Err("expires_seconds must be greater than 0".to_string());
+    }
+
+    let endpoint = Url::parse(&config.endpoint_url)
+        .map_err(|error| format!("Failed to parse the object storage endpoint: {error}"))?;
+    let host = endpoint_host_header(&endpoint)?;
+    let object_key = object_key.trim_start_matches('/');
+    let canonical_uri = format!(
+        "/{}/{}",
+        aws_uri_encode_path_segment(config.bucket_name.trim_matches('/')),
+        aws_uri_encode_path_segment(object_key)
+    );
+    let request_url = format!(
+        "{}/{}/{}",
+        config.endpoint_url.trim_end_matches('/'),
+        config.bucket_name.trim_matches('/'),
+        object_key
+    );
+    let timestamp = aws_timestamp().map_err(|error| {
+        format!("Failed to create the object storage request timestamp: {error}")
+    })?;
+    let credential_scope = format!("{}/{}/s3/aws4_request", timestamp.date_stamp, config.region);
+
+    let mut query_pairs = vec![
+        (
+            "X-Amz-Algorithm".to_string(),
+            "AWS4-HMAC-SHA256".to_string(),
+        ),
+        (
+            "X-Amz-Credential".to_string(),
+            format!("{}/{}", config.access_key_id, credential_scope),
+        ),
+        ("X-Amz-Date".to_string(), timestamp.amz_date.clone()),
+        ("X-Amz-Expires".to_string(), expires_seconds.to_string()),
+        ("X-Amz-SignedHeaders".to_string(), "host".to_string()),
+    ];
+    if let Some(session_token) = optional_non_empty(&config.session_token) {
+        query_pairs.push((
+            "X-Amz-Security-Token".to_string(),
+            session_token.to_string(),
+        ));
+    }
+
+    let canonical_query = canonical_query_string(&query_pairs);
+    let canonical_headers = format!("host:{host}\n");
+    let canonical_request = format!(
+        "GET\n{canonical_uri}\n{canonical_query}\n{canonical_headers}\nhost\nUNSIGNED-PAYLOAD"
+    );
+    let string_to_sign = format!(
+        "AWS4-HMAC-SHA256\n{}\n{}\n{}",
+        timestamp.amz_date,
+        credential_scope,
+        sha256_hex(canonical_request.as_bytes())
+    );
+    let signature = aws_v4_signature(
+        &config.secret_access_key,
+        &timestamp.date_stamp,
+        &config.region,
+        "s3",
+        &string_to_sign,
+    )?;
+
+    Ok(format!(
+        "{request_url}?{canonical_query}&X-Amz-Signature={signature}"
+    ))
+}
+
 fn build_object_storage_http_client() -> Result<BlockingHttpClient, String> {
     BlockingHttpClient::builder()
         .connect_timeout(Duration::from_secs(20))
         .timeout(None::<Duration>)
-    .tcp_keepalive(Duration::from_secs(30))
+        .tcp_keepalive(Duration::from_secs(30))
         .build()
         .map_err(|error| format!("Failed to initialize the object storage HTTP client: {error}"))
 }
@@ -1933,8 +2088,9 @@ fn reqwest_headers(headers: &[(String, String)]) -> Result<reqwest::header::Head
     for (name, value) in headers {
         let header_name = HeaderName::from_bytes(name.as_bytes())
             .map_err(|error| format!("Invalid object storage header name `{name}`: {error}"))?;
-        let header_value = HeaderValue::from_str(value)
-            .map_err(|error| format!("Invalid object storage header value for `{name}`: {error}"))?;
+        let header_value = HeaderValue::from_str(value).map_err(|error| {
+            format!("Invalid object storage header value for `{name}`: {error}")
+        })?;
         map.insert(header_name, header_value);
     }
 
@@ -1957,19 +2113,48 @@ fn aws_uri_encode_path_segment(value: &str) -> String {
 
     for byte in value.as_bytes() {
         match byte {
-            b'A'..=b'Z'
-            | b'a'..=b'z'
-            | b'0'..=b'9'
-            | b'-'
-            | b'_'
-            | b'.'
-            | b'~'
-            | b'/' => encoded.push(*byte as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
+                encoded.push(*byte as char)
+            }
             _ => encoded.push_str(&format!("%{byte:02X}")),
         }
     }
 
     encoded
+}
+
+fn aws_uri_encode_query_component(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+
+    for byte in value.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(*byte as char)
+            }
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+
+    encoded
+}
+
+fn canonical_query_string(pairs: &[(String, String)]) -> String {
+    let mut encoded_pairs = pairs
+        .iter()
+        .map(|(key, value)| {
+            (
+                aws_uri_encode_query_component(key),
+                aws_uri_encode_query_component(value),
+            )
+        })
+        .collect::<Vec<_>>();
+    encoded_pairs.sort_by(|left, right| left.cmp(right));
+
+    encoded_pairs
+        .into_iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join("&")
 }
 
 fn aws_v4_signature(
@@ -1988,8 +2173,8 @@ fn aws_v4_signature(
 }
 
 fn hmac_sha256(key: &[u8], message: &str) -> Result<Vec<u8>, String> {
-    let mut mac =
-        Hmac::<Sha256>::new_from_slice(key).map_err(|error| format!("Invalid HMAC key: {error}"))?;
+    let mut mac = Hmac::<Sha256>::new_from_slice(key)
+        .map_err(|error| format!("Invalid HMAC key: {error}"))?;
     mac.update(message.as_bytes());
     Ok(mac.finalize().into_bytes().to_vec())
 }
@@ -2019,7 +2204,9 @@ struct AwsTimestamp {
 
 fn aws_timestamp() -> Result<AwsTimestamp, time::error::Format> {
     let now = OffsetDateTime::now_utc();
-    let amz_date = now.format(format_description!("[year][month][day]T[hour][minute][second]Z"))?;
+    let amz_date = now.format(format_description!(
+        "[year][month][day]T[hour][minute][second]Z"
+    ))?;
     let date_stamp = now.format(format_description!("[year][month][day]"))?;
 
     Ok(AwsTimestamp {
@@ -2056,12 +2243,66 @@ fn job_status_key(job_id: &str) -> String {
     format!("job_status:{job_id}")
 }
 
-fn result_key(job_id: &str) -> String {
-    format!("result:{job_id}")
-}
-
 fn artifact_record_key(job_id: &str) -> String {
     format!("{ARTIFACT_RECORD_PREFIX}{job_id}")
+}
+
+fn persist_artifact_record(
+    config: &AppConfig,
+    job_id: &str,
+    artifact_record: &ArtifactRecord,
+) -> Result<(), String> {
+    let client = redis::Client::open(config.redis_url.as_str())
+        .map_err(|error| format!("Failed to parse the Redis URL: {error}"))?;
+    let mut connection = client
+        .get_connection()
+        .map_err(|error| format!("Failed to connect to Redis: {error}"))?;
+    let payload = serde_json::to_string(artifact_record)
+        .map_err(|error| format!("Failed to serialize the artifact record: {error}"))?;
+
+    connection
+        .set::<_, _, ()>(artifact_record_key(job_id), payload)
+        .map_err(|error| format!("Failed to persist the artifact record in Redis: {error}"))
+}
+
+fn coordinator_job_status_label(status: i32) -> &'static str {
+    match status {
+        1 => "queued",
+        2 => "assigned",
+        3 => "running",
+        4 => "completed",
+        5 => "failed",
+        _ => "queued",
+    }
+}
+
+fn coordinator_job_status_terminal(status: i32) -> bool {
+    matches!(status, 4 | 5)
+}
+
+fn coordinator_result_status_name(status: i32) -> &'static str {
+    match status {
+        1 => "STATUS_QUEUED",
+        2 => "STATUS_ASSIGNED",
+        3 => "STATUS_RUNNING",
+        4 => "STATUS_SUCCEEDED",
+        5 => "STATUS_FAILED",
+        6 => "STATUS_CANCELED",
+        _ => "",
+    }
+}
+
+fn coordinator_result_status_terminal(status: i32) -> bool {
+    matches!(status, 4 | 5 | 6)
+}
+
+fn optional_non_empty(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
 }
 
 fn join_bucket_api_url(base_url: &str, object_key: &str) -> String {
@@ -2103,7 +2344,9 @@ fn normalize_client_command(command: Vec<String>) -> Result<Vec<String>, String>
         .collect::<Vec<_>>();
 
     if lines.is_empty() {
-        return Err("At least one command segment is required before requesting a run.".to_string());
+        return Err(
+            "At least one command segment is required before requesting a run.".to_string(),
+        );
     }
 
     let script = lines.join("\n");
@@ -2136,9 +2379,10 @@ fn load_app_config() -> Result<AppConfig, String> {
     let bucket_url = required_env("S3_BUCKET")?;
     let access_key_id = required_env("S3_ACCESS_KEY_ID")?;
     let secret_access_key = required_env("S3_SECRET_ACCESS_KEY")?;
+    let session_token = optional_env("S3_SESSION_TOKEN").unwrap_or_default();
     let redis_url = required_env("REDIS_URL")?;
-    let coordinator_addr = optional_env("COORDINATOR_ADDR")
-        .unwrap_or_else(|| DEFAULT_COORDINATOR_ADDR.to_string());
+    let coordinator_addr =
+        optional_env("COORDINATOR_ADDR").unwrap_or_else(|| DEFAULT_COORDINATOR_ADDR.to_string());
     let (endpoint_url, bucket_name, bucket_api_url) = parse_bucket_url(&bucket_url)?;
     let bucket_public_url =
         optional_env("S3_PUBLIC_BUCKET_URL").unwrap_or_else(|| bucket_api_url.clone());
@@ -2151,6 +2395,7 @@ fn load_app_config() -> Result<AppConfig, String> {
             bucket_public_url,
             access_key_id,
             secret_access_key,
+            session_token,
             region: DEFAULT_R2_REGION.to_string(),
         },
         redis_url,
@@ -2163,6 +2408,8 @@ async fn submit_job_to_coordinator(
     image: &DockerImageResult,
     environment: HashMap<String, String>,
     command: &[String],
+    artifact_api_url: &str,
+    artifact_sha256: &str,
 ) -> Result<String, String> {
     let endpoint = coordinator_endpoint(&config.coordinator_addr);
     let channel = Endpoint::from_shared(endpoint.clone())
@@ -2186,11 +2433,17 @@ async fn submit_job_to_coordinator(
             environment,
             max_runtime_seconds: DEFAULT_MAX_RUNTIME_SECONDS,
             job: None,
+            artifact_url: artifact_api_url.to_string(),
+            artifact_sha256: artifact_sha256.to_string(),
         })
         .await
         .map_err(|error| format!("Coordinator SubmitJob request failed: {error}"))?;
 
-    let job_id = response.into_inner().job_id.map(|id| id.value).unwrap_or_default();
+    let job_id = response
+        .into_inner()
+        .job_id
+        .map(|id| id.value)
+        .unwrap_or_default();
     if job_id.trim().is_empty() {
         return Err("Coordinator SubmitJob response did not include a job id.".to_string());
     }
@@ -2332,6 +2585,7 @@ pub fn run() {
             request_project_run,
             list_incoming_run_requests,
             get_run_request_result,
+            get_signed_result_artifact_url,
             start_contributor_sharing,
             stop_contributor_sharing,
             get_contributor_sharing_status

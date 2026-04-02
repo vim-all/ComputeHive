@@ -20,24 +20,24 @@ const (
 )
 
 type Job struct {
-	ID             string            `json:"id,omitempty"`
-	Status         string            `json:"status,omitempty"`
-	TaskID         string            `json:"task_id,omitempty"`
-	ArtifactURL    string            `json:"artifact_url,omitempty"`
-	S3URL          string            `json:"s3_url,omitempty"`
-	ArtifactSHA256 string            `json:"artifact_sha256,omitempty"`
-	ImageHash      string            `json:"image_hash,omitempty"`
-	ImageRef       string            `json:"image_ref"`
-	Command        []string          `json:"command,omitempty"`
-	Env            map[string]string `json:"env,omitempty"`
-	GPU            bool              `json:"gpu,omitempty"`
-	CPUCores       float64           `json:"cpu_cores,omitempty"`
-	MemoryMB       int64             `json:"memory_mb,omitempty"`
-	TimeoutSeconds int               `json:"timeout_seconds,omitempty"`
-	CreatedAtUnix  int64             `json:"-"`
-	AssignedAtUnix *int64            `json:"-"`
-	StartedAtUnix  *int64            `json:"-"`
-	CompletedAtUnix *int64           `json:"-"`
+	ID              string            `json:"id,omitempty"`
+	Status          string            `json:"status,omitempty"`
+	TaskID          string            `json:"task_id,omitempty"`
+	ArtifactURL     string            `json:"artifact_url,omitempty"`
+	S3URL           string            `json:"s3_url,omitempty"`
+	ArtifactSHA256  string            `json:"artifact_sha256,omitempty"`
+	ImageHash       string            `json:"image_hash,omitempty"`
+	ImageRef        string            `json:"image_ref"`
+	Command         []string          `json:"command,omitempty"`
+	Env             map[string]string `json:"env,omitempty"`
+	GPU             bool              `json:"gpu,omitempty"`
+	CPUCores        float64           `json:"cpu_cores,omitempty"`
+	MemoryMB        int64             `json:"memory_mb,omitempty"`
+	TimeoutSeconds  int               `json:"timeout_seconds,omitempty"`
+	CreatedAtUnix   int64             `json:"-"`
+	AssignedAtUnix  *int64            `json:"-"`
+	StartedAtUnix   *int64            `json:"-"`
+	CompletedAtUnix *int64            `json:"-"`
 }
 
 func (j *Job) UnmarshalJSON(data []byte) error {
@@ -296,17 +296,36 @@ func (j Job) BuildState(status string, assignedAt, startedAt, completedAt *time.
 }
 
 type JobResult struct {
-	JobID             string    `json:"job_id"`
-	WorkerID          string    `json:"worker_id"`
-	Status            string    `json:"status"`
-	StartedAt         time.Time `json:"started_at"`
-	FinishedAt        time.Time `json:"finished_at"`
-	DurationMillis    int64     `json:"duration_millis"`
-	ExitCode          int       `json:"exit_code"`
-	ImageRef          string    `json:"image_ref,omitempty"`
-	ArtifactSHA256    string    `json:"artifact_sha256,omitempty"`
-	ArtifactSizeBytes int64     `json:"artifact_size_bytes,omitempty"`
-	Stdout            string    `json:"stdout,omitempty"`
-	Stderr            string    `json:"stderr,omitempty"`
-	Error             string    `json:"error,omitempty"`
+	JobID             string           `json:"job_id"`
+	WorkerID          string           `json:"worker_id"`
+	Status            string           `json:"status"`
+	StartedAt         time.Time        `json:"started_at"`
+	FinishedAt        time.Time        `json:"finished_at"`
+	DurationMillis    int64            `json:"duration_millis"`
+	ExitCode          int              `json:"exit_code"`
+	ImageRef          string           `json:"image_ref,omitempty"`
+	ArtifactSHA256    string           `json:"artifact_sha256,omitempty"`
+	ArtifactSizeBytes int64            `json:"artifact_size_bytes,omitempty"`
+	Stdout            string           `json:"stdout,omitempty"`
+	Stderr            string           `json:"stderr,omitempty"`
+	Error             string           `json:"error,omitempty"`
+	OutputURI         string           `json:"output_uri,omitempty"`
+	OutputAPIURL      string           `json:"output_api_url,omitempty"`
+	OutputPublicURL   string           `json:"output_public_url,omitempty"`
+	OutputSizeBytes   int64            `json:"output_size_bytes,omitempty"`
+	OutputArtifacts   []OutputArtifact `json:"output_artifacts,omitempty"`
+
+	OutputDirHostPath string `json:"-"`
+	CleanupDir        string `json:"-"`
+}
+
+type OutputArtifact struct {
+	RelativePath string `json:"relative_path,omitempty"`
+	ObjectKey    string `json:"object_key,omitempty"`
+	URI          string `json:"uri,omitempty"`
+	APIURL       string `json:"api_url,omitempty"`
+	PublicURL    string `json:"public_url,omitempty"`
+	SHA256       string `json:"sha256,omitempty"`
+	SizeBytes    int64  `json:"size_bytes,omitempty"`
+	ContentType  string `json:"content_type,omitempty"`
 }

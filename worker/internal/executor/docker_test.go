@@ -7,7 +7,7 @@ import (
 )
 
 func TestBuildArgsAddsExpectedDockerFlags(t *testing.T) {
-	exec := NewDockerExecutor("docker", "worker-01", true)
+	exec := NewDockerExecutor("docker", "worker-01", true, "/computehive/output")
 	job := domain.Job{
 		ID:             "job-01",
 		ArtifactURL:    "https://example.com/job.tar.gz",
@@ -20,7 +20,7 @@ func TestBuildArgsAddsExpectedDockerFlags(t *testing.T) {
 		GPU:            true,
 	}
 
-	args, err := exec.buildRunArgs(job)
+	args, err := exec.buildRunArgs(job, "/tmp/computehive-output-job-01")
 	if err != nil {
 		t.Fatalf("buildRunArgs returned error: %v", err)
 	}
@@ -36,6 +36,8 @@ func TestBuildArgsAddsExpectedDockerFlags(t *testing.T) {
 		"computehive.worker.id=worker-01",
 		"--label",
 		"computehive.job.id=job-01",
+		"-v",
+		"/tmp/computehive-output-job-01:/computehive/output",
 		"--cpus",
 		"2",
 		"--memory",
@@ -46,6 +48,8 @@ func TestBuildArgsAddsExpectedDockerFlags(t *testing.T) {
 		"A=1",
 		"-e",
 		"B=2",
+		"-e",
+		"COMPUTEHIVE_OUTPUT_DIR=/computehive/output",
 		"computehive/job-01:latest",
 		"python",
 		"-c",
@@ -64,7 +68,7 @@ func TestBuildArgsAddsExpectedDockerFlags(t *testing.T) {
 }
 
 func TestBuildArgsRejectsDisabledGPUJobs(t *testing.T) {
-	exec := NewDockerExecutor("docker", "worker-01", false)
+	exec := NewDockerExecutor("docker", "worker-01", false, "/computehive/output")
 	job := domain.Job{
 		ID:             "job-01",
 		ArtifactURL:    "https://example.com/job.tar.gz",
@@ -73,7 +77,7 @@ func TestBuildArgsRejectsDisabledGPUJobs(t *testing.T) {
 		GPU:            true,
 	}
 
-	if _, err := exec.buildRunArgs(job); err == nil {
+	if _, err := exec.buildRunArgs(job, "/tmp/computehive-output-job-01"); err == nil {
 		t.Fatal("expected gpu job rejection")
 	}
 }

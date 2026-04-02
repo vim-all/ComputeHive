@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"sort"
 	"strconv"
@@ -15,16 +16,18 @@ import (
 )
 
 type DockerExecutor struct {
-	binary       string
-	workerID     string
-	allowGPUJobs bool
+	binary              string
+	workerID            string
+	allowGPUJobs        bool
+	outputCollectionDir string
 }
 
-func NewDockerExecutor(binary, workerID string, allowGPUJobs bool) *DockerExecutor {
+func NewDockerExecutor(binary, workerID string, allowGPUJobs bool, outputCollectionDir string) *DockerExecutor {
 	return &DockerExecutor{
-		binary:       binary,
-		workerID:     workerID,
-		allowGPUJobs: allowGPUJobs,
+		binary:              binary,
+		workerID:            workerID,
+		allowGPUJobs:        allowGPUJobs,
+		outputCollectionDir: strings.TrimSpace(outputCollectionDir),
 	}
 }
 
@@ -47,6 +50,16 @@ func (e *DockerExecutor) Run(ctx context.Context, job domain.Job, bundle artifac
 		ArtifactSizeBytes: bundle.SizeBytes,
 	}
 
+	outputRoot, err := os.MkdirTemp("", "computehive-output-*")
+	if err != nil {
+		result.Error = "create output directory: " + err.Error()
+		result.FinishedAt = time.Now().UTC()
+		result.DurationMillis = result.FinishedAt.Sub(startedAt).Milliseconds()
+		return result
+	}
+	result.CleanupDir = outputRoot
+	result.OutputDirHostPath = outputRoot
+
 	if strings.TrimSpace(bundle.ArchivePath) != "" {
 		loadStdout, loadStderr, err := e.runDockerCommand(ctx, "load", "-i", bundle.ArchivePath)
 		if err != nil {
@@ -68,7 +81,7 @@ func (e *DockerExecutor) Run(ctx context.Context, job domain.Job, bundle artifac
 		}
 	}
 
-	args, err := e.buildRunArgs(job)
+	args, err := e.buildRunArgs(job, outputRoot)
 	if err != nil {
 		result.Error = err.Error()
 		result.FinishedAt = time.Now().UTC()
@@ -101,13 +114,19 @@ func (e *DockerExecutor) Run(ctx context.Context, job domain.Job, bundle artifac
 	return result
 }
 
-func (e *DockerExecutor) buildRunArgs(job domain.Job) ([]string, error) {
+func (e *DockerExecutor) buildRunArgs(job domain.Job, hostOutputDir string) ([]string, error) {
 	job.Normalize()
 	if err := job.Validate(); err != nil {
 		return nil, err
 	}
 	if job.GPU && !e.allowGPUJobs {
 		return nil, fmt.Errorf("gpu jobs are disabled on this worker")
+	}
+	if strings.TrimSpace(hostOutputDir) == "" {
+		return nil, fmt.Errorf("host output directory is required")
+	}
+	if strings.TrimSpace(e.outputCollectionDir) == "" {
+		return nil, fmt.Errorf("worker output collection directory is required")
 	}
 
 	args := []string{
@@ -121,6 +140,8 @@ func (e *DockerExecutor) buildRunArgs(job domain.Job) ([]string, error) {
 		"computehive.worker.id=" + e.workerID,
 		"--label",
 		"computehive.job.id=" + job.ID,
+		"-v",
+		hostOutputDir + ":" + e.outputCollectionDir,
 	}
 
 	if job.CPUCores > 0 {
@@ -141,6 +162,7 @@ func (e *DockerExecutor) buildRunArgs(job domain.Job) ([]string, error) {
 	for _, key := range keys {
 		args = append(args, "-e", key+"="+job.Env[key])
 	}
+	args = append(args, "-e", "COMPUTEHIVE_OUTPUT_DIR="+e.outputCollectionDir)
 
 	args = append(args, job.ImageRef)
 	args = append(args, job.Command...)

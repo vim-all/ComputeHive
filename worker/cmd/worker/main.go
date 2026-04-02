@@ -11,6 +11,7 @@ import (
 	"github.com/vim-all/ComputeHive/worker/internal/artifact"
 	"github.com/vim-all/ComputeHive/worker/internal/config"
 	"github.com/vim-all/ComputeHive/worker/internal/executor"
+	workeroutput "github.com/vim-all/ComputeHive/worker/internal/output"
 	"github.com/vim-all/ComputeHive/worker/internal/resources"
 	"github.com/vim-all/ComputeHive/worker/internal/store"
 	workerapp "github.com/vim-all/ComputeHive/worker/internal/worker"
@@ -37,8 +38,24 @@ func main() {
 		Service:         cfg.S3SigningService,
 	})
 	resourceReporter := resources.NewReporter(cfg.DockerBinary)
-	dockerExecutor := executor.NewDockerExecutor(cfg.DockerBinary, cfg.WorkerID, cfg.AllowGPUJobs)
-	agent := workerapp.NewAgent(cfg, redisStore, artifactFetcher, resourceReporter, dockerExecutor, logger)
+	outputManager, err := workeroutput.NewManager(workeroutput.Config{
+		BucketURL:       cfg.S3BucketURL,
+		PublicBucketURL: cfg.S3PublicBucketURL,
+		AccessKeyID:     cfg.S3AccessKeyID,
+		SecretAccessKey: cfg.S3SecretAccessKey,
+		SessionToken:    cfg.S3SessionToken,
+		Region:          cfg.S3SigningRegion,
+		Service:         cfg.S3SigningService,
+		Timeout:         cfg.ArtifactDownloadTimeout,
+		MaxFiles:        cfg.OutputMaxFiles,
+		MaxBytes:        cfg.OutputMaxBytes,
+	})
+	if err != nil {
+		logger.Error("invalid output uploader configuration", "error", err)
+		os.Exit(2)
+	}
+	dockerExecutor := executor.NewDockerExecutor(cfg.DockerBinary, cfg.WorkerID, cfg.AllowGPUJobs, cfg.OutputCollectionDir)
+	agent := workerapp.NewAgent(cfg, redisStore, artifactFetcher, resourceReporter, dockerExecutor, outputManager, logger)
 
 	if err := agent.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		logger.Error("worker stopped unexpectedly", "error", err)

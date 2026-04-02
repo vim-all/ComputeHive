@@ -13,34 +13,17 @@ import (
 	status "google.golang.org/grpc/status"
 )
 
-// This is a compile-time assertion to ensure that this generated file
-// is compatible with the grpc package it is being compiled against.
-// Requires gRPC-Go v1.64.0 or later.
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	ClientService_SubmitJob_FullMethodName                 = "/compute.v1.ClientService/SubmitJob"
-	ClientService_RegisterContributorWorker_FullMethodName = "/compute.v1.ClientService/RegisterContributorWorker"
-	ClientService_LoginContributorWorker_FullMethodName    = "/compute.v1.ClientService/LoginContributorWorker"
-	ClientService_GetContributorWorker_FullMethodName      = "/compute.v1.ClientService/GetContributorWorker"
-	ClientService_ActivateContributorWorker_FullMethodName = "/compute.v1.ClientService/ActivateContributorWorker"
-	ClientService_GetJobStatus_FullMethodName              = "/compute.v1.ClientService/GetJobStatus"
-	ClientService_GetJobResult_FullMethodName              = "/compute.v1.ClientService/GetJobResult"
+	ClientService_SubmitJob_FullMethodName    = "/compute.v1.ClientService/SubmitJob"
+	ClientService_GetJobStatus_FullMethodName = "/compute.v1.ClientService/GetJobStatus"
+	ClientService_GetJobResult_FullMethodName = "/compute.v1.ClientService/GetJobResult"
 )
 
-// ClientServiceClient is the client API for ClientService service.
-//
-// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type ClientServiceClient interface {
-	// Submits a new compute job to the coordinator.
 	SubmitJob(ctx context.Context, in *SubmitJobRequest, opts ...grpc.CallOption) (*SubmitJobResponse, error)
-	RegisterContributorWorker(ctx context.Context, in *RegisterContributorWorkerRequest, opts ...grpc.CallOption) (*RegisterContributorWorkerResponse, error)
-	LoginContributorWorker(ctx context.Context, in *LoginContributorWorkerRequest, opts ...grpc.CallOption) (*LoginContributorWorkerResponse, error)
-	GetContributorWorker(ctx context.Context, in *GetContributorWorkerRequest, opts ...grpc.CallOption) (*GetContributorWorkerResponse, error)
-	ActivateContributorWorker(ctx context.Context, in *ActivateContributorWorkerRequest, opts ...grpc.CallOption) (*ActivateContributorWorkerResponse, error)
-	// Returns current state for a submitted job.
 	GetJobStatus(ctx context.Context, in *GetJobStatusRequest, opts ...grpc.CallOption) (*GetJobStatusResponse, error)
-	// Returns final result when available.
 	GetJobResult(ctx context.Context, in *GetJobResultRequest, opts ...grpc.CallOption) (*GetJobResultResponse, error)
 }
 
@@ -56,46 +39,6 @@ func (c *clientServiceClient) SubmitJob(ctx context.Context, in *SubmitJobReques
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(SubmitJobResponse)
 	err := c.cc.Invoke(ctx, ClientService_SubmitJob_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *clientServiceClient) RegisterContributorWorker(ctx context.Context, in *RegisterContributorWorkerRequest, opts ...grpc.CallOption) (*RegisterContributorWorkerResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(RegisterContributorWorkerResponse)
-	err := c.cc.Invoke(ctx, ClientService_RegisterContributorWorker_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *clientServiceClient) LoginContributorWorker(ctx context.Context, in *LoginContributorWorkerRequest, opts ...grpc.CallOption) (*LoginContributorWorkerResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(LoginContributorWorkerResponse)
-	err := c.cc.Invoke(ctx, ClientService_LoginContributorWorker_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *clientServiceClient) GetContributorWorker(ctx context.Context, in *GetContributorWorkerRequest, opts ...grpc.CallOption) (*GetContributorWorkerResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(GetContributorWorkerResponse)
-	err := c.cc.Invoke(ctx, ClientService_GetContributorWorker_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *clientServiceClient) ActivateContributorWorker(ctx context.Context, in *ActivateContributorWorkerRequest, opts ...grpc.CallOption) (*ActivateContributorWorkerResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(ActivateContributorWorkerResponse)
-	err := c.cc.Invoke(ctx, ClientService_ActivateContributorWorker_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -122,66 +65,35 @@ func (c *clientServiceClient) GetJobResult(ctx context.Context, in *GetJobResult
 	return out, nil
 }
 
-// ClientServiceServer is the server API for ClientService service.
-// All implementations must embed UnimplementedClientServiceServer
-// for forward compatibility.
 type ClientServiceServer interface {
-	// Submits a new compute job to the coordinator.
 	SubmitJob(context.Context, *SubmitJobRequest) (*SubmitJobResponse, error)
-	RegisterContributorWorker(context.Context, *RegisterContributorWorkerRequest) (*RegisterContributorWorkerResponse, error)
-	LoginContributorWorker(context.Context, *LoginContributorWorkerRequest) (*LoginContributorWorkerResponse, error)
-	GetContributorWorker(context.Context, *GetContributorWorkerRequest) (*GetContributorWorkerResponse, error)
-	ActivateContributorWorker(context.Context, *ActivateContributorWorkerRequest) (*ActivateContributorWorkerResponse, error)
-	// Returns current state for a submitted job.
 	GetJobStatus(context.Context, *GetJobStatusRequest) (*GetJobStatusResponse, error)
-	// Returns final result when available.
 	GetJobResult(context.Context, *GetJobResultRequest) (*GetJobResultResponse, error)
 	mustEmbedUnimplementedClientServiceServer()
 }
 
-// UnimplementedClientServiceServer must be embedded to have
-// forward compatible implementations.
-//
-// NOTE: this should be embedded by value instead of pointer to avoid a nil
-// pointer dereference when methods are called.
 type UnimplementedClientServiceServer struct{}
 
 func (UnimplementedClientServiceServer) SubmitJob(context.Context, *SubmitJobRequest) (*SubmitJobResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SubmitJob not implemented")
 }
-func (UnimplementedClientServiceServer) RegisterContributorWorker(context.Context, *RegisterContributorWorkerRequest) (*RegisterContributorWorkerResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method RegisterContributorWorker not implemented")
-}
-func (UnimplementedClientServiceServer) LoginContributorWorker(context.Context, *LoginContributorWorkerRequest) (*LoginContributorWorkerResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method LoginContributorWorker not implemented")
-}
-func (UnimplementedClientServiceServer) GetContributorWorker(context.Context, *GetContributorWorkerRequest) (*GetContributorWorkerResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method GetContributorWorker not implemented")
-}
-func (UnimplementedClientServiceServer) ActivateContributorWorker(context.Context, *ActivateContributorWorkerRequest) (*ActivateContributorWorkerResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method ActivateContributorWorker not implemented")
-}
+
 func (UnimplementedClientServiceServer) GetJobStatus(context.Context, *GetJobStatusRequest) (*GetJobStatusResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetJobStatus not implemented")
 }
+
 func (UnimplementedClientServiceServer) GetJobResult(context.Context, *GetJobResultRequest) (*GetJobResultResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetJobResult not implemented")
 }
+
 func (UnimplementedClientServiceServer) mustEmbedUnimplementedClientServiceServer() {}
 func (UnimplementedClientServiceServer) testEmbeddedByValue()                       {}
 
-// UnsafeClientServiceServer may be embedded to opt out of forward compatibility for this service.
-// Use of this interface is not recommended, as added methods to ClientServiceServer will
-// result in compilation errors.
 type UnsafeClientServiceServer interface {
 	mustEmbedUnimplementedClientServiceServer()
 }
 
 func RegisterClientServiceServer(s grpc.ServiceRegistrar, srv ClientServiceServer) {
-	// If the following call pancis, it indicates UnimplementedClientServiceServer was
-	// embedded by pointer and is nil.  This will cause panics if an
-	// unimplemented method is ever invoked, so we test this at initialization
-	// time to prevent it from happening at runtime later due to I/O.
 	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
 		t.testEmbeddedByValue()
 	}
@@ -202,78 +114,6 @@ func _ClientService_SubmitJob_Handler(srv interface{}, ctx context.Context, dec 
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ClientServiceServer).SubmitJob(ctx, req.(*SubmitJobRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _ClientService_RegisterContributorWorker_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(RegisterContributorWorkerRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(ClientServiceServer).RegisterContributorWorker(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: ClientService_RegisterContributorWorker_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ClientServiceServer).RegisterContributorWorker(ctx, req.(*RegisterContributorWorkerRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _ClientService_LoginContributorWorker_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(LoginContributorWorkerRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(ClientServiceServer).LoginContributorWorker(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: ClientService_LoginContributorWorker_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ClientServiceServer).LoginContributorWorker(ctx, req.(*LoginContributorWorkerRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _ClientService_GetContributorWorker_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(GetContributorWorkerRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(ClientServiceServer).GetContributorWorker(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: ClientService_GetContributorWorker_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ClientServiceServer).GetContributorWorker(ctx, req.(*GetContributorWorkerRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _ClientService_ActivateContributorWorker_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(ActivateContributorWorkerRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(ClientServiceServer).ActivateContributorWorker(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: ClientService_ActivateContributorWorker_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ClientServiceServer).ActivateContributorWorker(ctx, req.(*ActivateContributorWorkerRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -314,9 +154,6 @@ func _ClientService_GetJobResult_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
-// ClientService_ServiceDesc is the grpc.ServiceDesc for ClientService service.
-// It's only intended for direct use with grpc.RegisterService,
-// and not to be introspected or modified (even as a copy)
 var ClientService_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "compute.v1.ClientService",
 	HandlerType: (*ClientServiceServer)(nil),
@@ -324,22 +161,6 @@ var ClientService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SubmitJob",
 			Handler:    _ClientService_SubmitJob_Handler,
-		},
-		{
-			MethodName: "RegisterContributorWorker",
-			Handler:    _ClientService_RegisterContributorWorker_Handler,
-		},
-		{
-			MethodName: "LoginContributorWorker",
-			Handler:    _ClientService_LoginContributorWorker_Handler,
-		},
-		{
-			MethodName: "GetContributorWorker",
-			Handler:    _ClientService_GetContributorWorker_Handler,
-		},
-		{
-			MethodName: "ActivateContributorWorker",
-			Handler:    _ClientService_ActivateContributorWorker_Handler,
 		},
 		{
 			MethodName: "GetJobStatus",

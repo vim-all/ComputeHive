@@ -35,7 +35,12 @@ type Config struct {
 	RedisIOTimeout          time.Duration
 	ArtifactDownloadTimeout time.Duration
 	ArtifactMaxBytes        int64
+	OutputCollectionDir     string
+	OutputMaxFiles          int
+	OutputMaxBytes          int64
 	S3SignRequests          bool
+	S3BucketURL             string
+	S3PublicBucketURL       string
 	S3AccessKeyID           string
 	S3SecretAccessKey       string
 	S3SessionToken          string
@@ -83,7 +88,12 @@ func parse(args []string, getenv func(string) string) (Config, error) {
 		RedisIOTimeout:          envDuration(getenv, "REDIS_IO_TIMEOUT", 5*time.Second),
 		ArtifactDownloadTimeout: envDuration(getenv, "ARTIFACT_DOWNLOAD_TIMEOUT", 10*time.Minute),
 		ArtifactMaxBytes:        envInt64(getenv, "ARTIFACT_MAX_BYTES", 1<<30),
+		OutputCollectionDir:     envOr(getenv, "OUTPUT_COLLECTION_DIR", "/computehive/output"),
+		OutputMaxFiles:          envInt(getenv, "OUTPUT_MAX_FILES", 256),
+		OutputMaxBytes:          envInt64(getenv, "OUTPUT_MAX_BYTES", 10<<30),
 		S3SignRequests:          envBool(getenv, "S3_SIGN_REQUESTS", false),
+		S3BucketURL:             envOr(getenv, "S3_BUCKET", ""),
+		S3PublicBucketURL:       envOr(getenv, "S3_PUBLIC_BUCKET_URL", ""),
 		S3AccessKeyID:           envOr(getenv, "S3_ACCESS_KEY_ID", ""),
 		S3SecretAccessKey:       envOr(getenv, "S3_SECRET_ACCESS_KEY", ""),
 		S3SessionToken:          envOr(getenv, "S3_SESSION_TOKEN", ""),
@@ -131,7 +141,12 @@ func parse(args []string, getenv func(string) string) (Config, error) {
 	fs.DurationVar(&cfg.RedisIOTimeout, "redis-io-timeout", cfg.RedisIOTimeout, "Read/write timeout for Redis")
 	fs.DurationVar(&cfg.ArtifactDownloadTimeout, "artifact-download-timeout", cfg.ArtifactDownloadTimeout, "Timeout for downloading artifact archives")
 	fs.Int64Var(&cfg.ArtifactMaxBytes, "artifact-max-bytes", cfg.ArtifactMaxBytes, "Maximum allowed artifact archive size in bytes")
+	fs.StringVar(&cfg.OutputCollectionDir, "output-collection-dir", cfg.OutputCollectionDir, "Directory exposed inside the job container for returned job outputs")
+	fs.IntVar(&cfg.OutputMaxFiles, "output-max-files", cfg.OutputMaxFiles, "Maximum number of output files to collect from a job")
+	fs.Int64Var(&cfg.OutputMaxBytes, "output-max-bytes", cfg.OutputMaxBytes, "Maximum total size in bytes for collected job outputs")
 	fs.BoolVar(&cfg.S3SignRequests, "s3-sign-requests", cfg.S3SignRequests, "Sign artifact download requests with AWS SigV4")
+	fs.StringVar(&cfg.S3BucketURL, "s3-bucket", cfg.S3BucketURL, "Path-style S3 bucket URL used for artifact download and output uploads")
+	fs.StringVar(&cfg.S3PublicBucketURL, "s3-public-bucket-url", cfg.S3PublicBucketURL, "Public base URL used when returning uploaded output links")
 	fs.StringVar(&cfg.S3AccessKeyID, "s3-access-key-id", cfg.S3AccessKeyID, "S3 access key ID used for artifact request signing")
 	fs.StringVar(&cfg.S3SecretAccessKey, "s3-secret-access-key", cfg.S3SecretAccessKey, "S3 secret access key used for artifact request signing")
 	fs.StringVar(&cfg.S3SessionToken, "s3-session-token", cfg.S3SessionToken, "S3 session token used for artifact request signing")
@@ -186,6 +201,15 @@ func parse(args []string, getenv func(string) string) (Config, error) {
 	}
 	if cfg.ArtifactMaxBytes <= 0 {
 		return Config{}, fmt.Errorf("artifact-max-bytes must be > 0")
+	}
+	if strings.TrimSpace(cfg.OutputCollectionDir) == "" {
+		return Config{}, fmt.Errorf("output-collection-dir is required")
+	}
+	if cfg.OutputMaxFiles <= 0 {
+		return Config{}, fmt.Errorf("output-max-files must be > 0")
+	}
+	if cfg.OutputMaxBytes <= 0 {
+		return Config{}, fmt.Errorf("output-max-bytes must be > 0")
 	}
 
 	return cfg, nil

@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { openPath } from "@tauri-apps/plugin-opener";
+import { openPath, openUrl } from "@tauri-apps/plugin-opener";
 
 type Mode = "user" | "contributor";
 type BuildStatus = "idle" | "ready" | "working" | "done" | "error";
@@ -49,8 +49,23 @@ interface RunRequestJobResult {
   stdoutExcerpt: string;
   stderrExcerpt: string;
   outputUri: string;
+  outputApiUrl: string;
+  outputPublicUrl: string;
+  outputSizeBytes: number;
+  outputArtifacts: RunRequestOutputArtifact[];
   finishedAtUnix: number;
   completed: boolean;
+}
+
+interface RunRequestOutputArtifact {
+  relativePath: string;
+  objectKey: string;
+  uri: string;
+  apiUrl: string;
+  publicUrl: string;
+  sha256: string;
+  sizeBytes: number;
+  contentType: string;
 }
 
 interface ContributorSharingStatus {
@@ -127,17 +142,14 @@ const bundleStatus = getElement<HTMLElement>("#bundle-status");
 const bundleSummaryTitle =
   getElement<HTMLElement>("#bundle-summary-title");
 const bundleSummary = getElement<HTMLElement>("#bundle-summary");
-const imageOutputPath = getElement<HTMLElement>("#image-output-path");
-const gzipOutputPath = getElement<HTMLElement>("#gzip-output-path");
-const artifactHash = getElement<HTMLElement>("#artifact-hash");
-const runRequestDetails =
-  getElement<HTMLElement>("#run-request-details");
+
 const runResultStatus =
   getElement<HTMLElement>("#run-result-status");
 const runResultOutput =
   getElement<HTMLElement>("#run-result-output");
-const artifactPublicLink =
-  getElement<HTMLAnchorElement>("#artifact-public-link");
+const runResultArtifacts =
+  getElement<HTMLElement>("#run-result-artifacts");
+
 const detectedStack = getElement<HTMLElement>("#detected-stack");
 const imageTag = getElement<HTMLElement>("#image-tag");
 const imageSize = getElement<HTMLElement>("#image-size");
@@ -258,6 +270,81 @@ function renderLink(
   element.removeAttribute("href");
   element.textContent = placeholder;
   element.classList.add("is-placeholder", "muted");
+}
+
+function renderResultArtifacts(
+  container: HTMLElement,
+  artifacts: RunRequestOutputArtifact[],
+  placeholder: string,
+): void {
+  container.innerHTML = "";
+
+  if (artifacts.length === 0) {
+    container.textContent = placeholder;
+    container.classList.add("muted");
+    return;
+  }
+
+  container.classList.remove("muted");
+  const fragment = document.createDocumentFragment();
+
+  artifacts.forEach((artifact) => {
+    const item = document.createElement("div");
+    item.className = "detail-artifact-item";
+    const href = artifact.publicUrl || artifact.apiUrl || artifact.uri;
+    if (href) {
+      const link = document.createElement("a");
+      link.className = "detail-artifact-link";
+      link.href = artifact.objectKey ? "#" : href;
+      link.textContent =
+        artifact.relativePath || artifact.objectKey || artifact.sha256;
+      link.addEventListener("click", (event) => {
+        event.preventDefault();
+        void openResultArtifact(artifact);
+      });
+      item.append(link);
+    } else {
+      const label = document.createElement("strong");
+      label.textContent =
+        artifact.relativePath || artifact.objectKey || artifact.sha256;
+      item.append(label);
+    }
+
+    const meta = document.createElement("p");
+    meta.className = "detail-artifact-meta";
+    const metaParts = [
+      artifact.sizeBytes > 0 ? formatBytes(artifact.sizeBytes) : "",
+      artifact.contentType || "",
+      artifact.sha256 ? `sha256 ${artifact.sha256}` : "",
+    ].filter((part) => part.length > 0);
+    meta.textContent = metaParts.join(" · ");
+    item.append(meta);
+
+    fragment.append(item);
+  });
+
+  container.append(fragment);
+}
+
+async function openResultArtifact(
+  artifact: RunRequestOutputArtifact,
+): Promise<void> {
+  try {
+    const targetUrl = artifact.objectKey
+      ? await invoke<string>("get_signed_result_artifact_url", {
+        objectKey: artifact.objectKey,
+      })
+      : artifact.publicUrl || artifact.apiUrl || artifact.uri;
+
+    if (!targetUrl) {
+      throw new Error("No downloadable URL is available for this artifact.");
+    }
+
+    await openUrl(targetUrl);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    addProcessLog("error", `Could not open returned file: ${message}`);
+  }
 }
 
 function renderCommandList(): void {
@@ -612,6 +699,12 @@ async function refreshRunRequestResult(jobId: string): Promise<void> {
           `Worker output: ${excerpt}`,
         );
       }
+      if ((result.outputArtifacts?.length ?? 0) > 0) {
+        addProcessLog(
+          "success",
+          `Worker uploaded ${result.outputArtifacts.length} returned file(s) for download.`,
+        );
+      }
     }
 
     if (result.completed) {
@@ -722,14 +815,11 @@ function renderUserState(): void {
 
   const imageDetails = state.buildResult ?? state.runResult?.image ?? null;
   if (imageDetails) {
-    imageOutputPath.textContent = imageDetails.imageArchivePath;
     detectedStack.textContent = imageDetails.detectedStack;
     imageTag.textContent = imageDetails.imageTag;
     imageSize.textContent = formatBytes(imageDetails.imageSizeBytes);
     dockerSetupSource.textContent = imageDetails.dockerSetupSource;
   } else {
-    imageOutputPath.textContent =
-      "The Docker image archive path will appear here after the build.";
     detectedStack.textContent = "Not detected yet";
     imageTag.textContent = "Not built yet";
     imageSize.textContent = "0 B";
@@ -737,11 +827,6 @@ function renderUserState(): void {
   }
 
   if (state.runResult) {
-    gzipOutputPath.textContent = `${state.runResult.gzipArchivePath} (${formatBytes(state.runResult.gzipSizeBytes)})`;
-    artifactHash.textContent = state.runResult.artifactSha256;
-    runRequestDetails.textContent =
-      `${state.runResult.redisJobId} · ${state.runResult.artifactObjectKey}`;
-
     if (state.jobResult) {
       const finishedText = state.jobResult.finishedAtUnix
         ? ` · finished ${formatUnixTime(state.jobResult.finishedAtUnix)}`
@@ -754,38 +839,37 @@ function renderUserState(): void {
       runResultOutput.textContent =
         outputText || "No stdout/stderr excerpt is available yet.";
       runResultOutput.classList.toggle("muted", outputText.length === 0);
+      renderResultArtifacts(
+        runResultArtifacts,
+        state.jobResult.outputArtifacts ?? [],
+        "No returned files were uploaded for this job.",
+      );
     } else {
       runResultStatus.textContent =
         "Queued. Waiting for worker to start and submit output.";
       runResultOutput.textContent =
         "Waiting for job execution output.";
       runResultOutput.classList.add("muted");
+      renderResultArtifacts(
+        runResultArtifacts,
+        [],
+        "Returned files will appear here after the job completes.",
+      );
     }
 
-    renderLink(
-      artifactPublicLink,
-      state.runResult.artifactPublicUrl,
-      "The public artifact link will appear here after upload.",
-    );
     renderBuildNotes(state.runResult.notes);
     return;
   }
 
-  gzipOutputPath.textContent =
-    "The tar.gz artifact path will appear here after a run request.";
-  artifactHash.textContent =
-    "The SHA-256 hash will appear here after upload.";
-  runRequestDetails.textContent =
-    "The Redis job id and object storage key will appear here after you request a run.";
   runResultStatus.textContent =
     "Worker output will appear here after the job is completed.";
   runResultOutput.textContent =
     "Waiting for job execution output.";
   runResultOutput.classList.add("muted");
-  renderLink(
-    artifactPublicLink,
-    "",
-    "The public artifact link will appear here after upload.",
+  renderResultArtifacts(
+    runResultArtifacts,
+    [],
+    "Returned files will appear here after the job completes.",
   );
 
   if (imageDetails) {

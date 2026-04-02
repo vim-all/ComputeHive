@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/vim-all/ComputeHive/worker/internal/artifact"
 	"github.com/vim-all/ComputeHive/worker/internal/config"
 	"github.com/vim-all/ComputeHive/worker/internal/domain"
+	workeroutput "github.com/vim-all/ComputeHive/worker/internal/output"
 )
 
 type storeAPI interface {
@@ -33,12 +35,17 @@ type executorAPI interface {
 	Run(ctx context.Context, job domain.Job, bundle artifact.Bundle) domain.JobResult
 }
 
+type outputManagerAPI interface {
+	CollectAndUpload(ctx context.Context, jobID, outputDir string) (workeroutput.UploadResult, error)
+}
+
 type Agent struct {
 	cfg      config.Config
 	store    storeAPI
 	fetcher  fetcherAPI
 	reporter reporterAPI
 	executor executorAPI
+	outputs  outputManagerAPI
 	logger   *slog.Logger
 	started  time.Time
 
@@ -52,13 +59,14 @@ type Agent struct {
 	lastNoJobLog time.Time
 }
 
-func NewAgent(cfg config.Config, store storeAPI, fetcher fetcherAPI, reporter reporterAPI, executor executorAPI, logger *slog.Logger) *Agent {
+func NewAgent(cfg config.Config, store storeAPI, fetcher fetcherAPI, reporter reporterAPI, executor executorAPI, outputs outputManagerAPI, logger *slog.Logger) *Agent {
 	return &Agent{
 		cfg:      cfg,
 		store:    store,
 		fetcher:  fetcher,
 		reporter: reporter,
 		executor: executor,
+		outputs:  outputs,
 		logger:   logger,
 		started:  time.Now().UTC(),
 		status:   domain.WorkerStatusAvailable,
@@ -229,6 +237,13 @@ func (a *Agent) handleJob(ctx context.Context, job *domain.Job) error {
 	a.logger.Info("starting container execution", "job_id", job.ID, "image_ref", job.ImageRef)
 
 	result := a.executor.Run(jobCtx, *job, bundle)
+	if cleanupDir := strings.TrimSpace(result.CleanupDir); cleanupDir != "" {
+		defer func() {
+			if err := os.RemoveAll(cleanupDir); err != nil {
+				a.logger.Warn("failed to cleanup job output directory", "job_id", job.ID, "path", cleanupDir, "error", err)
+			}
+		}()
+	}
 
 	if strings.TrimSpace(result.Status) == "" {
 		result.Status = domain.JobStatusFailed
@@ -238,6 +253,25 @@ func (a *Agent) handleJob(ctx context.Context, job *domain.Job) error {
 	}
 	if result.WorkerID == "" {
 		result.WorkerID = a.cfg.WorkerID
+	}
+	if a.outputs != nil {
+		outputDir := strings.TrimSpace(result.OutputDirHostPath)
+		if outputDir != "" {
+			uploadResult, err := a.outputs.CollectAndUpload(jobCtx, job.ID, outputDir)
+			if err != nil {
+				result.Error = combineErrors(result.Error, "collect job outputs: "+err.Error())
+				result.Status = domain.JobStatusFailed
+				if result.ExitCode == 0 {
+					result.ExitCode = -1
+				}
+			} else {
+				result.OutputURI = uploadResult.ManifestURI
+				result.OutputAPIURL = uploadResult.ManifestAPIURL
+				result.OutputPublicURL = uploadResult.ManifestPublicURL
+				result.OutputSizeBytes = uploadResult.TotalSizeBytes
+				result.OutputArtifacts = uploadResult.Artifacts
+			}
+		}
 	}
 
 	if err := a.store.PublishJobResult(ctx, result); err != nil {
@@ -254,6 +288,19 @@ func (a *Agent) handleJob(ctx context.Context, job *domain.Job) error {
 
 	a.logger.Info("finished job", "job_id", job.ID, "status", result.Status, "exit_code", result.ExitCode)
 	return nil
+}
+
+func combineErrors(existing, next string) string {
+	existing = strings.TrimSpace(existing)
+	next = strings.TrimSpace(next)
+	switch {
+	case existing == "":
+		return next
+	case next == "":
+		return existing
+	default:
+		return existing + "; " + next
+	}
 }
 
 func (a *Agent) publishFailedJob(ctx context.Context, job domain.Job, startedAt time.Time, taskErr error) error {

@@ -13,6 +13,8 @@ message SubmitJobRequest {
   map<string, string> environment = 4;
   int32 max_runtime_seconds = 5;
   JobSchema job = 6;
+  string artifact_url = 7;
+  string artifact_sha256 = 8;
 }
 
 message SubmitJobResponse {

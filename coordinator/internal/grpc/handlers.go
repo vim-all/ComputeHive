@@ -127,6 +127,10 @@ func (s *Server) RequestJob(ctx context.Context, req *pb.RequestJobRequest) (*pb
 			RequiredResources: job.RequiredResources,
 			Status:            pb.Status_STATUS_RUNNING,
 			CreatedAtUnix:     job.CreatedAtUnix,
+			Environment:       job.Environment,
+			MaxRuntimeSeconds: job.MaxRuntimeSeconds,
+			ArtifactUrl:       job.ArtifactURL,
+			ArtifactSha256:    job.ArtifactSHA256,
 		},
 	}, nil
 }
@@ -187,15 +191,33 @@ func (s *Server) SubmitResult(ctx context.Context, req *pb.SubmitResultRequest) 
 	}
 
 	result := &store.ResultRecord{
-		JobID:          jobID,
-		WorkerID:       workerID,
-		ResultStatus:   incomingStatus.String(),
-		Partial:        incomingStatus == pb.Status_STATUS_RUNNING,
-		ExitCode:       req.GetResult().GetExitCode(),
-		StdoutExcerpt:  req.GetResult().GetStdoutExcerpt(),
-		StderrExcerpt:  req.GetResult().GetStderrExcerpt(),
-		OutputURI:      req.GetResult().GetOutputUri(),
-		FinishedAtUnix: req.GetResult().GetFinishedAtUnix(),
+		JobID:           jobID,
+		WorkerID:        workerID,
+		ResultStatus:    incomingStatus.String(),
+		Partial:         incomingStatus == pb.Status_STATUS_RUNNING,
+		ExitCode:        req.GetResult().GetExitCode(),
+		StdoutExcerpt:   req.GetResult().GetStdoutExcerpt(),
+		StderrExcerpt:   req.GetResult().GetStderrExcerpt(),
+		OutputURI:       req.GetResult().GetOutputUri(),
+		OutputAPIURL:    req.GetResult().GetOutputApiUrl(),
+		OutputPublicURL: req.GetResult().GetOutputPublicUrl(),
+		OutputSizeBytes: req.GetResult().GetOutputSizeBytes(),
+		FinishedAtUnix:  req.GetResult().GetFinishedAtUnix(),
+	}
+	if artifacts := req.GetResult().GetOutputArtifacts(); len(artifacts) > 0 {
+		result.OutputArtifacts = make([]store.OutputArtifactRecord, 0, len(artifacts))
+		for _, artifact := range artifacts {
+			result.OutputArtifacts = append(result.OutputArtifacts, store.OutputArtifactRecord{
+				RelativePath: artifact.GetRelativePath(),
+				ObjectKey:    artifact.GetObjectKey(),
+				URI:          artifact.GetUri(),
+				APIURL:       artifact.GetApiUrl(),
+				PublicURL:    artifact.GetPublicUrl(),
+				SHA256:       artifact.GetSha256(),
+				SizeBytes:    artifact.GetSizeBytes(),
+				ContentType:  artifact.GetContentType(),
+			})
+		}
 	}
 	if !result.Partial && result.FinishedAtUnix == 0 {
 		result.FinishedAtUnix = time.Now().Unix()
@@ -241,6 +263,8 @@ func (s *Server) SubmitJob(ctx context.Context, req *pb.SubmitJobRequest) (*pb.S
 		RequiredResources: req.GetRequiredResources(),
 		Environment:       req.GetEnvironment(),
 		MaxRuntimeSeconds: req.GetMaxRuntimeSeconds(),
+		ArtifactURL:       req.GetArtifactUrl(),
+		ArtifactSHA256:    req.GetArtifactSha256(),
 		Status:            store.JobStatusQueued,
 		CreatedAtUnix:     time.Now().Unix(),
 	}
@@ -331,15 +355,41 @@ func (s *Server) GetJobResult(ctx context.Context, req *pb.GetJobResultRequest) 
 		Status:          redisStatusToPB(statusStr),
 		ResultAvailable: true,
 		Result: &pb.Result{
-			JobId:          &pb.JobID{Value: resultRecord.JobID},
-			Status:         resultStatus,
-			ExitCode:       resultRecord.ExitCode,
-			StdoutExcerpt:  resultRecord.StdoutExcerpt,
-			StderrExcerpt:  resultRecord.StderrExcerpt,
-			OutputUri:      resultRecord.OutputURI,
-			FinishedAtUnix: resultRecord.FinishedAtUnix,
+			JobId:           &pb.JobID{Value: resultRecord.JobID},
+			Status:          resultStatus,
+			ExitCode:        resultRecord.ExitCode,
+			StdoutExcerpt:   resultRecord.StdoutExcerpt,
+			StderrExcerpt:   resultRecord.StderrExcerpt,
+			OutputUri:       resultRecord.OutputURI,
+			OutputApiUrl:    resultRecord.OutputAPIURL,
+			OutputPublicUrl: resultRecord.OutputPublicURL,
+			OutputSizeBytes: resultRecord.OutputSizeBytes,
+			OutputArtifacts: toPBOutputArtifacts(resultRecord.OutputArtifacts),
+			FinishedAtUnix:  resultRecord.FinishedAtUnix,
 		},
 	}, nil
+}
+
+func toPBOutputArtifacts(records []store.OutputArtifactRecord) []*pb.OutputArtifact {
+	if len(records) == 0 {
+		return nil
+	}
+
+	artifacts := make([]*pb.OutputArtifact, 0, len(records))
+	for _, record := range records {
+		artifacts = append(artifacts, &pb.OutputArtifact{
+			RelativePath: record.RelativePath,
+			ObjectKey:    record.ObjectKey,
+			Uri:          record.URI,
+			ApiUrl:       record.APIURL,
+			PublicUrl:    record.PublicURL,
+			Sha256:       record.SHA256,
+			SizeBytes:    record.SizeBytes,
+			ContentType:  record.ContentType,
+		})
+	}
+
+	return artifacts
 }
 
 func redisStatusToPB(state string) pb.Status {

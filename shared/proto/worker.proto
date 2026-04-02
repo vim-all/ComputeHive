@@ -48,6 +48,17 @@ message JobResultSchema {
   int32 exit_code = 4;
 }
 
+message OutputArtifact {
+  string relative_path = 1;
+  string object_key = 2;
+  string uri = 3;
+  string api_url = 4;
+  string public_url = 5;
+  string sha256 = 6;
+  int64 size_bytes = 7;
+  string content_type = 8;
+}
+
 message JobTimestamps {
   int64 created_at = 1;
   int64 assigned_at = 2;
@@ -138,6 +149,10 @@ message Job {
   ResourceSpec required_resources = 4;
   Status status = 5;
   int64 created_at_unix = 6;
+  map<string, string> environment = 7;
+  int32 max_runtime_seconds = 8;
+  string artifact_url = 9;
+  string artifact_sha256 = 10;
 }
 
 // Worker-reported job execution result.
@@ -149,6 +164,10 @@ message Result {
   string stderr_excerpt = 5;
   string output_uri = 6;
   int64 finished_at_unix = 7;
+  repeated OutputArtifact output_artifacts = 8;
+  string output_api_url = 9;
+  string output_public_url = 10;
+  int64 output_size_bytes = 11;
 }
 
 message RegisterWorkerRequest {

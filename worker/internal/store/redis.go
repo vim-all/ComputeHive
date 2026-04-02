@@ -63,8 +63,11 @@ func (s *Store) PullJob(ctx context.Context) (*domain.Job, bool, error) {
 		Status:         domain.JobStatusAssigned,
 		ImageRef:       strings.TrimSpace(jobMessage.GetContainerImage()),
 		Command:        append([]string(nil), jobMessage.GetCommand()...),
+		Env:            cloneStringMap(jobMessage.GetEnvironment()),
 		CreatedAtUnix:  jobMessage.GetCreatedAtUnix(),
-		TimeoutSeconds: 0,
+		TimeoutSeconds: int(jobMessage.GetMaxRuntimeSeconds()),
+		ArtifactURL:    strings.TrimSpace(jobMessage.GetArtifactUrl()),
+		ArtifactSHA256: strings.TrimSpace(jobMessage.GetArtifactSha256()),
 	}
 	if resources != nil {
 		job.CPUCores = float64(resources.GetCpuCores())
@@ -130,12 +133,17 @@ func (s *Store) PublishJobResult(ctx context.Context, result domain.JobResult) e
 	_, err = client.SubmitResult(ctx, &pb.SubmitResultRequest{
 		WorkerId: &pb.WorkerID{Value: workerID},
 		Result: &pb.Result{
-			JobId:          &pb.JobID{Value: result.JobID},
-			Status:         domainStatusToPB(result.Status),
-			ExitCode:       int32(result.ExitCode),
-			StdoutExcerpt:  trimTo(result.Stdout, 4096),
-			StderrExcerpt:  trimTo(result.Stderr, 4096),
-			FinishedAtUnix: result.FinishedAt.UTC().Unix(),
+			JobId:           &pb.JobID{Value: result.JobID},
+			Status:          domainStatusToPB(result.Status),
+			ExitCode:        int32(result.ExitCode),
+			StdoutExcerpt:   trimTo(result.Stdout, 4096),
+			StderrExcerpt:   trimTo(result.Stderr, 4096),
+			OutputUri:       result.OutputURI,
+			OutputApiUrl:    result.OutputAPIURL,
+			OutputPublicUrl: result.OutputPublicURL,
+			OutputSizeBytes: result.OutputSizeBytes,
+			OutputArtifacts: toPBOutputArtifacts(result.OutputArtifacts),
+			FinishedAtUnix:  result.FinishedAt.UTC().Unix(),
 		},
 	})
 	if isNotFound(err) {
@@ -146,12 +154,17 @@ func (s *Store) PublishJobResult(ctx context.Context, result domain.JobResult) e
 		_, err = client.SubmitResult(ctx, &pb.SubmitResultRequest{
 			WorkerId: &pb.WorkerID{Value: newWorkerID},
 			Result: &pb.Result{
-				JobId:          &pb.JobID{Value: result.JobID},
-				Status:         domainStatusToPB(result.Status),
-				ExitCode:       int32(result.ExitCode),
-				StdoutExcerpt:  trimTo(result.Stdout, 4096),
-				StderrExcerpt:  trimTo(result.Stderr, 4096),
-				FinishedAtUnix: result.FinishedAt.UTC().Unix(),
+				JobId:           &pb.JobID{Value: result.JobID},
+				Status:          domainStatusToPB(result.Status),
+				ExitCode:        int32(result.ExitCode),
+				StdoutExcerpt:   trimTo(result.Stdout, 4096),
+				StderrExcerpt:   trimTo(result.Stderr, 4096),
+				OutputUri:       result.OutputURI,
+				OutputApiUrl:    result.OutputAPIURL,
+				OutputPublicUrl: result.OutputPublicURL,
+				OutputSizeBytes: result.OutputSizeBytes,
+				OutputArtifacts: toPBOutputArtifacts(result.OutputArtifacts),
+				FinishedAtUnix:  result.FinishedAt.UTC().Unix(),
 			},
 		})
 	}
@@ -237,4 +250,38 @@ func isNotFound(err error) bool {
 		return false
 	}
 	return status.Code(err) == codes.NotFound
+}
+
+func cloneStringMap(source map[string]string) map[string]string {
+	if len(source) == 0 {
+		return nil
+	}
+
+	cloned := make(map[string]string, len(source))
+	for key, value := range source {
+		cloned[key] = value
+	}
+	return cloned
+}
+
+func toPBOutputArtifacts(artifacts []domain.OutputArtifact) []*pb.OutputArtifact {
+	if len(artifacts) == 0 {
+		return nil
+	}
+
+	items := make([]*pb.OutputArtifact, 0, len(artifacts))
+	for _, artifact := range artifacts {
+		items = append(items, &pb.OutputArtifact{
+			RelativePath: artifact.RelativePath,
+			ObjectKey:    artifact.ObjectKey,
+			Uri:          artifact.URI,
+			ApiUrl:       artifact.APIURL,
+			PublicUrl:    artifact.PublicURL,
+			Sha256:       artifact.SHA256,
+			SizeBytes:    artifact.SizeBytes,
+			ContentType:  artifact.ContentType,
+		})
+	}
+
+	return items
 }
