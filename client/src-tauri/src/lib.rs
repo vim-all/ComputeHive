@@ -40,6 +40,7 @@ const DEFAULT_REQUIRED_CPU_CORES: i32 = 1;
 const DEFAULT_REQUIRED_GPU_COUNT: i32 = 0;
 const DEFAULT_REQUIRED_MEMORY_MB: i32 = 1024;
 const DEFAULT_R2_REGION: &str = "auto";
+const CLIENT_COORDINATOR_ADDR_ENV_KEY: &str = "CLIENT_COORDINATOR_ADDR";
 const DEFAULT_COORDINATOR_ADDR: &str = "127.0.0.1:50051";
 const DEFAULT_SIGNED_DOWNLOAD_EXPIRY_SECONDS: u32 = 3600;
 const EMPTY_PAYLOAD_SHA256: &str =
@@ -2381,8 +2382,9 @@ fn load_app_config() -> Result<AppConfig, String> {
     let secret_access_key = required_env("S3_SECRET_ACCESS_KEY")?;
     let session_token = optional_env("S3_SESSION_TOKEN").unwrap_or_default();
     let redis_url = required_env("REDIS_URL")?;
-    let coordinator_addr =
-        optional_env("COORDINATOR_ADDR").unwrap_or_else(|| DEFAULT_COORDINATOR_ADDR.to_string());
+    let coordinator_addr = optional_env(CLIENT_COORDINATOR_ADDR_ENV_KEY)
+        .or_else(|| optional_env("COORDINATOR_ADDR"))
+        .unwrap_or_else(|| DEFAULT_COORDINATOR_ADDR.to_string());
     let (endpoint_url, bucket_name, bucket_api_url) = parse_bucket_url(&bucket_url)?;
     let bucket_public_url =
         optional_env("S3_PUBLIC_BUCKET_URL").unwrap_or_else(|| bucket_api_url.clone());
