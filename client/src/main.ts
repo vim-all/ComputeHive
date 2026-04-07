@@ -255,23 +255,6 @@ function triggerModeChipBurst(button: HTMLButtonElement): void {
   modeBurstTimers.set(button, timer);
 }
 
-function renderLink(
-  element: HTMLAnchorElement,
-  url: string,
-  placeholder: string,
-): void {
-  if (url) {
-    element.href = url;
-    element.textContent = url;
-    element.classList.remove("is-placeholder", "muted");
-    return;
-  }
-
-  element.removeAttribute("href");
-  element.textContent = placeholder;
-  element.classList.add("is-placeholder", "muted");
-}
-
 function renderResultArtifacts(
   container: HTMLElement,
   artifacts: RunRequestOutputArtifact[],
