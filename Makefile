@@ -50,6 +50,9 @@ chaos: build ## fault injection: in-process suite (Redis in Docker), then SIGKIL
 	cd coordinator && go test -race -count=1 -timeout 20m -v ./internal/chaos/
 	chmod +x scripts/chaos-cluster.sh && scripts/chaos-cluster.sh 3
 
+pressure: build ## prove an overloaded worker is shown as overloaded and never receives jobs (needs `make up`)
+	chmod +x scripts/pressure-cluster.sh && scripts/pressure-cluster.sh 6
+
 bench: ## throughput / latency benchmarks
 	@echo "benchmarks are implemented in the benchmarking phase" >&2; exit 1
 

@@ -103,7 +103,9 @@ yet** (planned security phase); do not expose the coordinator to untrusted netwo
 | `make lint` | `go vet` + `staticcheck`, all modules |
 | `make build` | `bin/computehive`, `bin/computehive-worker`, `bin/computehive-coordinator` |
 | `make proto` | regenerate protobuf Go code |
-| `make chaos`, `make bench` | not implemented yet; they exit non-zero with a message |
+| `make chaos` | fault injection: in-process suite plus `docker kill` of real workers |
+| `make pressure` | overloaded-worker check on the running cluster |
+| `make bench` | not implemented yet; exits non-zero with a message |
 
 CI (`.github/workflows/ci.yml`) runs gofmt, `go vet`, `staticcheck`, `go test -race`, an
 integration job (`make up` + `make demo` on a Docker-equipped runner) and a `buf breaking`
@@ -150,11 +152,29 @@ Run the fault-injection suite yourself with `make chaos`. Design rationale: [`do
 Note: "exactly once" means **committed** exactly once. A worker killed mid-job means the job body may run again elsewhere, so
 jobs should be safe to re-run (idempotent) or write only to their output directory.
 
+## Resource limits (the 90% rule)
+
+Workers sample RAM, CPU, load, disk (job work dir and Docker root), swap, temperature, Docker health, GPU and network egress
+every second and send them with every heartbeat (`computehive workers` shows RAM/CPU/disk and state).
+
+- **Enter** "overloaded" the moment RAM, CPU or disk reaches **90%** (configurable: `RAM_LIMIT_PERCENT`, `CPU_LIMIT_PERCENT`, `DISK_LIMIT_PERCENT`).
+- **Leave** only after every metric has stayed below **80%** for **10s** (`RELEASE_PERCENT`, `RELEASE_AFTER`). Readings in between change nothing.
+- **Enforced twice:** the worker stops calling `RequestJob`; independently the coordinator derives overload from the reported numbers
+  and refuses overloaded, stale, or metric-less workers, so a misbehaving worker cannot opt out.
+- **Headroom:** a job is not placed if its declared memory (default 512 MB) would push the host to the limit.
+- **If the host stays critical for `PRESSURE_GRACE` (15s) while a job runs**, the job is stopped gracefully and requeued elsewhere
+  without counting as a failure, with an `event=job_evicted_pressure` log line.
+- **Every job container** gets `--memory` = `--memory-swap` (no swap), `--cpus`, `--pids-limit` and `--network none`, with defaults
+  (512 MB, 1 CPU, 256 PIDs) if the job declares nothing.
+
+Prove it on your machine: `make pressure` (a worker with a 1% RAM limit must show as overloaded and receive no jobs) and
+`cd worker && go test ./internal/monitor/ -run RealContainer -v` (a container fills memory; the worker stops, then resumes).
+
 ## Known limitations (today)
 
 - No authentication or TLS between components; run on a trusted network only.
-- Job containers have `--network none`, `--cpus` and `--memory`, but the full sandbox
-  hardening, resource-pressure limits and untrusted-code protections are not done yet.
+- Job containers are resource-limited and have no network, but the full sandbox hardening
+  (non-root, dropped capabilities, read-only rootfs, seccomp, gVisor) is not done yet.
 - Scheduling is first-come-first-served pull with capability filtering (no best-fit scoring yet).
 - Single-node Redis only (the Lua scripts address keys dynamically; Redis Cluster would need hash tags).
 - Metrics and the Grafana dashboard are not wired yet (Prometheus scrape target is down by design).

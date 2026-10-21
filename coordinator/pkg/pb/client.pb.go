@@ -579,8 +579,12 @@ type WorkerInfo struct {
 	RegisteredAtUnix  int64                  `protobuf:"varint,5,opt,name=registered_at_unix,json=registeredAtUnix,proto3" json:"registered_at_unix,omitempty"`
 	LastHeartbeatUnix int64                  `protobuf:"varint,6,opt,name=last_heartbeat_unix,json=lastHeartbeatUnix,proto3" json:"last_heartbeat_unix,omitempty"`
 	RunningJobs       []*JobID               `protobuf:"bytes,7,rep,name=running_jobs,json=runningJobs,proto3" json:"running_jobs,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// Effective overload as seen by the scheduler (worker flag OR coordinator-derived).
+	Overloaded    bool           `protobuf:"varint,8,opt,name=overloaded,proto3" json:"overloaded,omitempty"`
+	Draining      bool           `protobuf:"varint,9,opt,name=draining,proto3" json:"draining,omitempty"`
+	Usage         *ResourceUsage `protobuf:"bytes,10,opt,name=usage,proto3" json:"usage,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *WorkerInfo) Reset() {
@@ -658,6 +662,27 @@ func (x *WorkerInfo) GetLastHeartbeatUnix() int64 {
 func (x *WorkerInfo) GetRunningJobs() []*JobID {
 	if x != nil {
 		return x.RunningJobs
+	}
+	return nil
+}
+
+func (x *WorkerInfo) GetOverloaded() bool {
+	if x != nil {
+		return x.Overloaded
+	}
+	return false
+}
+
+func (x *WorkerInfo) GetDraining() bool {
+	if x != nil {
+		return x.Draining
+	}
+	return false
+}
+
+func (x *WorkerInfo) GetUsage() *ResourceUsage {
+	if x != nil {
+		return x.Usage
 	}
 	return nil
 }
@@ -796,7 +821,7 @@ const file_client_proto_rawDesc = "" +
 	"\x06result\x18\x03 \x01(\v2\x12.compute.v1.ResultR\x06result\x12@\n" +
 	"\rresult_schema\x18\x04 \x01(\v2\x1b.compute.v1.JobResultSchemaR\fresultSchema\x12=\n" +
 	"\n" +
-	"job_status\x18\x05 \x01(\x0e2\x1e.compute.v1.JobLifecycleStatusR\tjobStatus\"\xbb\x02\n" +
+	"job_status\x18\x05 \x01(\x0e2\x1e.compute.v1.JobLifecycleStatusR\tjobStatus\"\xa8\x03\n" +
 	"\n" +
 	"WorkerInfo\x121\n" +
 	"\tworker_id\x18\x01 \x01(\v2\x14.compute.v1.WorkerIDR\bworkerId\x126\n" +
@@ -805,7 +830,13 @@ const file_client_proto_rawDesc = "" +
 	"\x05alive\x18\x04 \x01(\bR\x05alive\x12,\n" +
 	"\x12registered_at_unix\x18\x05 \x01(\x03R\x10registeredAtUnix\x12.\n" +
 	"\x13last_heartbeat_unix\x18\x06 \x01(\x03R\x11lastHeartbeatUnix\x124\n" +
-	"\frunning_jobs\x18\a \x03(\v2\x11.compute.v1.JobIDR\vrunningJobs\"\x14\n" +
+	"\frunning_jobs\x18\a \x03(\v2\x11.compute.v1.JobIDR\vrunningJobs\x12\x1e\n" +
+	"\n" +
+	"overloaded\x18\b \x01(\bR\n" +
+	"overloaded\x12\x1a\n" +
+	"\bdraining\x18\t \x01(\bR\bdraining\x12/\n" +
+	"\x05usage\x18\n" +
+	" \x01(\v2\x19.compute.v1.ResourceUsageR\x05usage\"\x14\n" +
 	"\x12ListWorkersRequest\"G\n" +
 	"\x13ListWorkersResponse\x120\n" +
 	"\aworkers\x18\x01 \x03(\v2\x16.compute.v1.WorkerInfoR\aworkers2\x99\x03\n" +
@@ -851,6 +882,7 @@ var file_client_proto_goTypes = []any{
 	(*Result)(nil),               // 18: compute.v1.Result
 	(*JobResultSchema)(nil),      // 19: compute.v1.JobResultSchema
 	(*WorkerID)(nil),             // 20: compute.v1.WorkerID
+	(*ResourceUsage)(nil),        // 21: compute.v1.ResourceUsage
 }
 var file_client_proto_depIdxs = []int32{
 	12, // 0: compute.v1.SubmitJobRequest.required_resources:type_name -> compute.v1.ResourceSpec
@@ -872,22 +904,23 @@ var file_client_proto_depIdxs = []int32{
 	20, // 16: compute.v1.WorkerInfo.worker_id:type_name -> compute.v1.WorkerID
 	12, // 17: compute.v1.WorkerInfo.resources:type_name -> compute.v1.ResourceSpec
 	14, // 18: compute.v1.WorkerInfo.running_jobs:type_name -> compute.v1.JobID
-	8,  // 19: compute.v1.ListWorkersResponse.workers:type_name -> compute.v1.WorkerInfo
-	4,  // 20: compute.v1.ClientService.CancelJob:input_type -> compute.v1.CancelJobRequest
-	9,  // 21: compute.v1.ClientService.ListWorkers:input_type -> compute.v1.ListWorkersRequest
-	0,  // 22: compute.v1.ClientService.SubmitJob:input_type -> compute.v1.SubmitJobRequest
-	2,  // 23: compute.v1.ClientService.GetJobStatus:input_type -> compute.v1.GetJobStatusRequest
-	6,  // 24: compute.v1.ClientService.GetJobResult:input_type -> compute.v1.GetJobResultRequest
-	5,  // 25: compute.v1.ClientService.CancelJob:output_type -> compute.v1.CancelJobResponse
-	10, // 26: compute.v1.ClientService.ListWorkers:output_type -> compute.v1.ListWorkersResponse
-	1,  // 27: compute.v1.ClientService.SubmitJob:output_type -> compute.v1.SubmitJobResponse
-	3,  // 28: compute.v1.ClientService.GetJobStatus:output_type -> compute.v1.GetJobStatusResponse
-	7,  // 29: compute.v1.ClientService.GetJobResult:output_type -> compute.v1.GetJobResultResponse
-	25, // [25:30] is the sub-list for method output_type
-	20, // [20:25] is the sub-list for method input_type
-	20, // [20:20] is the sub-list for extension type_name
-	20, // [20:20] is the sub-list for extension extendee
-	0,  // [0:20] is the sub-list for field type_name
+	21, // 19: compute.v1.WorkerInfo.usage:type_name -> compute.v1.ResourceUsage
+	8,  // 20: compute.v1.ListWorkersResponse.workers:type_name -> compute.v1.WorkerInfo
+	4,  // 21: compute.v1.ClientService.CancelJob:input_type -> compute.v1.CancelJobRequest
+	9,  // 22: compute.v1.ClientService.ListWorkers:input_type -> compute.v1.ListWorkersRequest
+	0,  // 23: compute.v1.ClientService.SubmitJob:input_type -> compute.v1.SubmitJobRequest
+	2,  // 24: compute.v1.ClientService.GetJobStatus:input_type -> compute.v1.GetJobStatusRequest
+	6,  // 25: compute.v1.ClientService.GetJobResult:input_type -> compute.v1.GetJobResultRequest
+	5,  // 26: compute.v1.ClientService.CancelJob:output_type -> compute.v1.CancelJobResponse
+	10, // 27: compute.v1.ClientService.ListWorkers:output_type -> compute.v1.ListWorkersResponse
+	1,  // 28: compute.v1.ClientService.SubmitJob:output_type -> compute.v1.SubmitJobResponse
+	3,  // 29: compute.v1.ClientService.GetJobStatus:output_type -> compute.v1.GetJobStatusResponse
+	7,  // 30: compute.v1.ClientService.GetJobResult:output_type -> compute.v1.GetJobResultResponse
+	26, // [26:31] is the sub-list for method output_type
+	21, // [21:26] is the sub-list for method input_type
+	21, // [21:21] is the sub-list for extension type_name
+	21, // [21:21] is the sub-list for extension extendee
+	0,  // [0:21] is the sub-list for field type_name
 }
 
 func init() { file_client_proto_init() }

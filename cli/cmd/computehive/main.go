@@ -259,16 +259,32 @@ func cmdWorkers(ctx context.Context, c pb.ClientServiceClient, out io.Writer) er
 		return nil
 	}
 	tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "WORKER\tALIVE\tCPU\tMEM(MB)\tGPU\tJOBS\tLAST HEARTBEAT\tVERSION")
+	fmt.Fprintln(tw, "WORKER\tSTATE\tCPU\tMEM(MB)\tGPU\tRAM%\tCPU%\tDISK%\tJOBS\tLAST HEARTBEAT")
 	for _, w := range resp.GetWorkers() {
-		res := w.GetResources()
+		res, u := w.GetResources(), w.GetUsage()
 		hb := "-"
 		if w.GetLastHeartbeatUnix() > 0 {
 			hb = time.Since(time.Unix(w.GetLastHeartbeatUnix(), 0)).Round(time.Second).String() + " ago"
 		}
-		fmt.Fprintf(tw, "%s\t%v\t%d\t%d\t%d\t%d\t%s\t%s\n",
-			w.GetWorkerId().GetValue(), w.GetAlive(), res.GetCpuCores(), res.GetMemoryMb(), res.GetGpuCount(),
-			len(w.GetRunningJobs()), hb, orDash(w.GetVersion()))
+		state := "ready"
+		switch {
+		case !w.GetAlive():
+			state = "dead"
+		case w.GetOverloaded():
+			state = "overloaded"
+			if r := strings.Join(u.GetOverloadReasons(), ","); r != "" {
+				state += "(" + r + ")"
+			}
+		case w.GetDraining():
+			state = "draining"
+		}
+		ram, cpu, dsk := "-", "-", "-"
+		if u != nil {
+			ram, cpu = fmt.Sprintf("%.0f", u.GetMemUsedPercent()), fmt.Sprintf("%.0f", u.GetCpuPercent())
+			dsk = fmt.Sprintf("%.0f", max(u.GetWorkDiskUsedPercent(), u.GetDockerDiskUsedPercent()))
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%d\t%s\t%s\t%s\t%d\t%s\n",
+			w.GetWorkerId().GetValue(), state, res.GetCpuCores(), res.GetMemoryMb(), res.GetGpuCount(), ram, cpu, dsk, len(w.GetRunningJobs()), hb)
 	}
 	return tw.Flush()
 }

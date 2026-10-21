@@ -75,6 +75,10 @@ message WorkerInfo {
   int64 registered_at_unix = 5;
   int64 last_heartbeat_unix = 6;
   repeated JobID running_jobs = 7;
+  // Effective overload as seen by the scheduler (worker flag OR coordinator-derived).
+  bool overloaded = 8;
+  bool draining = 9;
+  ResourceUsage usage = 10;
 }
 
 message ListWorkersRequest {}

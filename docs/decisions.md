@@ -159,3 +159,75 @@ Verified: 0 double assignments (3000 jobs, 48 concurrent claimers); requeue keep
 from dead workers are discarded; coordinator crash/restart, Redis SIGKILL with AOF, partition (3 scenarios), and 1000 jobs with
 63 random worker kills all end with every job committed exactly once (server-side audit).
 Not done in Phase 2: per-user concurrency limits and aging (Phase 5); graceful drain of in-flight jobs (Phase 6).
+
+---
+
+## Phase 3: resource monitoring and the 90% rule
+
+### D-24: The rule is enforced in two independent places, and the coordinator does not trust the worker's flag
+- **Decision:** (a) the worker stops calling `RequestJob` while overloaded; (b) the coordinator re-derives overload from the raw
+  numbers in every heartbeat, inside the atomic heartbeat script, and the claim script refuses overloaded, stale or metric-less workers.
+- **Alternatives:** Trust the worker's `overloaded` boolean; enforce only on the worker.
+- **Why:** The task requires that "a misbehaving worker can't bypass it". A worker that lies about its flag still reports the
+  numbers (or reports none, and then gets no work: `REQUIRE_USAGE`). Omitting metrics also erases the stored ones so old healthy
+  values cannot be replayed.
+- **Evidence:** `TestCoordinatorDerivesOverloadFromMetricsNotFromTheWorkersFlag`, `TestWorkersWithoutMetricsAreRefusedWhenRequired`
+  (coordinator side); `TestWorkerStopsRequestingJobsAtThresholdAndResumesAfterHysteresis` (worker side);
+  `scripts/pressure-cluster.sh` (real cluster: the overloaded worker got 0 of 6 jobs).
+
+### D-25: Hysteresis: enter at >= 90%, leave only after N seconds below one band under each limit
+- **Decision:** Enter the moment any of RAM/CPU/disk reaches its limit (inclusive). Leave only after *every* metric has stayed
+  below `limit - band` for `RELEASE_AFTER` (10s). Readings between the two thresholds change nothing, and a bounce back into the
+  band restarts the timer.
+- **Revised during testing:** I first required every metric below one global `RELEASE_PERCENT`. A real-memory test failed to recover:
+  a disk at 85% (limit raised to 100%) blocked recovery forever although it could never have tripped anything. Now each metric's
+  release level is its own limit minus the band, where band = lowest limit - release percent. With the 90/80 defaults that is exactly
+  "below 80%" for all three, so the specified behaviour is unchanged.
+- **Evidence:** `TestEntersAtLimitAndOnlyLeavesAfterSustainedRecovery`, `TestBouncingBack...`, `TestMetricFarFromItsOwnLimitDoesNotBlockRecovery`,
+  and the real-container test below.
+
+### D-26: Sampling details
+- RAM "used" is total minus *available* (reclaimable page cache does not count), the same figure the kernel uses to decide to OOM-kill.
+- CPU is averaged over 3 samples so one spike cannot trip the 90% limit; RAM and disk are instantaneous.
+- Disk is the worse of the job work directory and Docker's data root.
+- Docker health is a hard condition without hysteresis (no Docker, no jobs).
+- If sampling fails 3 times in a row, or has never succeeded, the worker fails safe (overloaded). Nothing is assumed healthy.
+- Temperature, GPU and network egress are reported but are not admission limits.
+
+### D-27: Memory headroom is reserved for the host OS at assignment time
+- **Decision:** The claim script refuses a job whose declared memory (default 512 MB if undeclared) would push projected usage to the
+  limit: `used + (memory promised to running jobs but not yet used) + this job >= 90%`.
+- **Why the middle term:** a job that has been placed but has not ramped up yet is invisible in host usage; ignoring it lets two jobs
+  be placed into the same free memory.
+- **Evidence:** `TestMemoryHeadroomIsReservedForTheHostOS`, `TestHeadroomCountsMemoryPromisedToRunningJobsNotYetUsed`.
+
+### D-28: Over-pressure policy
+1. Stop accepting new work (immediate). 2. If still over a limit after `PRESSURE_GRACE` (15s) while a job runs, stop that job
+gracefully (SIGTERM, then SIGKILL after `STOP_GRACE`), report it `evicted`, and log `event=job_evicted_pressure`.
+- **Why `evicted` is separate from failure:** it requeues immediately and does *not* burn an attempt; the job did nothing wrong.
+- **Limit of the design:** with one job per worker "lowest priority / most recent" is trivially that job; the selection function
+  needs revisiting if `max_jobs > 1` is ever enabled. The pressure may have been caused by something other than the job.
+- **Evidence:** `TestPressureEvictsRunningJobAfterGraceAndRequeuesItWithoutBlame` (not evicted before the grace, evicted exactly once after).
+
+### D-29: Hard limits on every container, always
+- **Decision:** `--memory` and `--memory-swap` equal (no swap), `--cpus`, `--pids-limit`, with defaults (512 MB, 1 CPU, 256 PIDs) when a
+  job declares nothing, so no container is ever unbounded.
+- **Evidence (real Docker):** the running container reports Memory = MemorySwap = 64 MB, PidsLimit 32, NanoCpus 0.5, network none;
+  an over-allocating job is OOM-killed (exit 137) and classed as the job's fault; a fork bomb got 30 of 400 processes.
+
+### D-30: Real bug found by the real-container tests: `--rm` strands "Dead" containers
+- **Problem:** Cancelling a job ran `docker stop` and then `docker rm -f`, racing with `--rm`'s own removal. Docker left the
+  container in the `Dead` state, which holds disk and cannot be restarted.
+- **Decision:** Drop `--rm`; the executor removes every container itself, deterministically, and a startup sweep removes containers
+  left by a crashed worker (only this worker's, by label).
+- **Why it matters for the project:** "no leaks, no zombie containers" is a contributor-safety requirement (Phase 4).
+
+### D-31: Verifying against the real kernel, not only fakes
+- Fake metrics prove the state machine; they cannot prove the sampler reads the right thing. So there is also a test where a real
+  container fills tmpfs memory: RAM went from 69.0% to 76.8% against a 73% limit, the monitor tripped, and 2s after the memory was
+  freed the worker resumed. Thresholds in that test are relative to the measured baseline so it is valid on any machine.
+
+### Phase 3 outcome
+Verified: unit (monitor, agent, queue, config), real containers (limits, OOM, fork bomb, timeout, orphan sweep, real memory pressure),
+and the running cluster (`make pressure`). Not done: per-job disk quota and ulimits (Phase 4 sandboxing); GPU admission limits;
+`max_jobs > 1`. The macOS memory path of the old reporter is no longer used by the monitor (gopsutil handles it) but was not tested.

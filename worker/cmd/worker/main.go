@@ -11,6 +11,7 @@ import (
 	"github.com/vim-all/ComputeHive/worker/internal/artifact"
 	"github.com/vim-all/ComputeHive/worker/internal/config"
 	"github.com/vim-all/ComputeHive/worker/internal/executor"
+	"github.com/vim-all/ComputeHive/worker/internal/monitor"
 	workeroutput "github.com/vim-all/ComputeHive/worker/internal/output"
 	"github.com/vim-all/ComputeHive/worker/internal/resources"
 	"github.com/vim-all/ComputeHive/worker/internal/store"
@@ -54,8 +55,17 @@ func main() {
 		logger.Error("invalid output uploader configuration", "error", err)
 		os.Exit(2)
 	}
-	dockerExecutor := executor.NewDockerExecutor(cfg.DockerBinary, cfg.WorkerID, cfg.AllowGPUJobs, cfg.OutputCollectionDir)
-	agent := workerapp.NewAgent(cfg, redisStore, artifactFetcher, resourceReporter, dockerExecutor, outputManager, logger)
+	dockerExecutor := executor.NewDockerExecutor(cfg.DockerBinary, cfg.WorkerID, cfg.AllowGPUJobs, cfg.OutputCollectionDir, executor.Limits{
+		DefaultMemoryMB: cfg.DefaultJobMemoryMB, DefaultCPUs: cfg.DefaultJobCPUs, PidsLimit: cfg.PidsLimit, StopGrace: cfg.StopGrace,
+	})
+	if n, err := dockerExecutor.CleanupOrphans(ctx); err != nil {
+		logger.Warn("could not sweep orphaned job containers", "error", err)
+	} else if n > 0 {
+		logger.Warn("removed job containers left by a previous run", "count", n)
+	}
+	resourceMonitor := monitor.New(monitor.NewSystemSampler(os.TempDir(), cfg.DockerBinary, cfg.WorkerID), cfg.MonitorConfig(), nil, logger)
+	go resourceMonitor.Run(ctx, cfg.SampleInterval)
+	agent := workerapp.NewAgent(cfg, redisStore, artifactFetcher, resourceReporter, dockerExecutor, outputManager, resourceMonitor, logger)
 
 	if err := agent.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		logger.Error("worker stopped unexpectedly", "error", err)

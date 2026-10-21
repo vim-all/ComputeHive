@@ -104,9 +104,13 @@ redis.call('HINCRBY', 'ch:counts', 'PENDING', 1)
 return {'OK', tostring(seq)}
 `)
 
-// claim: ARGV worker_id, new_token, dead_after_ms, default_timeout_ms, lease_grace_ms, scan_limit.
+// claim: ARGV worker_id, new_token, dead_after_ms, default_timeout_ms, lease_grace_ms, scan_limit,
+// limit_mem_pct, default_job_mem_mb, require_usage.
 // Moves the lowest-sequence eligible job from pending to ASSIGNED-for-this-worker,
-// in one step, or returns why nothing was assigned.
+// in one step, or returns why nothing was assigned. This is where the coordinator
+// enforces the resource-safety rules independently of the worker: stale or overloaded
+// workers, workers that report no metrics, and jobs whose declared memory would push
+// the host past the limit all get nothing.
 var claimScript = redis.NewScript(prelude + `
 local w = ARGV[1]
 local token = ARGV[2]
@@ -114,6 +118,9 @@ local dead_after = tonumber(ARGV[3])
 local default_timeout = tonumber(ARGV[4])
 local grace = tonumber(ARGV[5])
 local limit = tonumber(ARGV[6])
+local limit_mem = tonumber(ARGV[7])
+local default_job_mem = tonumber(ARGV[8])
+local require_usage = ARGV[9] == '1'
 local now = now_ms()
 
 local hb = redis.call('ZSCORE', 'ch:workers', w)
@@ -121,13 +128,29 @@ if not hb then return {'REJECT', 'unknown_worker'} end
 if now - tonumber(hb) > dead_after then return {'REJECT', 'stale_heartbeat'} end
 
 local wk = 'ch:worker:' .. w
-local f = redis.call('HMGET', wk, 'overloaded', 'draining', 'max_jobs', 'cpu', 'mem_mb', 'gpu')
+local f = redis.call('HMGET', wk, 'overloaded', 'draining', 'max_jobs', 'cpu', 'mem_mb', 'gpu', 'mem_pct', 'mem_total', 'mem_used', 'jobs_mem')
 if f[1] == '1' then return {'REJECT', 'overloaded'} end
 if f[2] == '1' then return {'REJECT', 'draining'} end
+if require_usage and not f[7] then return {'REJECT', 'no_metrics'} end
 local max_jobs = tonumber(f[3]) or 1
-if redis.call('SCARD', 'ch:wrun:' .. w) >= max_jobs then return {'REJECT', 'at_capacity'} end
+local wrun = 'ch:wrun:' .. w
+if redis.call('SCARD', wrun) >= max_jobs then return {'REJECT', 'at_capacity'} end
 local wcpu, wmem, wgpu = tonumber(f[4]) or 0, tonumber(f[5]) or 0, tonumber(f[6]) or 0
+local mem_total, mem_used, jobs_mem = tonumber(f[8]) or 0, tonumber(f[9]) or 0, tonumber(f[10]) or 0
 
+-- memory already promised to running jobs but not yet visible in the host's usage
+local unramped = 0
+if mem_total > 0 and limit_mem > 0 then
+  local declared = 0
+  for _, rid in ipairs(redis.call('SMEMBERS', wrun)) do
+    local rm = tonumber(redis.call('HGET', 'ch:job:' .. rid, 'req_mem')) or 0
+    if rm == 0 then rm = default_job_mem end
+    declared = declared + rm
+  end
+  unramped = math.max(0, declared - jobs_mem)
+end
+
+local skipped_headroom = false
 local ids = redis.call('ZRANGE', 'ch:pending', 0, limit - 1)
 for _, id in ipairs(ids) do
   local jk = 'ch:job:' .. id
@@ -137,17 +160,28 @@ for _, id in ipairs(ids) do
     redis.call('ZREM', 'ch:pending', id) -- defensive: never leave a non-pending id in the queue
   elseif tonumber(j[2]) <= now
      and tonumber(j[3]) <= wcpu and tonumber(j[4]) <= wmem and tonumber(j[5]) <= wgpu then
-    local attempt = tonumber(j[7]) + 1
-    local timeout = tonumber(j[6]) * 1000
-    if timeout <= 0 then timeout = default_timeout end
-    redis.call('ZREM', 'ch:pending', id)
-    redis.call('HSET', jk, 'attempt', attempt, 'worker', w, 'token', token, 'assigned_ms', now)
-    setstate(jk, 'ASSIGNED')
-    redis.call('ZADD', 'ch:leases', now + timeout + grace, id)
-    redis.call('SADD', 'ch:wrun:' .. w, id)
-    return {'OK', id, tostring(attempt), j[8], token}
+    local fits = true
+    if mem_total > 0 and limit_mem > 0 then
+      local req = tonumber(j[4])
+      if req == 0 then req = default_job_mem end
+      if (mem_used + unramped + req) * 100 / mem_total >= limit_mem then fits = false end
+    end
+    if not fits then
+      skipped_headroom = true
+    else
+      local attempt = tonumber(j[7]) + 1
+      local timeout = tonumber(j[6]) * 1000
+      if timeout <= 0 then timeout = default_timeout end
+      redis.call('ZREM', 'ch:pending', id)
+      redis.call('HSET', jk, 'attempt', attempt, 'worker', w, 'token', token, 'assigned_ms', now)
+      setstate(jk, 'ASSIGNED')
+      redis.call('ZADD', 'ch:leases', now + timeout + grace, id)
+      redis.call('SADD', wrun, id)
+      return {'OK', id, tostring(attempt), j[8], token}
+    end
   end
 end
+if skipped_headroom then return {'REJECT', 'no_headroom'} end
 return {'NONE'}
 `)
 
@@ -223,10 +257,17 @@ redis.call('ZADD', 'ch:pending', tonumber(redis.call('HGET', jk, 'seq')), id)
 return 'OK'
 `)
 
-// heartbeat: ARGV worker, cpu, mem_mb, gpu, overloaded, draining, max_jobs, version,
-// orphan_grace_ms, running_job_id...
+// heartbeat: ARGV worker, cpu, mem_mb, gpu, worker_overloaded, draining, max_jobs, version,
+// orphan_grace_ms, has_usage, mem_total_mb, mem_used_mb, jobs_mem_mb, mem_pct, cpu_pct, disk_pct,
+// limit_mem, limit_cpu, limit_disk, release_pct, release_after_ms, usage_json, running_job_id...
 //
 // Returns the reported jobs that the worker no longer owns (it must abort them).
+//
+// Overload is derived here from the raw numbers, with hysteresis: a worker becomes
+// overloaded the moment RAM, CPU or disk reaches its limit, and recovers only after
+// all three stay below release_pct for release_after. The effective flag is the worker's
+// own claim OR this derived state, so a worker cannot opt out by lying about its flag.
+// Omitting metrics erases the stored ones, so stale "healthy" numbers cannot be replayed.
 //
 // It also reconciles the other direction: a lease the coordinator holds for this
 // worker that the worker does not report is an orphan, typically because the reply
@@ -241,12 +282,50 @@ local now = now_ms()
 local wk = 'ch:worker:' .. w
 if redis.call('EXISTS', wk) == 0 then redis.call('HSET', wk, 'registered_ms', now) end
 redis.call('ZADD', 'ch:workers', now, w)
-redis.call('HSET', wk, 'cpu', ARGV[2], 'mem_mb', ARGV[3], 'gpu', ARGV[4], 'overloaded', ARGV[5],
-  'draining', ARGV[6], 'max_jobs', ARGV[7], 'version', ARGV[8], 'last_hb_ms', now)
+redis.call('HSET', wk, 'cpu', ARGV[2], 'mem_mb', ARGV[3], 'gpu', ARGV[4], 'draining', ARGV[6],
+  'max_jobs', ARGV[7], 'version', ARGV[8], 'last_hb_ms', now, 'w_overloaded', ARGV[5])
+
+local cp = redis.call('HGET', wk, 'cp_over') == '1'
+if ARGV[10] == '1' then
+  local mem, cpu, disk = tonumber(ARGV[14]), tonumber(ARGV[15]), tonumber(ARGV[16])
+  local rel = tonumber(ARGV[20])
+  local rel_after = tonumber(ARGV[21])
+  local below_since = tonumber(redis.call('HGET', wk, 'below_since')) or 0
+  local reasons = {}
+  if mem >= tonumber(ARGV[17]) then reasons[#reasons + 1] = 'ram' end
+  if cpu >= tonumber(ARGV[18]) then reasons[#reasons + 1] = 'cpu' end
+  if disk >= tonumber(ARGV[19]) then reasons[#reasons + 1] = 'disk' end
+  if #reasons > 0 then
+    cp = true
+    below_since = 0
+    redis.call('HSET', wk, 'over_reasons', table.concat(reasons, ','))
+  elseif cp then
+    -- each metric must be one hysteresis band below its own limit (the band is the gap between the
+    -- lowest limit and release_pct: 10 points with the 90/80 defaults)
+    local band = math.min(tonumber(ARGV[17]), tonumber(ARGV[18]), tonumber(ARGV[19])) - rel
+    if mem < tonumber(ARGV[17]) - band and cpu < tonumber(ARGV[18]) - band and disk < tonumber(ARGV[19]) - band then
+      if below_since == 0 then below_since = now end
+      if now - below_since >= rel_after then
+        cp = false
+        below_since = 0
+        redis.call('HSET', wk, 'over_reasons', '')
+      end
+    else
+      below_since = 0
+    end
+  end
+  redis.call('HSET', wk, 'cp_over', cp and '1' or '0', 'below_since', below_since,
+    'mem_total', ARGV[11], 'mem_used', ARGV[12], 'jobs_mem', ARGV[13],
+    'mem_pct', ARGV[14], 'cpu_pct', ARGV[15], 'disk_pct', ARGV[16], 'usage_json', ARGV[22])
+else
+  redis.call('HDEL', wk, 'mem_total', 'mem_used', 'jobs_mem', 'mem_pct', 'cpu_pct', 'disk_pct', 'usage_json')
+end
+redis.call('HSET', wk, 'overloaded', (ARGV[5] == '1' or cp) and '1' or '0')
+
 local wrun = 'ch:wrun:' .. w
 local reported = {}
 local cancel = {}
-for i = 10, #ARGV do
+for i = 23, #ARGV do
   reported[ARGV[i]] = true
   if redis.call('SISMEMBER', wrun, ARGV[i]) == 0 then cancel[#cancel + 1] = ARGV[i] end
 end

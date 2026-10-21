@@ -31,6 +31,14 @@ type Config struct {
 	MaxAttempts       int
 	BackoffBase       time.Duration
 	BackoffMax        time.Duration
+
+	// Resource-safety rules the scheduler enforces regardless of what workers claim.
+	LimitRAMPct  float64
+	LimitCPUPct  float64
+	LimitDiskPct float64
+	ReleasePct   float64
+	ReleaseAfter time.Duration
+	RequireUsage bool
 }
 
 // Load reads configuration from flags (args), then environment, then .env files, then defaults.
@@ -132,11 +140,21 @@ func Load(args []string) (Config, error) {
 		MaxAttempts:       envInt(getenv, "MAX_ATTEMPTS", 3),
 		BackoffBase:       envDuration(getenv, "BACKOFF_BASE", time.Second),
 		BackoffMax:        envDuration(getenv, "BACKOFF_MAX", 30*time.Second),
+
+		LimitRAMPct:  envFloat(getenv, "RAM_LIMIT_PERCENT", 90),
+		LimitCPUPct:  envFloat(getenv, "CPU_LIMIT_PERCENT", 90),
+		LimitDiskPct: envFloat(getenv, "DISK_LIMIT_PERCENT", 90),
+		ReleasePct:   envFloat(getenv, "RELEASE_PERCENT", 80),
+		ReleaseAfter: envDuration(getenv, "RELEASE_AFTER", 10*time.Second),
+		RequireUsage: envBool(getenv, "REQUIRE_USAGE", true),
 	}
-	if err := durationErr(getenv, "HEARTBEAT_INTERVAL", "WORKER_DEAD_AFTER", "REAP_INTERVAL", "LEASE_GRACE", "BACKOFF_BASE", "BACKOFF_MAX"); err != nil {
+	if err := durationErr(getenv, "HEARTBEAT_INTERVAL", "WORKER_DEAD_AFTER", "REAP_INTERVAL", "LEASE_GRACE", "BACKOFF_BASE", "BACKOFF_MAX", "RELEASE_AFTER"); err != nil {
 		return Config{}, err
 	}
 	if err := intErr(getenv, "MAX_ATTEMPTS"); err != nil {
+		return Config{}, err
+	}
+	if err := floatErr(getenv, "RAM_LIMIT_PERCENT", "CPU_LIMIT_PERCENT", "DISK_LIMIT_PERCENT", "RELEASE_PERCENT"); err != nil {
 		return Config{}, err
 	}
 
@@ -156,6 +174,12 @@ func Load(args []string) (Config, error) {
 	fs.IntVar(&cfg.MaxAttempts, "max-attempts", cfg.MaxAttempts, "default attempts per job before it is parked as DEAD")
 	fs.DurationVar(&cfg.BackoffBase, "backoff-base", cfg.BackoffBase, "first retry delay (doubles per attempt)")
 	fs.DurationVar(&cfg.BackoffMax, "backoff-max", cfg.BackoffMax, "maximum retry delay")
+	fs.Float64Var(&cfg.LimitRAMPct, "ram-limit-percent", cfg.LimitRAMPct, "no jobs for a worker whose RAM use is at or above this percentage")
+	fs.Float64Var(&cfg.LimitCPUPct, "cpu-limit-percent", cfg.LimitCPUPct, "... CPU use")
+	fs.Float64Var(&cfg.LimitDiskPct, "disk-limit-percent", cfg.LimitDiskPct, "... disk use")
+	fs.Float64Var(&cfg.ReleasePct, "release-percent", cfg.ReleasePct, "an overloaded worker recovers only after every metric stays below this")
+	fs.DurationVar(&cfg.ReleaseAfter, "release-after", cfg.ReleaseAfter, "... for this long")
+	fs.BoolVar(&cfg.RequireUsage, "require-usage", cfg.RequireUsage, "refuse to assign jobs to workers that report no resource metrics")
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
 	}
@@ -206,6 +230,21 @@ func (c Config) Validate() error {
 	if c.MaxAttempts < 1 {
 		return fmt.Errorf("invalid max-attempts %d (env MAX_ATTEMPTS): must be >= 1", c.MaxAttempts)
 	}
+	for _, l := range []struct {
+		name string
+		v    float64
+	}{{"ram-limit-percent", c.LimitRAMPct}, {"cpu-limit-percent", c.LimitCPUPct}, {"disk-limit-percent", c.LimitDiskPct}} {
+		if l.v <= 0 || l.v > 100 {
+			return fmt.Errorf("invalid %s %.1f: must be in (0, 100]", l.name, l.v)
+		}
+	}
+	if c.ReleasePct <= 0 || c.ReleasePct >= min(c.LimitRAMPct, c.LimitCPUPct, c.LimitDiskPct) {
+		return fmt.Errorf("release-percent (%.1f) must be positive and below every limit (ram %.1f, cpu %.1f, disk %.1f), or the hysteresis band is empty and workers would flap",
+			c.ReleasePct, c.LimitRAMPct, c.LimitCPUPct, c.LimitDiskPct)
+	}
+	if c.ReleaseAfter < 0 {
+		return fmt.Errorf("invalid release-after %s: must be >= 0", c.ReleaseAfter)
+	}
 	if c.BackoffBase < 0 || c.BackoffMax < c.BackoffBase {
 		return fmt.Errorf("backoff-max (%s) must be >= backoff-base (%s) >= 0", c.BackoffMax, c.BackoffBase)
 	}
@@ -222,6 +261,36 @@ func envDuration(getenv func(string) string, key string, fallback time.Duration)
 		}
 	}
 	return fallback
+}
+
+func envFloat(getenv func(string) string, key string, fallback float64) float64 {
+	if v := getenv(key); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
+		}
+	}
+	return fallback
+}
+
+func envBool(getenv func(string) string, key string, fallback bool) bool {
+	switch strings.ToLower(getenv(key)) {
+	case "1", "true", "yes":
+		return true
+	case "0", "false", "no":
+		return false
+	}
+	return fallback
+}
+
+func floatErr(getenv func(string) string, keys ...string) error {
+	for _, k := range keys {
+		if v := getenv(k); v != "" {
+			if _, err := strconv.ParseFloat(v, 64); err != nil {
+				return fmt.Errorf("invalid %s %q: want a number like 90", k, v)
+			}
+		}
+	}
+	return nil
 }
 
 func envInt(getenv func(string) string, key string, fallback int) int {

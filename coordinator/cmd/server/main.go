@@ -48,6 +48,12 @@ func main() {
 	qcfg.BackoffBase, qcfg.BackoffMax = cfg.BackoffBase, cfg.BackoffMax
 	qcfg.DeadAfter, qcfg.ReapInterval, qcfg.LeaseGrace = cfg.WorkerDeadAfter, cfg.ReapInterval, cfg.LeaseGrace
 	qcfg.OrphanGrace = max(qcfg.OrphanGrace, 5*cfg.HeartbeatInterval)
+	qcfg.LimitMemPct, qcfg.LimitCPUPct, qcfg.LimitDiskPct = cfg.LimitRAMPct, cfg.LimitCPUPct, cfg.LimitDiskPct
+	qcfg.ReleasePct, qcfg.ReleaseAfter, qcfg.RequireUsage = cfg.ReleasePct, cfg.ReleaseAfter, cfg.RequireUsage
+	if err := qcfg.Validate(); err != nil {
+		log.Error("invalid scheduler config", "error", err)
+		os.Exit(2)
+	}
 	q := queue.New(rdb, qcfg)
 	svc := grpcserver.NewServer(q, cfg, log)
 

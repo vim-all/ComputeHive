@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/encoding/protojson"
 )
 
 var workerIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
@@ -66,6 +67,7 @@ func (s *Server) Heartbeat(ctx context.Context, req *pb.HeartbeatRequest) (*pb.H
 	cancel, err := s.queue.Heartbeat(ctx, queue.WorkerReport{
 		ID: workerID, CPU: int(res.GetCpuCores()), MemMB: int(res.GetMemoryMb()), GPU: int(res.GetGpuCount()),
 		Overloaded: req.GetOverloaded(), Draining: req.GetDraining(), MaxJobs: int(req.GetMaxJobs()), Running: running,
+		Usage: usageFromPB(req.GetUsage()),
 	})
 	if err != nil {
 		return nil, internal("heartbeat", err)
@@ -292,7 +294,17 @@ func (s *Server) ListWorkers(ctx context.Context, _ *pb.ListWorkersRequest) (*pb
 	}
 	resp := &pb.ListWorkersResponse{}
 	for _, w := range workers {
+		var usage *pb.ResourceUsage
+		if w.UsageJSON != "" {
+			usage = &pb.ResourceUsage{}
+			if err := protojson.Unmarshal([]byte(w.UsageJSON), usage); err != nil {
+				usage = nil
+			}
+		}
 		info := &pb.WorkerInfo{
+			Overloaded:        w.Overloaded,
+			Draining:          w.Draining,
+			Usage:             usage,
 			WorkerId:          &pb.WorkerID{Value: w.ID},
 			Resources:         &pb.ResourceSpec{CpuCores: int32(w.CPU), MemoryMb: int32(w.MemMB), GpuCount: int32(w.GPU)},
 			Version:           w.Version,
@@ -306,6 +318,29 @@ func (s *Server) ListWorkers(ctx context.Context, _ *pb.ListWorkersRequest) (*pb
 		resp.Workers = append(resp.Workers, info)
 	}
 	return resp, nil
+}
+
+// usageFromPB converts a worker's sample into the part the scheduler acts on, rejecting nonsense.
+func usageFromPB(u *pb.ResourceUsage) *queue.Usage {
+	if u == nil {
+		return nil
+	}
+	clamp := func(v float64) float64 {
+		switch {
+		case v != v || v < 0: // NaN or negative
+			return 0
+		case v > 100:
+			return 100
+		}
+		return v
+	}
+	raw, _ := protojson.Marshal(u)
+	return &queue.Usage{
+		MemTotalMB: max(u.GetMemTotalMb(), 0), MemUsedMB: max(u.GetMemUsedMb(), 0), JobsMemMB: max(u.GetJobsMemUsedMb(), 0),
+		MemPct: clamp(u.GetMemUsedPercent()), CPUPct: clamp(u.GetCpuPercent()),
+		DiskPct: max(clamp(u.GetWorkDiskUsedPercent()), clamp(u.GetDockerDiskUsedPercent())),
+		JSON:    string(raw),
+	}
 }
 
 func toPBOutputArtifacts(records []queue.OutputArtifact) []*pb.OutputArtifact {

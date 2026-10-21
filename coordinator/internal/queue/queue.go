@@ -72,6 +72,15 @@ type Config struct {
 	// is taken back (a lost claim reply). It must exceed the worker's heartbeat interval
 	// plus the time a worker takes to register a freshly received job.
 	OrphanGrace time.Duration
+
+	// Resource-safety rules enforced on the coordinator side (percentages of host capacity).
+	LimitMemPct     float64       // no assignment while RAM used >= this (default 90)
+	LimitCPUPct     float64       // ... CPU
+	LimitDiskPct    float64       // ... disk
+	ReleasePct      float64       // an overloaded worker recovers only below this on every metric (default 80)...
+	ReleaseAfter    time.Duration // ...continuously for this long
+	RequireUsage    bool          // workers that report no metrics get no jobs
+	DefaultJobMemMB int           // memory assumed for jobs that declare none
 }
 
 // DefaultConfig: with 2s heartbeats, a worker is declared dead after 6s and the
@@ -88,6 +97,13 @@ func DefaultConfig() Config {
 		ClaimScan:      100,
 		ReapInterval:   time.Second,
 		OrphanGrace:    10 * time.Second,
+
+		LimitMemPct:     90,
+		LimitCPUPct:     90,
+		LimitDiskPct:    90,
+		ReleasePct:      80,
+		ReleaseAfter:    10 * time.Second,
+		DefaultJobMemMB: 512,
 	}
 }
 
@@ -106,6 +122,12 @@ func (c Config) Validate() error {
 		return errors.New("claim scan must be >= 1")
 	case c.OrphanGrace <= 0:
 		return errors.New("orphan grace must be > 0")
+	case c.LimitMemPct <= 0 || c.LimitMemPct > 100 || c.LimitCPUPct <= 0 || c.LimitCPUPct > 100 || c.LimitDiskPct <= 0 || c.LimitDiskPct > 100:
+		return errors.New("resource limits must be in (0, 100]")
+	case c.ReleasePct <= 0 || c.ReleasePct >= min(c.LimitMemPct, c.LimitCPUPct, c.LimitDiskPct):
+		return errors.New("release percentage must be positive and below every limit (hysteresis)")
+	case c.ReleaseAfter < 0:
+		return errors.New("release-after must be >= 0")
 	}
 	return nil
 }
@@ -275,7 +297,8 @@ type Claimed struct {
 // why (empty queue, worker overloaded, stale heartbeat, ...).
 func (q *Queue) Claim(ctx context.Context, workerID string) (*Claimed, string, error) {
 	res, err := claimScript.Run(ctx, q.rdb, nil, workerID, newToken(),
-		q.cfg.DeadAfter.Milliseconds(), q.cfg.DefaultTimeout.Milliseconds(), q.cfg.LeaseGrace.Milliseconds(), q.cfg.ClaimScan).Result()
+		q.cfg.DeadAfter.Milliseconds(), q.cfg.DefaultTimeout.Milliseconds(), q.cfg.LeaseGrace.Milliseconds(), q.cfg.ClaimScan,
+		q.cfg.LimitMemPct, q.cfg.DefaultJobMemMB, boolArg(q.cfg.RequireUsage)).Result()
 	if err != nil {
 		return nil, "", fmt.Errorf("claim for %s: %w", workerID, err)
 	}
@@ -362,6 +385,16 @@ type WorkerReport struct {
 	MaxJobs    int
 	Version    string
 	Running    []string // jobs the worker believes it is running
+
+	// Usage is the worker's latest resource sample; nil if it sent none.
+	Usage *Usage
+}
+
+// Usage is the part of a worker's resource sample the scheduler acts on.
+type Usage struct {
+	MemTotalMB, MemUsedMB, JobsMemMB int64
+	MemPct, CPUPct, DiskPct          float64 // DiskPct is the worse of the work-dir and Docker-root disks
+	JSON                             string  // full sample, stored verbatim for display
 }
 
 // Heartbeat records worker liveness and capacity. It returns the reported jobs the
@@ -370,7 +403,16 @@ func (q *Queue) Heartbeat(ctx context.Context, r WorkerReport) ([]string, error)
 	if r.MaxJobs < 1 {
 		r.MaxJobs = 1
 	}
-	args := []any{r.ID, r.CPU, r.MemMB, r.GPU, boolArg(r.Overloaded), boolArg(r.Draining), r.MaxJobs, r.Version, q.cfg.OrphanGrace.Milliseconds()}
+	u := r.Usage
+	hasUsage := "0"
+	if u == nil {
+		u = &Usage{}
+	} else {
+		hasUsage = "1"
+	}
+	args := []any{r.ID, r.CPU, r.MemMB, r.GPU, boolArg(r.Overloaded), boolArg(r.Draining), r.MaxJobs, r.Version, q.cfg.OrphanGrace.Milliseconds(),
+		hasUsage, u.MemTotalMB, u.MemUsedMB, u.JobsMemMB, u.MemPct, u.CPUPct, u.DiskPct,
+		q.cfg.LimitMemPct, q.cfg.LimitCPUPct, q.cfg.LimitDiskPct, q.cfg.ReleasePct, q.cfg.ReleaseAfter.Milliseconds(), u.JSON}
 	for _, id := range r.Running {
 		args = append(args, id)
 	}
@@ -552,6 +594,8 @@ type WorkerInfo struct {
 	RegisteredMs    int64
 	LastHeartbeatMs int64
 	Running         []string
+	OverloadReasons string // "ram,cpu" while the coordinator considers the host overloaded
+	UsageJSON       string // the worker's last full resource sample
 }
 
 // ListWorkers returns all known workers, oldest registration first.
@@ -581,6 +625,7 @@ func (q *Queue) ListWorkers(ctx context.Context) ([]WorkerInfo, error) {
 			CPU: int(atoi64(m["cpu"])), MemMB: int(atoi64(m["mem_mb"])), GPU: int(atoi64(m["gpu"])),
 			Overloaded: m["overloaded"] == "1", Draining: m["draining"] == "1", MaxJobs: int(atoi64(m["max_jobs"])),
 			Version: m["version"], RegisteredMs: atoi64(m["registered_ms"]), LastHeartbeatMs: last, Running: running,
+			OverloadReasons: m["over_reasons"], UsageJSON: m["usage_json"],
 		})
 	}
 	return out, nil

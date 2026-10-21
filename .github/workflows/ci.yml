@@ -59,6 +59,8 @@ jobs:
         run: make demo
       - name: chaos (in-process suite + SIGKILL workers in the running cluster)
         run: make chaos
+      - name: resource-safety check (overloaded worker receives no jobs)
+        run: make pressure
       - name: dump logs on failure
         if: failure()
         run: docker compose logs --no-color

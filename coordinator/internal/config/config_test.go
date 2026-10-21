@@ -40,7 +40,8 @@ func TestLoadFlagsOverrideEnv(t *testing.T) {
 func TestValidateErrors(t *testing.T) {
 	base := Config{GRPCPort: "50051", HTTPPort: "8080", RedisAddr: "r:6379", ArtifactDir: "d", ArtifactMaxBytes: 1,
 		HeartbeatInterval: 2 * time.Second, WorkerDeadAfter: 6 * time.Second, ReapInterval: time.Second,
-		MaxAttempts: 3, BackoffBase: time.Second, BackoffMax: 30 * time.Second}
+		MaxAttempts: 3, BackoffBase: time.Second, BackoffMax: 30 * time.Second,
+		LimitRAMPct: 90, LimitCPUPct: 90, LimitDiskPct: 90, ReleasePct: 80, ReleaseAfter: 10 * time.Second}
 	cases := []struct {
 		name    string
 		mutate  func(*Config)
@@ -57,6 +58,10 @@ func TestValidateErrors(t *testing.T) {
 		{"zero heartbeat", func(c *Config) { c.HeartbeatInterval = 0 }, "heartbeat-interval"},
 		{"zero reap interval", func(c *Config) { c.ReapInterval = 0 }, "reap-interval"},
 		{"zero attempts", func(c *Config) { c.MaxAttempts = 0 }, "max-attempts"},
+		{"ram limit over 100", func(c *Config) { c.LimitRAMPct = 101 }, "ram-limit-percent"},
+		{"cpu limit zero", func(c *Config) { c.LimitCPUPct = 0 }, "cpu-limit-percent"},
+		{"release equals limit (empty hysteresis band)", func(c *Config) { c.ReleasePct = 90 }, "release-percent"},
+		{"release above a limit", func(c *Config) { c.LimitDiskPct = 75 }, "release-percent"},
 		{"backoff inverted", func(c *Config) { c.BackoffMax = time.Millisecond }, "backoff-max"},
 	}
 	for _, tc := range cases {
@@ -71,5 +76,28 @@ func TestValidateErrors(t *testing.T) {
 	}
 	if err := base.Validate(); err != nil {
 		t.Fatalf("base config must validate: %v", err)
+	}
+}
+
+func TestResourceLimitsAreConfigurableWithSaneDefaults(t *testing.T) {
+	for _, k := range []string{"RAM_LIMIT_PERCENT", "CPU_LIMIT_PERCENT", "DISK_LIMIT_PERCENT", "RELEASE_PERCENT", "RELEASE_AFTER", "REQUIRE_USAGE"} {
+		t.Setenv(k, "")
+	}
+	cfg, err := Load(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LimitRAMPct != 90 || cfg.LimitCPUPct != 90 || cfg.LimitDiskPct != 90 || cfg.ReleasePct != 80 || cfg.ReleaseAfter != 10*time.Second || !cfg.RequireUsage {
+		t.Fatalf("defaults: %+v", cfg)
+	}
+	t.Setenv("RAM_LIMIT_PERCENT", "85")
+	t.Setenv("RELEASE_PERCENT", "70")
+	cfg, err = Load([]string{"-cpu-limit-percent", "95"})
+	if err != nil || cfg.LimitRAMPct != 85 || cfg.LimitCPUPct != 95 || cfg.ReleasePct != 70 {
+		t.Fatalf("overrides: %+v %v", cfg, err)
+	}
+	t.Setenv("RAM_LIMIT_PERCENT", "lots")
+	if _, err := Load(nil); err == nil || !strings.Contains(err.Error(), "RAM_LIMIT_PERCENT") {
+		t.Fatalf("malformed value must name the variable, got %v", err)
 	}
 }

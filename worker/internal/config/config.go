@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/vim-all/ComputeHive/worker/internal/monitor"
 )
 
 type Config struct {
@@ -52,6 +54,31 @@ type Config struct {
 	DockerBinary            string
 	AllowGPUJobs            bool
 	Version                 string
+
+	// Resource safety (see internal/monitor). Percentages are of host capacity.
+	RAMLimitPercent  float64       // no new jobs while RAM used >= this
+	CPULimitPercent  float64       // ... CPU
+	DiskLimitPercent float64       // ... disk (job work dir and Docker root)
+	ReleasePercent   float64       // resume only after every metric stays one band below its limit...
+	ReleaseAfter     time.Duration // ...for this long
+	SampleInterval   time.Duration
+	// PressureGrace: if the host stays over a limit this long while a job runs, the job is
+	// evicted (stopped gracefully and requeued elsewhere, not counted as the job's fault).
+	PressureGrace time.Duration
+
+	// Hard caps on every job container; a job's own request wins when it declares one.
+	DefaultJobMemoryMB int64
+	DefaultJobCPUs     float64
+	PidsLimit          int
+	StopGrace          time.Duration
+}
+
+// MonitorConfig extracts the overload thresholds.
+func (c Config) MonitorConfig() monitor.Config {
+	m := monitor.DefaultConfig()
+	m.RAMLimit, m.CPULimit, m.DiskLimit = c.RAMLimitPercent, c.CPULimitPercent, c.DiskLimitPercent
+	m.ReleasePercent, m.ReleaseAfter = c.ReleasePercent, c.ReleaseAfter
+	return m
 }
 
 func Parse(args []string) (Config, error) {
@@ -106,6 +133,18 @@ func parse(args []string, getenv func(string) string) (Config, error) {
 		DockerBinary:            envOr(getenv, "DOCKER_BINARY", "docker"),
 		AllowGPUJobs:            envBool(getenv, "ALLOW_GPU_JOBS", true),
 		Version:                 envOr(getenv, "WORKER_VERSION", "dev"),
+
+		RAMLimitPercent:    envFloat(getenv, "RAM_LIMIT_PERCENT", 90),
+		CPULimitPercent:    envFloat(getenv, "CPU_LIMIT_PERCENT", 90),
+		DiskLimitPercent:   envFloat(getenv, "DISK_LIMIT_PERCENT", 90),
+		ReleasePercent:     envFloat(getenv, "RELEASE_PERCENT", 80),
+		ReleaseAfter:       envDuration(getenv, "RELEASE_AFTER", 10*time.Second),
+		SampleInterval:     envDuration(getenv, "SAMPLE_INTERVAL", time.Second),
+		PressureGrace:      envDuration(getenv, "PRESSURE_GRACE", 15*time.Second),
+		DefaultJobMemoryMB: envInt64(getenv, "DEFAULT_JOB_MEMORY_MB", 512),
+		DefaultJobCPUs:     envFloat(getenv, "DEFAULT_JOB_CPUS", 1),
+		PidsLimit:          envInt(getenv, "JOB_PIDS_LIMIT", 256),
+		StopGrace:          envDuration(getenv, "STOP_GRACE", 5*time.Second),
 	}
 	if !cfg.S3SignRequests && strings.TrimSpace(getenv("S3_SIGN_REQUESTS")) == "" {
 		cfg.S3SignRequests = strings.TrimSpace(cfg.S3AccessKeyID) != "" && strings.TrimSpace(cfg.S3SecretAccessKey) != ""
@@ -163,6 +202,17 @@ func parse(args []string, getenv func(string) string) (Config, error) {
 	fs.StringVar(&cfg.DockerBinary, "docker-binary", cfg.DockerBinary, "Docker CLI binary path")
 	fs.BoolVar(&cfg.AllowGPUJobs, "allow-gpu-jobs", cfg.AllowGPUJobs, "Allow jobs that request GPU access")
 	fs.StringVar(&cfg.Version, "version", cfg.Version, "Worker version string")
+	fs.Float64Var(&cfg.RAMLimitPercent, "ram-limit-percent", cfg.RAMLimitPercent, "Accept no new jobs while RAM use is at or above this percentage")
+	fs.Float64Var(&cfg.CPULimitPercent, "cpu-limit-percent", cfg.CPULimitPercent, "Accept no new jobs while CPU use is at or above this percentage")
+	fs.Float64Var(&cfg.DiskLimitPercent, "disk-limit-percent", cfg.DiskLimitPercent, "Accept no new jobs while disk use is at or above this percentage")
+	fs.Float64Var(&cfg.ReleasePercent, "release-percent", cfg.ReleasePercent, "Resume only after every metric stays one hysteresis band below its limit (80 with the 90 defaults)")
+	fs.DurationVar(&cfg.ReleaseAfter, "release-after", cfg.ReleaseAfter, "... continuously for this long")
+	fs.DurationVar(&cfg.SampleInterval, "sample-interval", cfg.SampleInterval, "How often to sample host resources")
+	fs.DurationVar(&cfg.PressureGrace, "pressure-grace", cfg.PressureGrace, "Evict the running job if the host stays over a limit this long")
+	fs.Int64Var(&cfg.DefaultJobMemoryMB, "default-job-memory-mb", cfg.DefaultJobMemoryMB, "Memory cap for jobs that declare none (also --memory-swap)")
+	fs.Float64Var(&cfg.DefaultJobCPUs, "default-job-cpus", cfg.DefaultJobCPUs, "CPU cap for jobs that declare none")
+	fs.IntVar(&cfg.PidsLimit, "job-pids-limit", cfg.PidsLimit, "Maximum processes per job container")
+	fs.DurationVar(&cfg.StopGrace, "stop-grace", cfg.StopGrace, "SIGTERM-to-SIGKILL window when stopping a job container")
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
 	}
@@ -195,6 +245,21 @@ func parse(args []string, getenv func(string) string) (Config, error) {
 	}
 	if cfg.HeartbeatTTL < cfg.HeartbeatInterval {
 		cfg.HeartbeatTTL = 3 * cfg.HeartbeatInterval
+	}
+	if err := cfg.MonitorConfig().Validate(); err != nil {
+		return Config{}, err
+	}
+	if cfg.SampleInterval <= 0 {
+		return Config{}, fmt.Errorf("sample-interval must be > 0")
+	}
+	if cfg.PressureGrace < 0 {
+		return Config{}, fmt.Errorf("pressure-grace must be >= 0")
+	}
+	if cfg.DefaultJobMemoryMB <= 0 || cfg.DefaultJobCPUs <= 0 || cfg.PidsLimit <= 0 {
+		return Config{}, fmt.Errorf("default-job-memory-mb, default-job-cpus and job-pids-limit must be > 0: every job container needs hard caps")
+	}
+	if cfg.StopGrace < 0 {
+		return Config{}, fmt.Errorf("stop-grace must be >= 0")
 	}
 	if cfg.PollInterval <= 0 {
 		return Config{}, fmt.Errorf("poll-interval must be > 0")
@@ -249,6 +314,15 @@ func envOr(getenv func(string) string, key, fallback string) string {
 	}
 
 	return value
+}
+
+func envFloat(getenv func(string) string, key string, fallback float64) float64 {
+	if v := strings.TrimSpace(getenv(key)); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
+		}
+	}
+	return fallback
 }
 
 func envInt(getenv func(string) string, key string, fallback int) int {

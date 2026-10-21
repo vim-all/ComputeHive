@@ -73,6 +73,17 @@ services:
       <<: *worker-env
       WORKER_ID: worker-2
 
+  # Demo of the resource-safety rule (scripts/pressure-cluster.sh): a worker whose RAM limit is
+  # 1%, i.e. permanently overloaded. It must never be assigned a job. Not started by default.
+  worker-hot:
+    <<: *worker
+    profiles: ["pressure"]
+    environment:
+      <<: *worker-env
+      WORKER_ID: worker-hot
+      RAM_LIMIT_PERCENT: "1"
+      RELEASE_PERCENT: "0.5"
+
   prometheus:
     image: prom/prometheus:v3.5.0
     volumes:

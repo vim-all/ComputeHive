@@ -197,6 +197,33 @@ message RegisterWorkerResponse {
   int32 heartbeat_interval_seconds = 2;
 }
 
+// Host and Docker resource usage sampled by the worker (about once per second).
+// The coordinator re-derives overload from these raw numbers; it does not take the
+// worker's own overloaded flag on trust.
+message ResourceUsage {
+  int64 mem_total_mb = 1;
+  int64 mem_used_mb = 2;
+  double mem_used_percent = 3;
+  double cpu_percent = 4;
+  double load1 = 5;
+  double load5 = 6;
+  double load15 = 7;
+  double work_disk_used_percent = 8;
+  double docker_disk_used_percent = 9;
+  double swap_used_percent = 10;
+  // 0 when no temperature sensor is available.
+  double cpu_temp_c = 11;
+  bool docker_healthy = 12;
+  int32 gpu_count = 13;
+  double gpu_util_percent = 14;
+  double net_egress_bytes_per_sec = 15;
+  // Memory actually used by this worker's job containers (docker stats).
+  int64 jobs_mem_used_mb = 16;
+  // Why the worker considers itself overloaded, e.g. "ram>=90%".
+  repeated string overload_reasons = 17;
+  int64 sampled_at_unix = 18;
+}
+
 message HeartbeatRequest {
   WorkerID worker_id = 1;
   ResourceSpec available_resources = 2;
@@ -207,6 +234,7 @@ message HeartbeatRequest {
   // Worker is shutting down or paused: finish current jobs, take no new ones.
   bool draining = 6;
   int32 max_jobs = 7;
+  ResourceUsage usage = 8;
 }
 
 message HeartbeatResponse {

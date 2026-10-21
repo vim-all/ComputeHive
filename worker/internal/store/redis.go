@@ -180,6 +180,7 @@ func (s *Store) PublishHeartbeat(ctx context.Context, hb domain.WorkerHeartbeat)
 		Overloaded:         hb.Overloaded,
 		Draining:           hb.Draining,
 		MaxJobs:            int32(max(hb.MaxJobs, 1)),
+		Usage:              usageToPB(hb),
 	}
 	for _, id := range hb.RunningJobs {
 		req.RunningJobs = append(req.RunningJobs, &pb.JobID{Value: id})
@@ -269,6 +270,21 @@ func (s *Store) Forget(jobID string) {
 	s.mu.Lock()
 	delete(s.leases, jobID)
 	s.mu.Unlock()
+}
+
+func usageToPB(hb domain.WorkerHeartbeat) *pb.ResourceUsage {
+	m := hb.Usage
+	if m == nil {
+		return nil // no sample yet: the coordinator will refuse this worker work until there is one
+	}
+	return &pb.ResourceUsage{
+		MemTotalMb: m.MemTotalMB, MemUsedMb: m.MemUsedMB, MemUsedPercent: m.MemPercent,
+		CpuPercent: m.CPUPercent, Load1: m.Load1, Load5: m.Load5, Load15: m.Load15,
+		WorkDiskUsedPercent: m.WorkDiskUsedPercent, DockerDiskUsedPercent: m.DockerDiskUsedPercent,
+		SwapUsedPercent: m.SwapPercent, CpuTempC: m.CPUTempC, DockerHealthy: m.DockerHealthy,
+		GpuCount: int32(m.GPUCount), GpuUtilPercent: m.GPUUtilPercent, NetEgressBytesPerSec: m.NetEgressBytesPerSec,
+		JobsMemUsedMb: m.JobsMemUsedMB, OverloadReasons: hb.OverloadReasons, SampledAtUnix: m.At.Unix(),
+	}
 }
 
 func boolToGPUCount(gpu bool) int32 {

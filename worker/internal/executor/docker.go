@@ -16,19 +16,36 @@ import (
 	"github.com/vim-all/ComputeHive/worker/internal/domain"
 )
 
+// Limits are the hard per-container caps applied to every job. A job's own request is
+// honoured when it declares one; jobs that declare nothing get the defaults, so no
+// container ever runs unbounded.
+type Limits struct {
+	DefaultMemoryMB int64         // --memory (and --memory-swap, so there is no swap to abuse)
+	DefaultCPUs     float64       // --cpus
+	PidsLimit       int           // --pids-limit: stops fork bombs
+	StopGrace       time.Duration // SIGTERM-to-SIGKILL window when a job is cancelled, evicted or times out
+}
+
+// DefaultLimits: 512 MB, 1 CPU, 256 processes, 5s graceful stop.
+func DefaultLimits() Limits {
+	return Limits{DefaultMemoryMB: 512, DefaultCPUs: 1, PidsLimit: 256, StopGrace: 5 * time.Second}
+}
+
 type DockerExecutor struct {
 	binary              string
 	workerID            string
 	allowGPUJobs        bool
 	outputCollectionDir string
+	limits              Limits
 }
 
-func NewDockerExecutor(binary, workerID string, allowGPUJobs bool, outputCollectionDir string) *DockerExecutor {
+func NewDockerExecutor(binary, workerID string, allowGPUJobs bool, outputCollectionDir string, limits Limits) *DockerExecutor {
 	return &DockerExecutor{
 		binary:              binary,
 		workerID:            workerID,
 		allowGPUJobs:        allowGPUJobs,
 		outputCollectionDir: strings.TrimSpace(outputCollectionDir),
+		limits:              limits,
 	}
 }
 
@@ -109,10 +126,13 @@ func (e *DockerExecutor) Run(ctx context.Context, job domain.Job, bundle artifac
 	result.DurationMillis = result.FinishedAt.Sub(startedAt).Milliseconds()
 
 	// Cancelling the context only kills the `docker run` client; the container keeps
-	// running unless we remove it ourselves (timeouts, lease revocation, shutdown).
+	// running unless we stop it ourselves (timeouts, lease revocation, shutdown).
 	if ctx.Err() != nil {
-		e.forceRemove(name)
+		e.stopContainer(name)
 	}
+	// We remove containers ourselves instead of using `docker run --rm`: --rm races with an
+	// explicit `docker rm` and can leave the container in a "Dead" state that holds disk forever.
+	e.forceRemove(name)
 
 	if runErr != nil {
 		result.Error = runErr.Error()
@@ -157,7 +177,6 @@ func (e *DockerExecutor) buildRunArgs(job domain.Job, hostOutputDir string) ([]s
 
 	args := []string{
 		"run",
-		"--rm",
 		"--network",
 		"none",
 		"--name",
@@ -170,11 +189,23 @@ func (e *DockerExecutor) buildRunArgs(job domain.Job, hostOutputDir string) ([]s
 		hostOutputDir + ":" + e.outputCollectionDir,
 	}
 
-	if job.CPUCores > 0 {
-		args = append(args, "--cpus", strconv.FormatFloat(job.CPUCores, 'f', -1, 64))
+	cpus := job.CPUCores
+	if cpus <= 0 {
+		cpus = e.limits.DefaultCPUs
 	}
-	if job.MemoryMB > 0 {
-		args = append(args, "--memory", fmt.Sprintf("%dm", job.MemoryMB))
+	memoryMB := job.MemoryMB
+	if memoryMB <= 0 {
+		memoryMB = e.limits.DefaultMemoryMB
+	}
+	if cpus > 0 {
+		args = append(args, "--cpus", strconv.FormatFloat(cpus, 'f', -1, 64))
+	}
+	if memoryMB > 0 {
+		// memory-swap equal to memory means zero swap: the container cannot spill past its cap onto the host's swap.
+		args = append(args, "--memory", fmt.Sprintf("%dm", memoryMB), "--memory-swap", fmt.Sprintf("%dm", memoryMB))
+	}
+	if e.limits.PidsLimit > 0 {
+		args = append(args, "--pids-limit", strconv.Itoa(e.limits.PidsLimit))
 	}
 	if job.GPU {
 		args = append(args, "--gpus", "all")
@@ -206,11 +237,36 @@ func (e *DockerExecutor) runDockerCommand(ctx context.Context, args ...string) (
 	return stdout.String(), stderr.String(), err
 }
 
+// stopContainer gives the container StopGrace to exit after SIGTERM, then SIGKILLs it.
+func (e *DockerExecutor) stopContainer(name string) {
+	grace := max(int(e.limits.StopGrace.Seconds()), 0)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(grace+30)*time.Second)
+	defer cancel()
+	_, _, _ = e.runDockerCommand(ctx, "stop", "-t", strconv.Itoa(grace), name)
+}
+
+// CleanupOrphans removes containers left behind by a previous run of this worker (for example
+// after a crash mid-job). It returns how many it removed. Call it once at startup.
+func (e *DockerExecutor) CleanupOrphans(ctx context.Context) (int, error) {
+	out, _, err := e.runDockerCommand(ctx, "ps", "-a", "-q", "--filter", "label=computehive.worker.id="+e.workerID)
+	if err != nil {
+		return 0, fmt.Errorf("list orphaned containers: %w", err)
+	}
+	ids := strings.Fields(out)
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	if _, stderr, err := e.runDockerCommand(ctx, append([]string{"rm", "-f", "-v"}, ids...)...); err != nil {
+		return 0, fmt.Errorf("remove orphaned containers: %w: %s", err, strings.TrimSpace(stderr))
+	}
+	return len(ids), nil
+}
+
 // forceRemove kills and removes a container by name, ignoring "no such container".
 func (e *DockerExecutor) forceRemove(name string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	_, _, _ = e.runDockerCommand(ctx, "rm", "-f", name)
+	_, _, _ = e.runDockerCommand(ctx, "rm", "-f", "-v", name)
 }
 
 func (e *DockerExecutor) cleanupImage(imageRef string) {

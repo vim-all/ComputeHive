@@ -25,6 +25,13 @@ func testConfig() Config {
 		ClaimScan:      100,
 		ReapInterval:   50 * time.Millisecond,
 		OrphanGrace:    time.Second,
+
+		LimitMemPct:     90,
+		LimitCPUPct:     90,
+		LimitDiskPct:    90,
+		ReleasePct:      80,
+		ReleaseAfter:    300 * time.Millisecond,
+		DefaultJobMemMB: 512,
 	}
 }
 

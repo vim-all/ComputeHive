@@ -1,5 +1,7 @@
 package domain
 
+import "github.com/vim-all/ComputeHive/worker/internal/monitor"
+
 const (
 	WorkerStatusAvailable = "available"
 	WorkerStatusBusy      = "busy"
@@ -30,6 +32,10 @@ type WorkerHeartbeat struct {
 	Overloaded  bool     `json:"overloaded,omitempty"`
 	Draining    bool     `json:"draining,omitempty"`
 	MaxJobs     int      `json:"max_jobs,omitempty"`
+
+	// Usage is the latest resource sample; nil until the monitor has produced one.
+	Usage           *monitor.Metrics `json:"usage,omitempty"`
+	OverloadReasons []string         `json:"overload_reasons,omitempty"`
 }
 
 type WorkerResources struct {

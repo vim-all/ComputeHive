@@ -1647,6 +1647,192 @@ func (x *RegisterWorkerResponse) GetHeartbeatIntervalSeconds() int32 {
 	return 0
 }
 
+// Host and Docker resource usage sampled by the worker (about once per second).
+// The coordinator re-derives overload from these raw numbers; it does not take the
+// worker's own overloaded flag on trust.
+type ResourceUsage struct {
+	state                 protoimpl.MessageState `protogen:"open.v1"`
+	MemTotalMb            int64                  `protobuf:"varint,1,opt,name=mem_total_mb,json=memTotalMb,proto3" json:"mem_total_mb,omitempty"`
+	MemUsedMb             int64                  `protobuf:"varint,2,opt,name=mem_used_mb,json=memUsedMb,proto3" json:"mem_used_mb,omitempty"`
+	MemUsedPercent        float64                `protobuf:"fixed64,3,opt,name=mem_used_percent,json=memUsedPercent,proto3" json:"mem_used_percent,omitempty"`
+	CpuPercent            float64                `protobuf:"fixed64,4,opt,name=cpu_percent,json=cpuPercent,proto3" json:"cpu_percent,omitempty"`
+	Load1                 float64                `protobuf:"fixed64,5,opt,name=load1,proto3" json:"load1,omitempty"`
+	Load5                 float64                `protobuf:"fixed64,6,opt,name=load5,proto3" json:"load5,omitempty"`
+	Load15                float64                `protobuf:"fixed64,7,opt,name=load15,proto3" json:"load15,omitempty"`
+	WorkDiskUsedPercent   float64                `protobuf:"fixed64,8,opt,name=work_disk_used_percent,json=workDiskUsedPercent,proto3" json:"work_disk_used_percent,omitempty"`
+	DockerDiskUsedPercent float64                `protobuf:"fixed64,9,opt,name=docker_disk_used_percent,json=dockerDiskUsedPercent,proto3" json:"docker_disk_used_percent,omitempty"`
+	SwapUsedPercent       float64                `protobuf:"fixed64,10,opt,name=swap_used_percent,json=swapUsedPercent,proto3" json:"swap_used_percent,omitempty"`
+	// 0 when no temperature sensor is available.
+	CpuTempC             float64 `protobuf:"fixed64,11,opt,name=cpu_temp_c,json=cpuTempC,proto3" json:"cpu_temp_c,omitempty"`
+	DockerHealthy        bool    `protobuf:"varint,12,opt,name=docker_healthy,json=dockerHealthy,proto3" json:"docker_healthy,omitempty"`
+	GpuCount             int32   `protobuf:"varint,13,opt,name=gpu_count,json=gpuCount,proto3" json:"gpu_count,omitempty"`
+	GpuUtilPercent       float64 `protobuf:"fixed64,14,opt,name=gpu_util_percent,json=gpuUtilPercent,proto3" json:"gpu_util_percent,omitempty"`
+	NetEgressBytesPerSec float64 `protobuf:"fixed64,15,opt,name=net_egress_bytes_per_sec,json=netEgressBytesPerSec,proto3" json:"net_egress_bytes_per_sec,omitempty"`
+	// Memory actually used by this worker's job containers (docker stats).
+	JobsMemUsedMb int64 `protobuf:"varint,16,opt,name=jobs_mem_used_mb,json=jobsMemUsedMb,proto3" json:"jobs_mem_used_mb,omitempty"`
+	// Why the worker considers itself overloaded, e.g. "ram>=90%".
+	OverloadReasons []string `protobuf:"bytes,17,rep,name=overload_reasons,json=overloadReasons,proto3" json:"overload_reasons,omitempty"`
+	SampledAtUnix   int64    `protobuf:"varint,18,opt,name=sampled_at_unix,json=sampledAtUnix,proto3" json:"sampled_at_unix,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *ResourceUsage) Reset() {
+	*x = ResourceUsage{}
+	mi := &file_worker_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResourceUsage) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResourceUsage) ProtoMessage() {}
+
+func (x *ResourceUsage) ProtoReflect() protoreflect.Message {
+	mi := &file_worker_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResourceUsage.ProtoReflect.Descriptor instead.
+func (*ResourceUsage) Descriptor() ([]byte, []int) {
+	return file_worker_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *ResourceUsage) GetMemTotalMb() int64 {
+	if x != nil {
+		return x.MemTotalMb
+	}
+	return 0
+}
+
+func (x *ResourceUsage) GetMemUsedMb() int64 {
+	if x != nil {
+		return x.MemUsedMb
+	}
+	return 0
+}
+
+func (x *ResourceUsage) GetMemUsedPercent() float64 {
+	if x != nil {
+		return x.MemUsedPercent
+	}
+	return 0
+}
+
+func (x *ResourceUsage) GetCpuPercent() float64 {
+	if x != nil {
+		return x.CpuPercent
+	}
+	return 0
+}
+
+func (x *ResourceUsage) GetLoad1() float64 {
+	if x != nil {
+		return x.Load1
+	}
+	return 0
+}
+
+func (x *ResourceUsage) GetLoad5() float64 {
+	if x != nil {
+		return x.Load5
+	}
+	return 0
+}
+
+func (x *ResourceUsage) GetLoad15() float64 {
+	if x != nil {
+		return x.Load15
+	}
+	return 0
+}
+
+func (x *ResourceUsage) GetWorkDiskUsedPercent() float64 {
+	if x != nil {
+		return x.WorkDiskUsedPercent
+	}
+	return 0
+}
+
+func (x *ResourceUsage) GetDockerDiskUsedPercent() float64 {
+	if x != nil {
+		return x.DockerDiskUsedPercent
+	}
+	return 0
+}
+
+func (x *ResourceUsage) GetSwapUsedPercent() float64 {
+	if x != nil {
+		return x.SwapUsedPercent
+	}
+	return 0
+}
+
+func (x *ResourceUsage) GetCpuTempC() float64 {
+	if x != nil {
+		return x.CpuTempC
+	}
+	return 0
+}
+
+func (x *ResourceUsage) GetDockerHealthy() bool {
+	if x != nil {
+		return x.DockerHealthy
+	}
+	return false
+}
+
+func (x *ResourceUsage) GetGpuCount() int32 {
+	if x != nil {
+		return x.GpuCount
+	}
+	return 0
+}
+
+func (x *ResourceUsage) GetGpuUtilPercent() float64 {
+	if x != nil {
+		return x.GpuUtilPercent
+	}
+	return 0
+}
+
+func (x *ResourceUsage) GetNetEgressBytesPerSec() float64 {
+	if x != nil {
+		return x.NetEgressBytesPerSec
+	}
+	return 0
+}
+
+func (x *ResourceUsage) GetJobsMemUsedMb() int64 {
+	if x != nil {
+		return x.JobsMemUsedMb
+	}
+	return 0
+}
+
+func (x *ResourceUsage) GetOverloadReasons() []string {
+	if x != nil {
+		return x.OverloadReasons
+	}
+	return nil
+}
+
+func (x *ResourceUsage) GetSampledAtUnix() int64 {
+	if x != nil {
+		return x.SampledAtUnix
+	}
+	return 0
+}
+
 type HeartbeatRequest struct {
 	state              protoimpl.MessageState `protogen:"open.v1"`
 	WorkerId           *WorkerID              `protobuf:"bytes,1,opt,name=worker_id,json=workerId,proto3" json:"worker_id,omitempty"`
@@ -1656,15 +1842,16 @@ type HeartbeatRequest struct {
 	// Worker is over its resource thresholds: the coordinator must not assign it jobs.
 	Overloaded bool `protobuf:"varint,5,opt,name=overloaded,proto3" json:"overloaded,omitempty"`
 	// Worker is shutting down or paused: finish current jobs, take no new ones.
-	Draining      bool  `protobuf:"varint,6,opt,name=draining,proto3" json:"draining,omitempty"`
-	MaxJobs       int32 `protobuf:"varint,7,opt,name=max_jobs,json=maxJobs,proto3" json:"max_jobs,omitempty"`
+	Draining      bool           `protobuf:"varint,6,opt,name=draining,proto3" json:"draining,omitempty"`
+	MaxJobs       int32          `protobuf:"varint,7,opt,name=max_jobs,json=maxJobs,proto3" json:"max_jobs,omitempty"`
+	Usage         *ResourceUsage `protobuf:"bytes,8,opt,name=usage,proto3" json:"usage,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *HeartbeatRequest) Reset() {
 	*x = HeartbeatRequest{}
-	mi := &file_worker_proto_msgTypes[20]
+	mi := &file_worker_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1676,7 +1863,7 @@ func (x *HeartbeatRequest) String() string {
 func (*HeartbeatRequest) ProtoMessage() {}
 
 func (x *HeartbeatRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_worker_proto_msgTypes[20]
+	mi := &file_worker_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1689,7 +1876,7 @@ func (x *HeartbeatRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HeartbeatRequest.ProtoReflect.Descriptor instead.
 func (*HeartbeatRequest) Descriptor() ([]byte, []int) {
-	return file_worker_proto_rawDescGZIP(), []int{20}
+	return file_worker_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *HeartbeatRequest) GetWorkerId() *WorkerID {
@@ -1741,6 +1928,13 @@ func (x *HeartbeatRequest) GetMaxJobs() int32 {
 	return 0
 }
 
+func (x *HeartbeatRequest) GetUsage() *ResourceUsage {
+	if x != nil {
+		return x.Usage
+	}
+	return nil
+}
+
 type HeartbeatResponse struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	Accepted       bool                   `protobuf:"varint,1,opt,name=accepted,proto3" json:"accepted,omitempty"`
@@ -1754,7 +1948,7 @@ type HeartbeatResponse struct {
 
 func (x *HeartbeatResponse) Reset() {
 	*x = HeartbeatResponse{}
-	mi := &file_worker_proto_msgTypes[21]
+	mi := &file_worker_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1766,7 +1960,7 @@ func (x *HeartbeatResponse) String() string {
 func (*HeartbeatResponse) ProtoMessage() {}
 
 func (x *HeartbeatResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_worker_proto_msgTypes[21]
+	mi := &file_worker_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1779,7 +1973,7 @@ func (x *HeartbeatResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HeartbeatResponse.ProtoReflect.Descriptor instead.
 func (*HeartbeatResponse) Descriptor() ([]byte, []int) {
-	return file_worker_proto_rawDescGZIP(), []int{21}
+	return file_worker_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *HeartbeatResponse) GetAccepted() bool {
@@ -1812,7 +2006,7 @@ type RequestJobRequest struct {
 
 func (x *RequestJobRequest) Reset() {
 	*x = RequestJobRequest{}
-	mi := &file_worker_proto_msgTypes[22]
+	mi := &file_worker_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1824,7 +2018,7 @@ func (x *RequestJobRequest) String() string {
 func (*RequestJobRequest) ProtoMessage() {}
 
 func (x *RequestJobRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_worker_proto_msgTypes[22]
+	mi := &file_worker_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1837,7 +2031,7 @@ func (x *RequestJobRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RequestJobRequest.ProtoReflect.Descriptor instead.
 func (*RequestJobRequest) Descriptor() ([]byte, []int) {
-	return file_worker_proto_rawDescGZIP(), []int{22}
+	return file_worker_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *RequestJobRequest) GetWorkerId() *WorkerID {
@@ -1859,7 +2053,7 @@ type RequestJobResponse struct {
 
 func (x *RequestJobResponse) Reset() {
 	*x = RequestJobResponse{}
-	mi := &file_worker_proto_msgTypes[23]
+	mi := &file_worker_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1871,7 +2065,7 @@ func (x *RequestJobResponse) String() string {
 func (*RequestJobResponse) ProtoMessage() {}
 
 func (x *RequestJobResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_worker_proto_msgTypes[23]
+	mi := &file_worker_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1884,7 +2078,7 @@ func (x *RequestJobResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RequestJobResponse.ProtoReflect.Descriptor instead.
 func (*RequestJobResponse) Descriptor() ([]byte, []int) {
-	return file_worker_proto_rawDescGZIP(), []int{23}
+	return file_worker_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *RequestJobResponse) GetHasJob() bool {
@@ -1928,7 +2122,7 @@ type SubmitResultRequest struct {
 
 func (x *SubmitResultRequest) Reset() {
 	*x = SubmitResultRequest{}
-	mi := &file_worker_proto_msgTypes[24]
+	mi := &file_worker_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1940,7 +2134,7 @@ func (x *SubmitResultRequest) String() string {
 func (*SubmitResultRequest) ProtoMessage() {}
 
 func (x *SubmitResultRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_worker_proto_msgTypes[24]
+	mi := &file_worker_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1953,7 +2147,7 @@ func (x *SubmitResultRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SubmitResultRequest.ProtoReflect.Descriptor instead.
 func (*SubmitResultRequest) Descriptor() ([]byte, []int) {
-	return file_worker_proto_rawDescGZIP(), []int{24}
+	return file_worker_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *SubmitResultRequest) GetWorkerId() *WorkerID {
@@ -1995,7 +2189,7 @@ type SubmitResultResponse struct {
 
 func (x *SubmitResultResponse) Reset() {
 	*x = SubmitResultResponse{}
-	mi := &file_worker_proto_msgTypes[25]
+	mi := &file_worker_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2007,7 +2201,7 @@ func (x *SubmitResultResponse) String() string {
 func (*SubmitResultResponse) ProtoMessage() {}
 
 func (x *SubmitResultResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_worker_proto_msgTypes[25]
+	mi := &file_worker_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2020,7 +2214,7 @@ func (x *SubmitResultResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SubmitResultResponse.ProtoReflect.Descriptor instead.
 func (*SubmitResultResponse) Descriptor() ([]byte, []int) {
-	return file_worker_proto_rawDescGZIP(), []int{25}
+	return file_worker_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *SubmitResultResponse) GetAccepted() bool {
@@ -2163,7 +2357,30 @@ const file_worker_proto_rawDesc = "" +
 	"\bmax_jobs\x18\x05 \x01(\x05R\amaxJobs\"\x89\x01\n" +
 	"\x16RegisterWorkerResponse\x121\n" +
 	"\tworker_id\x18\x01 \x01(\v2\x14.compute.v1.WorkerIDR\bworkerId\x12<\n" +
-	"\x1aheartbeat_interval_seconds\x18\x02 \x01(\x05R\x18heartbeatIntervalSeconds\"\xdf\x02\n" +
+	"\x1aheartbeat_interval_seconds\x18\x02 \x01(\x05R\x18heartbeatIntervalSeconds\"\xba\x05\n" +
+	"\rResourceUsage\x12 \n" +
+	"\fmem_total_mb\x18\x01 \x01(\x03R\n" +
+	"memTotalMb\x12\x1e\n" +
+	"\vmem_used_mb\x18\x02 \x01(\x03R\tmemUsedMb\x12(\n" +
+	"\x10mem_used_percent\x18\x03 \x01(\x01R\x0ememUsedPercent\x12\x1f\n" +
+	"\vcpu_percent\x18\x04 \x01(\x01R\n" +
+	"cpuPercent\x12\x14\n" +
+	"\x05load1\x18\x05 \x01(\x01R\x05load1\x12\x14\n" +
+	"\x05load5\x18\x06 \x01(\x01R\x05load5\x12\x16\n" +
+	"\x06load15\x18\a \x01(\x01R\x06load15\x123\n" +
+	"\x16work_disk_used_percent\x18\b \x01(\x01R\x13workDiskUsedPercent\x127\n" +
+	"\x18docker_disk_used_percent\x18\t \x01(\x01R\x15dockerDiskUsedPercent\x12*\n" +
+	"\x11swap_used_percent\x18\n" +
+	" \x01(\x01R\x0fswapUsedPercent\x12\x1c\n" +
+	"\n" +
+	"cpu_temp_c\x18\v \x01(\x01R\bcpuTempC\x12%\n" +
+	"\x0edocker_healthy\x18\f \x01(\bR\rdockerHealthy\x12\x1b\n" +
+	"\tgpu_count\x18\r \x01(\x05R\bgpuCount\x12(\n" +
+	"\x10gpu_util_percent\x18\x0e \x01(\x01R\x0egpuUtilPercent\x126\n" +
+	"\x18net_egress_bytes_per_sec\x18\x0f \x01(\x01R\x14netEgressBytesPerSec\x12'\n" +
+	"\x10jobs_mem_used_mb\x18\x10 \x01(\x03R\rjobsMemUsedMb\x12)\n" +
+	"\x10overload_reasons\x18\x11 \x03(\tR\x0foverloadReasons\x12&\n" +
+	"\x0fsampled_at_unix\x18\x12 \x01(\x03R\rsampledAtUnix\"\x90\x03\n" +
 	"\x10HeartbeatRequest\x121\n" +
 	"\tworker_id\x18\x01 \x01(\v2\x14.compute.v1.WorkerIDR\bworkerId\x12I\n" +
 	"\x13available_resources\x18\x02 \x01(\v2\x18.compute.v1.ResourceSpecR\x12availableResources\x124\n" +
@@ -2173,7 +2390,8 @@ const file_worker_proto_rawDesc = "" +
 	"overloaded\x18\x05 \x01(\bR\n" +
 	"overloaded\x12\x1a\n" +
 	"\bdraining\x18\x06 \x01(\bR\bdraining\x12\x19\n" +
-	"\bmax_jobs\x18\a \x01(\x05R\amaxJobs\"\x7f\n" +
+	"\bmax_jobs\x18\a \x01(\x05R\amaxJobs\x12/\n" +
+	"\x05usage\x18\b \x01(\v2\x19.compute.v1.ResourceUsageR\x05usage\"\x7f\n" +
 	"\x11HeartbeatResponse\x12\x1a\n" +
 	"\baccepted\x18\x01 \x01(\bR\baccepted\x12(\n" +
 	"\x10server_time_unix\x18\x02 \x01(\x03R\x0eserverTimeUnix\x12$\n" +
@@ -2243,7 +2461,7 @@ func file_worker_proto_rawDescGZIP() []byte {
 }
 
 var file_worker_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
-var file_worker_proto_msgTypes = make([]protoimpl.MessageInfo, 27)
+var file_worker_proto_msgTypes = make([]protoimpl.MessageInfo, 28)
 var file_worker_proto_goTypes = []any{
 	(JobLifecycleStatus)(0),        // 0: compute.v1.JobLifecycleStatus
 	(WorkerLifecycleStatus)(0),     // 1: compute.v1.WorkerLifecycleStatus
@@ -2269,13 +2487,14 @@ var file_worker_proto_goTypes = []any{
 	(*Result)(nil),                 // 21: compute.v1.Result
 	(*RegisterWorkerRequest)(nil),  // 22: compute.v1.RegisterWorkerRequest
 	(*RegisterWorkerResponse)(nil), // 23: compute.v1.RegisterWorkerResponse
-	(*HeartbeatRequest)(nil),       // 24: compute.v1.HeartbeatRequest
-	(*HeartbeatResponse)(nil),      // 25: compute.v1.HeartbeatResponse
-	(*RequestJobRequest)(nil),      // 26: compute.v1.RequestJobRequest
-	(*RequestJobResponse)(nil),     // 27: compute.v1.RequestJobResponse
-	(*SubmitResultRequest)(nil),    // 28: compute.v1.SubmitResultRequest
-	(*SubmitResultResponse)(nil),   // 29: compute.v1.SubmitResultResponse
-	nil,                            // 30: compute.v1.Job.EnvironmentEntry
+	(*ResourceUsage)(nil),          // 24: compute.v1.ResourceUsage
+	(*HeartbeatRequest)(nil),       // 25: compute.v1.HeartbeatRequest
+	(*HeartbeatResponse)(nil),      // 26: compute.v1.HeartbeatResponse
+	(*RequestJobRequest)(nil),      // 27: compute.v1.RequestJobRequest
+	(*RequestJobResponse)(nil),     // 28: compute.v1.RequestJobResponse
+	(*SubmitResultRequest)(nil),    // 29: compute.v1.SubmitResultRequest
+	(*SubmitResultResponse)(nil),   // 30: compute.v1.SubmitResultResponse
+	nil,                            // 31: compute.v1.Job.EnvironmentEntry
 }
 var file_worker_proto_depIdxs = []int32{
 	0,  // 0: compute.v1.JobResultSchema.status:type_name -> compute.v1.JobLifecycleStatus
@@ -2294,7 +2513,7 @@ var file_worker_proto_depIdxs = []int32{
 	18, // 13: compute.v1.Job.job_id:type_name -> compute.v1.JobID
 	19, // 14: compute.v1.Job.required_resources:type_name -> compute.v1.ResourceSpec
 	3,  // 15: compute.v1.Job.status:type_name -> compute.v1.Status
-	30, // 16: compute.v1.Job.environment:type_name -> compute.v1.Job.EnvironmentEntry
+	31, // 16: compute.v1.Job.environment:type_name -> compute.v1.Job.EnvironmentEntry
 	18, // 17: compute.v1.Result.job_id:type_name -> compute.v1.JobID
 	3,  // 18: compute.v1.Result.status:type_name -> compute.v1.Status
 	8,  // 19: compute.v1.Result.output_artifacts:type_name -> compute.v1.OutputArtifact
@@ -2305,26 +2524,27 @@ var file_worker_proto_depIdxs = []int32{
 	19, // 24: compute.v1.HeartbeatRequest.available_resources:type_name -> compute.v1.ResourceSpec
 	18, // 25: compute.v1.HeartbeatRequest.running_jobs:type_name -> compute.v1.JobID
 	12, // 26: compute.v1.HeartbeatRequest.current_load:type_name -> compute.v1.WorkerCurrentLoad
-	17, // 27: compute.v1.RequestJobRequest.worker_id:type_name -> compute.v1.WorkerID
-	20, // 28: compute.v1.RequestJobResponse.job:type_name -> compute.v1.Job
-	10, // 29: compute.v1.RequestJobResponse.job_schema:type_name -> compute.v1.JobSchema
-	16, // 30: compute.v1.RequestJobResponse.assignment:type_name -> compute.v1.AssignmentSchema
-	17, // 31: compute.v1.SubmitResultRequest.worker_id:type_name -> compute.v1.WorkerID
-	21, // 32: compute.v1.SubmitResultRequest.result:type_name -> compute.v1.Result
-	7,  // 33: compute.v1.SubmitResultRequest.result_schema:type_name -> compute.v1.JobResultSchema
-	22, // 34: compute.v1.WorkerService.RegisterWorker:input_type -> compute.v1.RegisterWorkerRequest
-	24, // 35: compute.v1.WorkerService.Heartbeat:input_type -> compute.v1.HeartbeatRequest
-	26, // 36: compute.v1.WorkerService.RequestJob:input_type -> compute.v1.RequestJobRequest
-	28, // 37: compute.v1.WorkerService.SubmitResult:input_type -> compute.v1.SubmitResultRequest
-	23, // 38: compute.v1.WorkerService.RegisterWorker:output_type -> compute.v1.RegisterWorkerResponse
-	25, // 39: compute.v1.WorkerService.Heartbeat:output_type -> compute.v1.HeartbeatResponse
-	27, // 40: compute.v1.WorkerService.RequestJob:output_type -> compute.v1.RequestJobResponse
-	29, // 41: compute.v1.WorkerService.SubmitResult:output_type -> compute.v1.SubmitResultResponse
-	38, // [38:42] is the sub-list for method output_type
-	34, // [34:38] is the sub-list for method input_type
-	34, // [34:34] is the sub-list for extension type_name
-	34, // [34:34] is the sub-list for extension extendee
-	0,  // [0:34] is the sub-list for field type_name
+	24, // 27: compute.v1.HeartbeatRequest.usage:type_name -> compute.v1.ResourceUsage
+	17, // 28: compute.v1.RequestJobRequest.worker_id:type_name -> compute.v1.WorkerID
+	20, // 29: compute.v1.RequestJobResponse.job:type_name -> compute.v1.Job
+	10, // 30: compute.v1.RequestJobResponse.job_schema:type_name -> compute.v1.JobSchema
+	16, // 31: compute.v1.RequestJobResponse.assignment:type_name -> compute.v1.AssignmentSchema
+	17, // 32: compute.v1.SubmitResultRequest.worker_id:type_name -> compute.v1.WorkerID
+	21, // 33: compute.v1.SubmitResultRequest.result:type_name -> compute.v1.Result
+	7,  // 34: compute.v1.SubmitResultRequest.result_schema:type_name -> compute.v1.JobResultSchema
+	22, // 35: compute.v1.WorkerService.RegisterWorker:input_type -> compute.v1.RegisterWorkerRequest
+	25, // 36: compute.v1.WorkerService.Heartbeat:input_type -> compute.v1.HeartbeatRequest
+	27, // 37: compute.v1.WorkerService.RequestJob:input_type -> compute.v1.RequestJobRequest
+	29, // 38: compute.v1.WorkerService.SubmitResult:input_type -> compute.v1.SubmitResultRequest
+	23, // 39: compute.v1.WorkerService.RegisterWorker:output_type -> compute.v1.RegisterWorkerResponse
+	26, // 40: compute.v1.WorkerService.Heartbeat:output_type -> compute.v1.HeartbeatResponse
+	28, // 41: compute.v1.WorkerService.RequestJob:output_type -> compute.v1.RequestJobResponse
+	30, // 42: compute.v1.WorkerService.SubmitResult:output_type -> compute.v1.SubmitResultResponse
+	39, // [39:43] is the sub-list for method output_type
+	35, // [35:39] is the sub-list for method input_type
+	35, // [35:35] is the sub-list for extension type_name
+	35, // [35:35] is the sub-list for extension extendee
+	0,  // [0:35] is the sub-list for field type_name
 }
 
 func init() { file_worker_proto_init() }
@@ -2338,7 +2558,7 @@ func file_worker_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_worker_proto_rawDesc), len(file_worker_proto_rawDesc)),
 			NumEnums:      4,
-			NumMessages:   27,
+			NumMessages:   28,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

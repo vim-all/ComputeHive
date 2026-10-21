@@ -13,6 +13,7 @@ import (
 	"github.com/vim-all/ComputeHive/worker/internal/artifact"
 	"github.com/vim-all/ComputeHive/worker/internal/config"
 	"github.com/vim-all/ComputeHive/worker/internal/domain"
+	"github.com/vim-all/ComputeHive/worker/internal/monitor"
 	workeroutput "github.com/vim-all/ComputeHive/worker/internal/output"
 )
 
@@ -24,7 +25,16 @@ const (
 	ReasonEvicted = "evicted"  // this worker is giving the job back: retried, attempt not burned
 )
 
-var errLeaseRevoked = errors.New("coordinator revoked this worker's lease on the job")
+var (
+	errLeaseRevoked  = errors.New("coordinator revoked this worker's lease on the job")
+	errPressureEvict = errors.New("host resource pressure: job evicted")
+)
+
+// healthMonitor is the resource monitor as the agent sees it.
+type healthMonitor interface {
+	Status() monitor.Status
+	OverloadedFor() time.Duration
+}
 
 type storeAPI interface {
 	PullJob(ctx context.Context) (*domain.Job, bool, error)
@@ -57,6 +67,7 @@ type Agent struct {
 	reporter reporterAPI
 	executor executorAPI
 	outputs  outputManagerAPI
+	health   healthMonitor
 	logger   *slog.Logger
 	started  time.Time
 
@@ -69,10 +80,14 @@ type Agent struct {
 	jobsDone     int64
 	jobsFailed   int64
 	lastNoJobLog time.Time
+
+	overloadLogged bool
+	evictedForJob  string // job already evicted for pressure, so the policy fires once per job
 }
 
-func NewAgent(cfg config.Config, store storeAPI, fetcher fetcherAPI, reporter reporterAPI, executor executorAPI, outputs outputManagerAPI, logger *slog.Logger) *Agent {
+func NewAgent(cfg config.Config, store storeAPI, fetcher fetcherAPI, reporter reporterAPI, executor executorAPI, outputs outputManagerAPI, health healthMonitor, logger *slog.Logger) *Agent {
 	return &Agent{
+		health:   health,
 		cfg:      cfg,
 		store:    store,
 		fetcher:  fetcher,
@@ -89,6 +104,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	a.logger.Info("worker started", "worker_id", a.cfg.WorkerID, "coordinator_addr", a.cfg.CoordinatorAddr)
 
 	go a.heartbeatLoop(ctx)
+	go a.pressureLoop(ctx)
 
 	for {
 		select {
@@ -96,6 +112,17 @@ func (a *Agent) Run(ctx context.Context) error {
 			return ctx.Err()
 		default:
 		}
+
+		// Safety rule 1 (worker side): never ask for work while the host is overloaded.
+		// The coordinator enforces the same rule independently from the heartbeat numbers.
+		if st := a.health.Status(); st.Overloaded {
+			a.logOverloadedOnce(st)
+			if !sleepCtx(ctx, a.cfg.PollInterval) {
+				return ctx.Err()
+			}
+			continue
+		}
+		a.overloadLogged = false
 
 		job, found, err := a.store.PullJob(ctx)
 		if err != nil {
@@ -125,6 +152,53 @@ func (a *Agent) Run(ctx context.Context) error {
 		if err := a.handleJob(ctx, job); err != nil {
 			a.logger.Error("job handling failed", "job_id", job.ID, "error", err)
 		}
+	}
+}
+
+func (a *Agent) logOverloadedOnce(st monitor.Status) {
+	if !a.overloadLogged {
+		a.overloadLogged = true
+		a.logger.Warn("not requesting jobs: host overloaded", "event", "intake_paused", "reasons", strings.Join(st.Reasons, ","),
+			"ram_percent", st.Metrics.MemPercent, "cpu_percent", st.Metrics.CPUPercent, "disk_percent", st.Metrics.DiskPercent())
+	}
+}
+
+// pressureLoop is the over-pressure policy. Step 1 (stop accepting new work) is the gate in Run.
+// Step 2: if the host is still over a limit after PressureGrace while a job is running, the
+// job is evicted: stopped gracefully, reported as "evicted" so the coordinator requeues it
+// elsewhere without counting an attempt against it, and logged as a clear event. With the
+// default of one job per worker "lowest priority / most recent" is trivially that job.
+func (a *Agent) pressureLoop(ctx context.Context) {
+	t := time.NewTicker(time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		if a.cfg.PressureGrace <= 0 {
+			continue
+		}
+		over := a.health.OverloadedFor()
+		if over < a.cfg.PressureGrace {
+			continue
+		}
+		a.mu.Lock()
+		job, abort := a.currentJobID, a.abortCurrent
+		already := job == "" || a.evictedForJob == job
+		if !already {
+			a.evictedForJob = job
+		}
+		a.mu.Unlock()
+		if already || abort == nil {
+			continue
+		}
+		st := a.health.Status()
+		a.logger.Warn("evicting job: host stayed over its resource limit", "event", "job_evicted_pressure", "job_id", job,
+			"overloaded_for", over.Round(time.Second).String(), "reasons", strings.Join(st.Reasons, ","),
+			"ram_percent", st.Metrics.MemPercent, "cpu_percent", st.Metrics.CPUPercent, "disk_percent", st.Metrics.DiskPercent())
+		abort(errPressureEvict)
 	}
 }
 
@@ -179,6 +253,12 @@ func (a *Agent) publishHeartbeat(ctx context.Context) {
 	}
 	if currentJob != "" {
 		heartbeat.RunningJobs = []string{currentJob}
+	}
+	if st := a.health.Status(); st.Metrics.At.IsZero() {
+		heartbeat.Overloaded, heartbeat.OverloadReasons = true, st.Reasons // nothing sampled yet
+	} else {
+		mx := st.Metrics
+		heartbeat.Usage, heartbeat.Overloaded, heartbeat.OverloadReasons = &mx, st.Overloaded, st.Reasons
 	}
 
 	cancelIDs, err := a.store.PublishHeartbeat(heartbeatCtx, heartbeat)
@@ -317,6 +397,10 @@ func (a *Agent) finishAborted(parent, jobCtx, runCtx context.Context, job domain
 	case errors.Is(context.Cause(jobCtx), errLeaseRevoked):
 		a.logger.Warn("job aborted, result discarded", "job_id", job.ID, "reason", "lease_revoked")
 		return nil
+	case errors.Is(context.Cause(jobCtx), errPressureEvict):
+		err := a.publishFailedJob(parent, job, startedAt, errPressureEvict, ReasonEvicted)
+		a.logger.Warn("job returned to the queue after eviction", "event", "job_requeued_after_eviction", "job_id", job.ID, "error", err)
+		return nil
 	case parent.Err() != nil:
 		// Shutting down: hand the job straight back (no attempt burned) rather than
 		// making the coordinator wait out the heartbeat window.
@@ -378,6 +462,9 @@ func (a *Agent) setState(status, currentJobID string, cpuUsed int, memoryUsedMB 
 	a.status = status
 	a.currentJobID = currentJobID
 	a.abortCurrent = abort
+	if currentJobID == "" {
+		a.evictedForJob = "" // the once-per-job eviction guard resets between jobs
+	}
 	a.currentCPU = max(cpuUsed, 0)
 	a.currentMemMB = maxInt64(memoryUsedMB, 0)
 }
