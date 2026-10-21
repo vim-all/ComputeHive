@@ -5,4 +5,5 @@ coordinator/.env
 
 # Build artifacts
 bin/
+data/
 *.out

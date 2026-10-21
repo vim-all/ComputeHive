@@ -1,0 +1,78 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache-dependency-path: |
+            coordinator/go.sum
+            worker/go.sum
+            cli/go.sum
+      - name: gofmt
+        run: test -z "$(gofmt -l coordinator worker cli | grep -v '\.pb\.go$' || true)"
+      - name: go vet + staticcheck
+        run: make lint
+
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache-dependency-path: |
+            coordinator/go.sum
+            worker/go.sum
+            cli/go.sum
+      - name: unit tests (race detector)
+        run: make test
+
+  integration:
+    # Needs Docker (preinstalled on ubuntu runners): brings up the real cluster
+    # and runs a job end to end.
+    runs-on: ubuntu-latest
+    needs: [unit]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache-dependency-path: |
+            coordinator/go.sum
+            worker/go.sum
+            cli/go.sum
+      - name: cluster up
+        run: make up
+      - name: end-to-end demo
+        run: make demo
+      - name: dump logs on failure
+        if: failure()
+        run: docker compose logs --no-color
+      - name: cluster down
+        if: always()
+        run: docker compose down -v
+
+  proto:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: bufbuild/buf-action@v1
+        with:
+          lint: false
+          format: false
+          breaking: ${{ github.event_name == 'pull_request' }}
+          breaking_against: "https://github.com/${{ github.repository }}.git#branch=main,subdir=."

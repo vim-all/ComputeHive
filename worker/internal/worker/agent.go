@@ -208,6 +208,7 @@ func (a *Agent) handleJob(ctx context.Context, job *domain.Job) error {
 	if strings.TrimSpace(job.ArtifactURL) != "" || strings.TrimSpace(job.ArtifactSHA256) != "" {
 		a.logger.Info("fetching artifact bundle", "job_id", job.ID, "artifact_url", job.ArtifactURL)
 		var err error
+		job.ArtifactURL = artifact.ResolveURL(job.ArtifactURL, a.cfg.CoordinatorHTTPURL)
 		bundle, err = a.fetcher.Fetch(jobCtx, *job)
 		if err != nil {
 			return a.publishFailedJob(ctx, *job, startedAt, err)

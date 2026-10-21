@@ -23,6 +23,9 @@ type Server struct {
 	scheduler *scheduler.Scheduler
 }
 
+// Redis exposes the Redis client for readiness probes.
+func (s *Server) Redis() *redis.Client { return s.redis }
+
 func NewServer(redisClient *redis.Client) *Server {
 	return &Server{
 		redis:     redisClient,

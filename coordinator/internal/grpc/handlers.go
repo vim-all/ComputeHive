@@ -3,6 +3,7 @@ package grpcserver
 import (
 	"context"
 	"log"
+	"sort"
 	"time"
 
 	"coordinator/internal/store"
@@ -248,8 +249,8 @@ func (s *Server) SubmitJob(ctx context.Context, req *pb.SubmitJobRequest) (*pb.S
 	if req.GetContainerImage() == "" {
 		return nil, status.Error(codes.InvalidArgument, "container_image is required")
 	}
-	if len(req.GetCommand()) == 0 {
-		return nil, status.Error(codes.InvalidArgument, "command is required")
+	if len(req.GetCommand()) == 0 && req.GetArtifactUrl() == "" {
+		return nil, status.Error(codes.InvalidArgument, "command is required unless an artifact (whose image CMD is used) is attached")
 	}
 	if req.GetRequiredResources() == nil {
 		return nil, status.Error(codes.InvalidArgument, "required_resources is required")
@@ -368,6 +369,48 @@ func (s *Server) GetJobResult(ctx context.Context, req *pb.GetJobResultRequest) 
 			FinishedAtUnix:  resultRecord.FinishedAtUnix,
 		},
 	}, nil
+}
+
+func (s *Server) ListWorkers(ctx context.Context, _ *pb.ListWorkersRequest) (*pb.ListWorkersResponse, error) {
+	ids, err := store.ListWorkers(ctx, s.redis)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "list workers: %v", err)
+	}
+	sort.Strings(ids)
+
+	assignments, err := store.ListJobWorkerAssignments(ctx, s.redis)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "list assignments: %v", err)
+	}
+	jobsByWorker := make(map[string][]*pb.JobID)
+	for jobID, workerID := range assignments {
+		jobsByWorker[workerID] = append(jobsByWorker[workerID], &pb.JobID{Value: jobID})
+	}
+
+	resp := &pb.ListWorkersResponse{}
+	for _, id := range ids {
+		rec, err := store.GetWorker(ctx, s.redis, id)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "get worker: %v", err)
+		}
+		if rec == nil {
+			continue
+		}
+		alive, err := store.IsWorkerAlive(ctx, s.redis, id)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "check worker liveness: %v", err)
+		}
+		resp.Workers = append(resp.Workers, &pb.WorkerInfo{
+			WorkerId:          &pb.WorkerID{Value: id},
+			Resources:         rec.AvailableResources,
+			Version:           rec.WorkerVersion,
+			Alive:             alive,
+			RegisteredAtUnix:  rec.RegisteredAtUnix,
+			LastHeartbeatUnix: rec.LastHeartbeatUnix,
+			RunningJobs:       jobsByWorker[id],
+		})
+	}
+	return resp, nil
 }
 
 func toPBOutputArtifacts(records []store.OutputArtifactRecord) []*pb.OutputArtifact {

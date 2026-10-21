@@ -180,10 +180,9 @@ func (s *Store) coordinator(ctx context.Context) (pb.WorkerServiceClient, string
 	defer s.mu.Unlock()
 
 	if s.coordinatorClient == nil {
-		dialCtx, cancel := context.WithTimeout(ctx, s.cfg.RedisDialTimeout)
-		defer cancel()
-
-		conn, err := grpc.DialContext(dialCtx, s.cfg.CoordinatorAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+		// NewClient connects lazily; an unreachable coordinator surfaces as an RPC
+		// error (and is retried by the agent loop) instead of blocking here.
+		conn, err := grpc.NewClient(s.cfg.CoordinatorAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 		if err != nil {
 			return nil, "", fmt.Errorf("dial coordinator: %w", err)
 		}

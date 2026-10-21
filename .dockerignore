@@ -1,0 +1,8 @@
+.git
+client
+docs
+bin
+**/node_modules
+**/target
+data
+.env

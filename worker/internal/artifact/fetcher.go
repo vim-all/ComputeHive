@@ -25,13 +25,13 @@ type Bundle struct {
 }
 
 type Fetcher struct {
-	client         *http.Client
-	maxBytes       int64
-	sigV4          *v4.Signer
-	sigV4Creds     aws.Credentials
-	sigV4Region    string
-	sigV4Service   string
-	signRequests   bool
+	client       *http.Client
+	maxBytes     int64
+	sigV4        *v4.Signer
+	sigV4Creds   aws.Credentials
+	sigV4Region  string
+	sigV4Service string
+	signRequests bool
 }
 
 func NewFetcher(timeout time.Duration, maxBytes int64) *Fetcher {

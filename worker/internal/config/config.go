@@ -3,6 +3,7 @@ package config
 import (
 	"flag"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 type Config struct {
 	WorkerID                string
 	CoordinatorAddr         string
+	CoordinatorHTTPURL      string
 	PollViaServer           bool
 	RedisAddr               string
 	RedisUsername           string
@@ -107,6 +109,8 @@ func parse(args []string, getenv func(string) string) (Config, error) {
 		cfg.S3SignRequests = strings.TrimSpace(cfg.S3AccessKeyID) != "" && strings.TrimSpace(cfg.S3SecretAccessKey) != ""
 	}
 
+	cfg.CoordinatorHTTPURL = envOr(getenv, "COORDINATOR_HTTP_URL", "")
+
 	if err := applyRedisURL(&cfg, envOr(getenv, "REDIS_URL", "")); err != nil {
 		return Config{}, err
 	}
@@ -120,6 +124,7 @@ func parse(args []string, getenv func(string) string) (Config, error) {
 	fs := flag.NewFlagSet("worker", flag.ContinueOnError)
 	fs.StringVar(&cfg.WorkerID, "worker-id", cfg.WorkerID, "Unique ID for this worker")
 	fs.StringVar(&cfg.CoordinatorAddr, "coordinator-addr", cfg.CoordinatorAddr, "Coordinator gRPC address used for job polling")
+	fs.StringVar(&cfg.CoordinatorHTTPURL, "coordinator-http-url", cfg.CoordinatorHTTPURL, "Coordinator HTTP base URL used to resolve computehive-artifact:// references")
 	fs.BoolVar(&cfg.PollViaServer, "poll-via-server", cfg.PollViaServer, "Poll jobs from coordinator server instead of Redis queue")
 	fs.StringVar(&cfg.RedisAddr, "redis-addr", cfg.RedisAddr, "Redis host:port")
 	fs.StringVar(&cfg.RedisUsername, "redis-username", cfg.RedisUsername, "Redis username (ACL)")
@@ -165,6 +170,13 @@ func parse(args []string, getenv func(string) string) (Config, error) {
 
 	if strings.TrimSpace(cfg.WorkerID) == "" {
 		return Config{}, fmt.Errorf("worker-id is required")
+	}
+	if strings.TrimSpace(cfg.CoordinatorHTTPURL) == "" {
+		host, _, err := net.SplitHostPort(cfg.CoordinatorAddr)
+		if err != nil {
+			return Config{}, fmt.Errorf("coordinator-addr %q must be host:port: %w", cfg.CoordinatorAddr, err)
+		}
+		cfg.CoordinatorHTTPURL = "http://" + net.JoinHostPort(host, "8080")
 	}
 	if cfg.PollViaServer && strings.TrimSpace(cfg.CoordinatorAddr) == "" {
 		return Config{}, fmt.Errorf("coordinator-addr is required when poll-via-server is enabled")

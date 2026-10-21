@@ -1,112 +1,142 @@
 # ComputeHive
 
-ComputeHive is a distributed compute prototype with three core pieces:
+ComputeHive is a self-hosted distributed task runner. You give it a directory with a
+`Dockerfile`; it builds the image, ships it to a worker, runs it in a container with
+`--network none`, and hands you the result.
 
-- a Go coordinator service that exposes gRPC APIs
-- a Go worker runtime that executes container jobs
-- a Tauri desktop client that builds/upload artifacts and submits jobs
+> **Status: under active hardening.** The end-to-end flow below works and is tested.
+> Scheduler guarantees (exactly-once assignment, requeue timing, zero loss), resource
+> limits, sandboxing and auth are being built phase by phase; see
+> [`docs/AUDIT.md`](docs/AUDIT.md) for what is and isn't backed by code today.
 
-## Monorepo Layout
+## Quickstart (about 5 minutes)
+
+Prerequisites: Docker (with Compose v2), Go 1.25+, `make`.
+
+```bash
+git clone <this repo> && cd ComputeHive
+make up        # Redis (AOF) + coordinator + 2 workers + Prometheus + Grafana
+make demo      # builds the CLI, submits examples/hello, prints its output
+```
+
+Expected tail of `make demo`:
+
+```text
+submitted job <uuid>
+status:    succeeded
+exit code: 0
+--- stdout (excerpt) ---
+hello from <container id> at <timestamp>
+```
+
+Then explore:
+
+```bash
+./bin/computehive workers                       # registered workers + liveness
+./bin/computehive submit examples/hello --wait  # your own job: any dir with a Dockerfile
+./bin/computehive status <job-id>
+./bin/computehive result <job-id> --wait
+make down                                       # stop (data volumes are kept)
+```
+
+| Endpoint | URL |
+|---|---|
+| Coordinator gRPC | `localhost:50051` |
+| Coordinator HTTP (artifacts, `/healthz`, `/readyz`) | `http://localhost:8080` |
+| Grafana (admin / admin) | `http://localhost:3000` |
+| Prometheus | `http://localhost:9090` |
+
+Redis is published on an ephemeral loopback port (`docker compose port redis 6379`)
+so it never clashes with a Redis you already run.
+
+## Monorepo layout
 
 ```text
 ComputeHive/
-├── client/                  # Tauri desktop app (Vite + TypeScript + Rust)
-├── coordinator/             # gRPC coordinator service (Go)
-├── worker/                  # Worker runtime (Go)
-├── shared/proto/            # Protobuf source contracts
-└── docker-compose.yml       # Reserved for local stack wiring (currently empty)
+├── cli/             # `computehive` CLI (Go) - same gRPC API as the desktop app
+├── client/          # Tauri desktop app (Vite + TypeScript + Rust)
+├── coordinator/     # gRPC + HTTP coordinator (Go)
+├── worker/          # worker runtime (Go)
+├── shared/proto/    # protobuf contracts (source of truth)
+├── deploy/          # Prometheus / Grafana provisioning
+├── examples/        # example jobs
+├── docs/            # AUDIT.md (and, as phases land, THREAT_MODEL / BENCHMARKS)
+├── docker-compose.yml
+└── Makefile
 ```
 
-## Component Overview
+## How it works
 
-### Coordinator (`coordinator/`)
+- **Coordinator** (`coordinator/`): `WorkerService` + `ClientService` over gRPC (`:50051`),
+  state in Redis, plus an HTTP server (`:8080`) with a content-addressed artifact store
+  (`PUT/GET /artifacts/<sha256>`) and `/healthz` / `/readyz`.
+- **Worker** (`worker/`): registers, heartbeats, pulls a job with `RequestJob`, downloads the
+  artifact and verifies its SHA-256, `docker load`s it, runs it with `--network none`, and
+  submits the result.
+- **CLI** (`cli/`): `submit` (build, `docker save`, hash, upload, `SubmitJob`), `status`, `result`,
+  `logs` (captured stdout/stderr excerpts), `workers`, and `worker join`.
+- **Desktop client** (`client/`): Tauri UI for the same flow, with a contributor mode that
+  starts a local worker.
 
-- Runs WorkerService and ClientService gRPC endpoints
-- Persists worker/job state in Redis
-- Schedules pending jobs to eligible workers
-- Requeues running jobs when a worker heartbeat expires
+Artifacts are referenced as `computehive-artifact://<sha256>`; each worker resolves that
+against its own coordinator HTTP address, so the same job works inside Compose, on a LAN,
+or behind NAT. `https://` artifact URLs (S3/R2, as used by the desktop client) still work.
 
-Default listener: `:50051`
-
-### Worker (`worker/`)
-
-- Registers itself with the coordinator
-- Sends periodic heartbeats with resource snapshots
-- Pulls jobs from coordinator `RequestJob`
-- Downloads and verifies artifacts when provided
-- Executes jobs using Docker and submits results via gRPC
-
-### Desktop Client (`client/`)
-
-- Builds Docker image from a selected project directory
-- Compresses and uploads the image artifact to object storage
-- Submits run requests to coordinator
-- Polls job result and shows execution output
-- Can start/stop a local worker process in contributor mode
-
-## gRPC Contracts
-
-Source files:
-
-- `shared/proto/worker.proto`
-- `shared/proto/client.proto`
-
-Services:
-
-- `compute.v1.WorkerService`
-  - `RegisterWorker`
-  - `Heartbeat`
-  - `RequestJob`
-  - `SubmitResult`
-- `compute.v1.ClientService`
-  - `SubmitJob`
-  - `GetJobStatus`
-  - `GetJobResult`
-
-## Prerequisites
-
-- Go 1.24+ (coordinator) and Go 1.25+ (worker)
-- Docker daemon and Docker CLI
-- Redis instance (cloud or local for worker/client experiments)
-- Node.js + pnpm (desktop client frontend)
-- Rust toolchain + Tauri system dependencies (desktop client)
-
-## Quick Start
-
-1. Start coordinator
+## Joining a worker from another machine
 
 ```bash
-cd coordinator
-export REDIS_ADDR="<redis-host>:<port>"
-export REDIS_PASSWORD="<redis-password>"
-export REDIS_DB=0
-export REDIS_TLS=true
-go run cmd/server/main.go
+make build
+./bin/computehive worker join --coordinator <coordinator-host>:50051
 ```
 
-2. Start worker
+`worker join` checks Docker, coordinator reachability and the worker binary, then runs the
+worker in the foreground. `--token` is accepted but **enrollment tokens are not enforced
+yet** (planned security phase); do not expose the coordinator to untrusted networks.
+
+## Make targets
+
+| Target | What it does |
+|---|---|
+| `make up` / `make down` / `make logs` | run the local cluster |
+| `make demo` | end-to-end job on the running cluster |
+| `make test` | unit tests with the race detector, all modules |
+| `make lint` | `go vet` + `staticcheck`, all modules |
+| `make build` | `bin/computehive`, `bin/computehive-worker`, `bin/computehive-coordinator` |
+| `make proto` | regenerate protobuf Go code |
+| `make chaos`, `make bench` | not implemented yet; they exit non-zero with a message |
+
+CI (`.github/workflows/ci.yml`) runs gofmt, `go vet`, `staticcheck`, `go test -race`, an
+integration job (`make up` + `make demo` on a Docker-equipped runner) and a `buf breaking`
+protobuf compatibility check on pull requests.
+
+## Configuration
+
+Coordinator (flags override env, env overrides `.env`): `REDIS_ADDR` (default `127.0.0.1:6379`),
+`REDIS_URL`, `REDIS_PASSWORD`, `REDIS_DB`, `REDIS_TLS`, `GRPC_PORT` (50051), `HTTP_PORT` (8080),
+`ARTIFACT_DIR`, `ARTIFACT_MAX_BYTES`. Invalid values fail at startup with a message naming the
+flag and env var. Worker: see [`worker/README.md`](worker/README.md); notable is
+`COORDINATOR_ADDR` and `COORDINATOR_HTTP_URL` (default `http://<coordinator host>:8080`).
+
+## Protocol
+
+`shared/proto/worker.proto` and `client.proto`. `WorkerService`: `RegisterWorker`, `Heartbeat`,
+`RequestJob`, `SubmitResult`. `ClientService`: `SubmitJob`, `GetJobStatus`, `GetJobResult`,
+`ListWorkers`. Changes are additive; CI rejects wire-breaking changes. Generated Go code is
+checked in under `coordinator/pkg/pb`.
+
+## Desktop client
 
 ```bash
-cd worker
-export COORDINATOR_ADDR="127.0.0.1:50051"
-go run ./cmd/worker
+cd client && pnpm install && pnpm tauri dev
 ```
 
-3. Start desktop client
+See [`client/README.md`](client/README.md). The desktop client is not exercised by CI.
 
-```bash
-cd client
-pnpm install
-pnpm tauri dev
-```
+## Known limitations (today)
 
-See component-specific setup in:
-
-- `client/README.md`
-- `worker/README.md`
-
-## Notes
-
-
-- `docker-compose.yml` is currently not wired.
-- Proto generation is checked in under `coordinator/pkg/pb` and `worker/pkg/pb`.
+- No authentication or TLS between components; run on a trusted network only.
+- Job containers have `--network none`, `--cpus` and `--memory`, but the full sandbox
+  hardening, resource-pressure limits and untrusted-code protections are not done yet.
+- Scheduling is first-come-first-served pull; requeue-on-failure exists but its timing and
+  exactly-once properties are not yet proven. See `docs/AUDIT.md`.
+- Metrics and the Grafana dashboard are not wired yet (Prometheus scrape target is down by design).

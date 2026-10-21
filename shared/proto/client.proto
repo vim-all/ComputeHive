@@ -47,7 +47,27 @@ message GetJobResultResponse {
   JobLifecycleStatus job_status = 5;
 }
 
+// Cluster-visible summary of a registered worker.
+message WorkerInfo {
+  WorkerID worker_id = 1;
+  ResourceSpec resources = 2;
+  string version = 3;
+  bool alive = 4;
+  int64 registered_at_unix = 5;
+  int64 last_heartbeat_unix = 6;
+  repeated JobID running_jobs = 7;
+}
+
+message ListWorkersRequest {}
+
+message ListWorkersResponse {
+  repeated WorkerInfo workers = 1;
+}
+
 service ClientService {
+  // Lists registered workers with liveness and assigned jobs.
+  rpc ListWorkers(ListWorkersRequest) returns (ListWorkersResponse);
+
   // Submits a new compute job to the coordinator.
   rpc SubmitJob(SubmitJobRequest) returns (SubmitJobResponse);
 

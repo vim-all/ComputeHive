@@ -1,0 +1,10 @@
+# Metrics endpoints are added in the observability phase; until then the
+# coordinator target shows as DOWN. This file is the scrape contract.
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: coordinator
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["coordinator:8080"]
