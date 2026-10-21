@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -15,12 +16,22 @@ import (
 	workeroutput "github.com/vim-all/ComputeHive/worker/internal/output"
 )
 
+// Failure reasons understood by the coordinator's retry policy.
+const (
+	ReasonJobExit = "job_exit" // the job's own failure: terminal
+	ReasonTimeout = "timeout"  // the job ran past its limit: terminal
+	ReasonInfra   = "infra"    // this worker could not run it: retried elsewhere
+	ReasonEvicted = "evicted"  // this worker is giving the job back: retried, attempt not burned
+)
+
+var errLeaseRevoked = errors.New("coordinator revoked this worker's lease on the job")
+
 type storeAPI interface {
 	PullJob(ctx context.Context) (*domain.Job, bool, error)
-	PublishHeartbeat(ctx context.Context, heartbeat domain.WorkerHeartbeat) error
-	PublishJobStatus(ctx context.Context, status domain.JobState) error
-	PublishAssignment(ctx context.Context, assignment domain.Assignment) error
-	PublishJobResult(ctx context.Context, result domain.JobResult) error
+	PublishHeartbeat(ctx context.Context, heartbeat domain.WorkerHeartbeat) ([]string, error)
+	ReportRunning(ctx context.Context, jobID string) error
+	PublishJobResult(ctx context.Context, result domain.JobResult) (string, error)
+	Forget(jobID string)
 }
 
 type fetcherAPI interface {
@@ -52,6 +63,7 @@ type Agent struct {
 	mu           sync.RWMutex
 	status       string
 	currentJobID string
+	abortCurrent context.CancelCauseFunc
 	currentCPU   int
 	currentMemMB int64
 	jobsDone     int64
@@ -74,14 +86,7 @@ func NewAgent(cfg config.Config, store storeAPI, fetcher fetcherAPI, reporter re
 }
 
 func (a *Agent) Run(ctx context.Context) error {
-	a.logger.Info(
-		"worker started",
-		"worker_id", a.cfg.WorkerID,
-		"redis_addr", a.cfg.RedisAddr,
-		"queue_key", a.cfg.QueueKey,
-		"poll_via_server", a.cfg.PollViaServer,
-		"coordinator_addr", a.cfg.CoordinatorAddr,
-	)
+	a.logger.Info("worker started", "worker_id", a.cfg.WorkerID, "coordinator_addr", a.cfg.CoordinatorAddr)
 
 	go a.heartbeatLoop(ctx)
 
@@ -98,23 +103,39 @@ func (a *Agent) Run(ctx context.Context) error {
 				return ctx.Err()
 			}
 			a.logger.Error("failed to pull job", "error", err)
-			time.Sleep(time.Second)
+			if !sleepCtx(ctx, time.Second) {
+				return ctx.Err()
+			}
 			continue
 		}
 		if !found {
 			now := time.Now().UTC()
-			if a.lastNoJobLog.IsZero() || now.Sub(a.lastNoJobLog) >= 15*time.Second {
+			if a.lastNoJobLog.IsZero() || now.Sub(a.lastNoJobLog) >= 60*time.Second {
 				a.logger.Info("no job available, continuing to poll")
 				a.lastNoJobLog = now
+			}
+			if !sleepCtx(ctx, a.cfg.PollInterval) {
+				return ctx.Err()
 			}
 			continue
 		}
 		a.lastNoJobLog = time.Time{}
-		a.logger.Info("job received", "job_id", job.ID, "image_ref", job.ImageRef)
+		a.logger.Info("job received", "job_id", job.ID, "attempt", job.Attempt, "image_ref", job.ImageRef)
 
 		if err := a.handleJob(ctx, job); err != nil {
 			a.logger.Error("job handling failed", "job_id", job.ID, "error", err)
 		}
+	}
+}
+
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
 	}
 }
 
@@ -123,7 +144,6 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 	defer ticker.Stop()
 
 	a.publishHeartbeat(ctx)
-
 	for {
 		select {
 		case <-ctx.Done():
@@ -135,10 +155,10 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 }
 
 func (a *Agent) publishHeartbeat(ctx context.Context) {
-	heartbeatCtx, cancel := context.WithTimeout(ctx, a.cfg.RedisIOTimeout+2*time.Second)
+	heartbeatCtx, cancel := context.WithTimeout(ctx, a.cfg.HeartbeatInterval+2*time.Second)
 	defer cancel()
 
-	status, _, cpuUsed, memoryUsed, jobsDone, jobsFailed := a.state()
+	status, currentJob, cpuUsed, memoryUsed, jobsDone, jobsFailed := a.state()
 	snapshot := a.reporter.Snapshot(heartbeatCtx)
 	heartbeat := domain.WorkerHeartbeat{
 		ID:     a.cfg.WorkerID,
@@ -148,102 +168,96 @@ func (a *Agent) publishHeartbeat(ctx context.Context) {
 			MemoryMB: snapshot.MemoryMB,
 			GPU:      snapshot.GPU,
 		},
-		CurrentLoad: domain.WorkerCurrentLoad{
-			CPUUsed:    cpuUsed,
-			MemoryUsed: memoryUsed,
-		},
+		CurrentLoad: domain.WorkerCurrentLoad{CPUUsed: cpuUsed, MemoryUsed: memoryUsed},
 		Capabilities: domain.WorkerCapabilities{
 			Docker:       snapshot.DockerAvailable,
 			GPUSupported: snapshot.GPUSupported,
 		},
 		LastHeartbeat: time.Now().UTC().Unix(),
-		Stats: domain.WorkerStats{
-			JobsCompleted: jobsDone,
-			JobsFailed:    jobsFailed,
-		},
+		Stats:         domain.WorkerStats{JobsCompleted: jobsDone, JobsFailed: jobsFailed},
+		MaxJobs:       1,
+	}
+	if currentJob != "" {
+		heartbeat.RunningJobs = []string{currentJob}
 	}
 
-	if err := a.store.PublishHeartbeat(heartbeatCtx, heartbeat); err != nil && heartbeatCtx.Err() == nil {
-		a.logger.Warn("failed to publish heartbeat", "error", err)
+	cancelIDs, err := a.store.PublishHeartbeat(heartbeatCtx, heartbeat)
+	if err != nil {
+		if heartbeatCtx.Err() == nil {
+			a.logger.Warn("failed to publish heartbeat", "error", err)
+		}
+		return
+	}
+	for _, id := range cancelIDs {
+		a.revoke(id)
+	}
+}
+
+// revoke aborts the running job if the coordinator says this worker no longer owns it
+// (it was requeued after a missed-heartbeat window, cancelled, or finished elsewhere).
+func (a *Agent) revoke(jobID string) {
+	a.mu.RLock()
+	current, abort := a.currentJobID, a.abortCurrent
+	a.mu.RUnlock()
+	if current == jobID && abort != nil {
+		a.logger.Warn("aborting job: lease revoked by coordinator", "job_id", jobID)
+		abort(errLeaseRevoked)
 	}
 }
 
 func (a *Agent) handleJob(ctx context.Context, job *domain.Job) error {
+	defer a.store.Forget(job.ID)
 	job.Normalize()
 	if err := job.Validate(); err != nil {
-		return a.publishInvalidJob(ctx, *job, err)
+		return a.publishFailedJob(ctx, *job, time.Now().UTC(), err, ReasonJobExit)
 	}
 
 	startedAt := time.Now().UTC()
-	a.setState(domain.WorkerStatusBusy, job.ID, normalizeCPUUsed(job.CPUCores), job.MemoryMB)
-	defer a.setState(domain.WorkerStatusAvailable, "", 0, 0)
-
-	assignedAt := startedAt
-	a.logger.Info("publishing assignment", "job_id", job.ID, "status", domain.AssignmentStatusAssigned)
-	if err := a.store.PublishAssignment(ctx, domain.Assignment{
-		JobID:    job.ID,
-		WorkerID: a.cfg.WorkerID,
-		Status:   domain.AssignmentStatusAssigned,
-	}); err != nil {
-		return fmt.Errorf("publish assignment status: %w", err)
-	}
-
-	a.logger.Info("starting job", "job_id", job.ID, "artifact_url", job.ArtifactURL, "image_ref", job.ImageRef)
-
-	preparingStatus := job.BuildState(domain.JobStatusAssigned, &assignedAt, nil, nil, nil)
-	if err := a.store.PublishJobStatus(ctx, preparingStatus); err != nil {
-		return fmt.Errorf("publish preparing status: %w", err)
-	}
+	jobCtx, abort := context.WithCancelCause(ctx)
+	defer abort(nil)
+	a.setState(domain.WorkerStatusBusy, job.ID, normalizeCPUUsed(job.CPUCores), job.MemoryMB, abort)
+	defer a.setState(domain.WorkerStatusAvailable, "", 0, 0, nil)
 
 	timeout := a.cfg.DefaultJobTimeout
 	if job.TimeoutSeconds > 0 {
 		timeout = time.Duration(job.TimeoutSeconds) * time.Second
 	}
-	a.logger.Info("job timeout selected", "job_id", job.ID, "timeout", timeout.String())
-
-	jobCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
+	runCtx, cancelRun := context.WithTimeout(jobCtx, timeout)
+	defer cancelRun()
+	a.logger.Info("starting job", "job_id", job.ID, "attempt", job.Attempt, "timeout", timeout.String())
 
 	bundle := artifact.Bundle{}
 	if strings.TrimSpace(job.ArtifactURL) != "" || strings.TrimSpace(job.ArtifactSHA256) != "" {
-		a.logger.Info("fetching artifact bundle", "job_id", job.ID, "artifact_url", job.ArtifactURL)
-		var err error
 		job.ArtifactURL = artifact.ResolveURL(job.ArtifactURL, a.cfg.CoordinatorHTTPURL)
-		bundle, err = a.fetcher.Fetch(jobCtx, *job)
+		var err error
+		bundle, err = a.fetcher.Fetch(runCtx, *job)
 		if err != nil {
-			return a.publishFailedJob(ctx, *job, startedAt, err)
+			return a.finishAborted(ctx, jobCtx, runCtx, *job, startedAt, err)
 		}
-		a.logger.Info("artifact bundle ready", "job_id", job.ID, "archive_path", bundle.ArchivePath, "size_bytes", bundle.SizeBytes)
+		a.logger.Info("artifact bundle ready", "job_id", job.ID, "size_bytes", bundle.SizeBytes)
 		defer func() {
 			if err := artifact.Cleanup(bundle); err != nil {
 				a.logger.Warn("failed to cleanup artifact bundle", "job_id", job.ID, "error", err)
 			}
 		}()
-	} else {
-		a.logger.Info("no artifact provided; running with existing image reference", "job_id", job.ID, "image_ref", job.ImageRef)
 	}
 
-	runningAt := time.Now().UTC()
-	runningStatus := job.BuildState(domain.JobStatusRunning, &assignedAt, &runningAt, nil, nil)
-	if err := a.store.PublishJobStatus(ctx, runningStatus); err != nil {
-		return fmt.Errorf("publish running status: %w", err)
+	if err := a.store.ReportRunning(runCtx, job.ID); err != nil && runCtx.Err() == nil {
+		a.logger.Warn("could not report running state", "job_id", job.ID, "error", err)
 	}
-	if err := a.store.PublishAssignment(ctx, domain.Assignment{
-		JobID:    job.ID,
-		WorkerID: a.cfg.WorkerID,
-		Status:   domain.AssignmentStatusRunning,
-	}); err != nil {
-		return fmt.Errorf("publish running assignment status: %w", err)
-	}
-	a.logger.Info("starting container execution", "job_id", job.ID, "image_ref", job.ImageRef)
 
-	result := a.executor.Run(jobCtx, *job, bundle)
+	result := a.executor.Run(runCtx, *job, bundle)
 	if cleanupDir := strings.TrimSpace(result.CleanupDir); cleanupDir != "" {
 		defer func() {
 			if err := os.RemoveAll(cleanupDir); err != nil {
 				a.logger.Warn("failed to cleanup job output directory", "job_id", job.ID, "path", cleanupDir, "error", err)
 			}
 		}()
+	}
+
+	// Never report on behalf of a lease we lost, or while shutting down.
+	if jobCtx.Err() != nil {
+		return a.finishAborted(ctx, jobCtx, runCtx, *job, startedAt, nil)
 	}
 
 	if strings.TrimSpace(result.Status) == "" {
@@ -255,13 +269,24 @@ func (a *Agent) handleJob(ctx context.Context, job *domain.Job) error {
 	if result.WorkerID == "" {
 		result.WorkerID = a.cfg.WorkerID
 	}
-	if a.outputs != nil {
-		outputDir := strings.TrimSpace(result.OutputDirHostPath)
-		if outputDir != "" {
-			uploadResult, err := a.outputs.CollectAndUpload(jobCtx, job.ID, outputDir)
+	if result.Status != domain.JobStatusSucceeded && result.FailureReason == "" {
+		switch {
+		case errors.Is(runCtx.Err(), context.DeadlineExceeded):
+			result.FailureReason = ReasonTimeout
+		case result.ExitCode > 0:
+			result.FailureReason = ReasonJobExit
+		default:
+			result.FailureReason = ReasonInfra
+		}
+	}
+
+	if a.outputs != nil && result.Status == domain.JobStatusSucceeded {
+		if outputDir := strings.TrimSpace(result.OutputDirHostPath); outputDir != "" {
+			uploadResult, err := a.outputs.CollectAndUpload(runCtx, job.ID, outputDir)
 			if err != nil {
 				result.Error = combineErrors(result.Error, "collect job outputs: "+err.Error())
 				result.Status = domain.JobStatusFailed
+				result.FailureReason = ReasonInfra
 				if result.ExitCode == 0 {
 					result.ExitCode = -1
 				}
@@ -275,20 +300,39 @@ func (a *Agent) handleJob(ctx context.Context, job *domain.Job) error {
 		}
 	}
 
-	if err := a.store.PublishJobResult(ctx, result); err != nil {
+	disposition, err := a.store.PublishJobResult(ctx, result)
+	if err != nil {
 		return fmt.Errorf("publish job result: %w", err)
 	}
-	a.logger.Info("job result published", "job_id", job.ID, "status", result.Status, "duration_ms", result.DurationMillis)
 	a.recordResult(result.Status)
-
-	finishedAt := result.FinishedAt
-	finalStatus := job.BuildState(result.Status, &assignedAt, &runningAt, &finishedAt, &result)
-	if err := a.store.PublishJobStatus(ctx, finalStatus); err != nil {
-		return fmt.Errorf("publish final job status: %w", err)
-	}
-
-	a.logger.Info("finished job", "job_id", job.ID, "status", result.Status, "exit_code", result.ExitCode)
+	a.logger.Info("job result published", "job_id", job.ID, "status", result.Status, "reason", result.FailureReason,
+		"exit_code", result.ExitCode, "duration_ms", result.DurationMillis, "disposition", disposition)
 	return nil
+}
+
+// finishAborted handles an attempt that ended without a result of its own making:
+// a fetch/setup error, lease revocation, or worker shutdown.
+func (a *Agent) finishAborted(parent, jobCtx, runCtx context.Context, job domain.Job, startedAt time.Time, cause error) error {
+	switch {
+	case errors.Is(context.Cause(jobCtx), errLeaseRevoked):
+		a.logger.Warn("job aborted, result discarded", "job_id", job.ID, "reason", "lease_revoked")
+		return nil
+	case parent.Err() != nil:
+		// Shutting down: hand the job straight back (no attempt burned) rather than
+		// making the coordinator wait out the heartbeat window.
+		giveBack, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		err := a.publishFailedJob(giveBack, job, startedAt, errors.New("worker shutting down"), ReasonEvicted)
+		a.logger.Info("job handed back during shutdown", "job_id", job.ID, "error", err)
+		return nil
+	case errors.Is(runCtx.Err(), context.DeadlineExceeded):
+		return a.publishFailedJob(parent, job, startedAt, errors.New("job exceeded its runtime limit"), ReasonTimeout)
+	default:
+		if cause == nil {
+			cause = errors.New("job aborted")
+		}
+		return a.publishFailedJob(parent, job, startedAt, cause, ReasonInfra)
+	}
 }
 
 func combineErrors(existing, next string) string {
@@ -304,8 +348,8 @@ func combineErrors(existing, next string) string {
 	}
 }
 
-func (a *Agent) publishFailedJob(ctx context.Context, job domain.Job, startedAt time.Time, taskErr error) error {
-	a.logger.Error("job failed before execution completion", "job_id", job.ID, "error", taskErr)
+func (a *Agent) publishFailedJob(ctx context.Context, job domain.Job, startedAt time.Time, taskErr error, reason string) error {
+	a.logger.Error("job attempt failed", "job_id", job.ID, "reason", reason, "error", taskErr)
 	finishedAt := time.Now().UTC()
 	result := domain.JobResult{
 		JobID:          job.ID,
@@ -318,49 +362,22 @@ func (a *Agent) publishFailedJob(ctx context.Context, job domain.Job, startedAt 
 		ImageRef:       job.ImageRef,
 		ArtifactSHA256: job.ArtifactSHA256,
 		Error:          taskErr.Error(),
+		Stderr:         taskErr.Error(),
+		FailureReason:  reason,
 	}
-	if err := a.store.PublishJobResult(ctx, result); err != nil {
+	if _, err := a.store.PublishJobResult(ctx, result); err != nil {
 		return err
 	}
 	a.recordResult(domain.JobStatusFailed)
-
-	status := job.BuildState(domain.JobStatusFailed, &startedAt, &startedAt, &finishedAt, &result)
-	return a.store.PublishJobStatus(ctx, status)
+	return nil
 }
 
-func (a *Agent) publishInvalidJob(ctx context.Context, job domain.Job, validationErr error) error {
-	a.logger.Error("invalid job payload", "job_id", job.ID, "error", validationErr)
-	if strings.TrimSpace(job.ID) == "" {
-		return validationErr
-	}
-
-	now := time.Now().UTC()
-	result := domain.JobResult{
-		JobID:          job.ID,
-		WorkerID:       a.cfg.WorkerID,
-		Status:         domain.JobStatusFailed,
-		StartedAt:      now,
-		FinishedAt:     now,
-		DurationMillis: 0,
-		ExitCode:       -1,
-		ImageRef:       job.ImageRef,
-		ArtifactSHA256: job.ArtifactSHA256,
-		Error:          validationErr.Error(),
-	}
-	if err := a.store.PublishJobResult(ctx, result); err != nil {
-		return err
-	}
-	a.recordResult(domain.JobStatusFailed)
-
-	status := job.BuildState(domain.JobStatusFailed, &now, nil, &now, &result)
-	return a.store.PublishJobStatus(ctx, status)
-}
-
-func (a *Agent) setState(status, currentJobID string, cpuUsed int, memoryUsedMB int64) {
+func (a *Agent) setState(status, currentJobID string, cpuUsed int, memoryUsedMB int64, abort context.CancelCauseFunc) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.status = status
 	a.currentJobID = currentJobID
+	a.abortCurrent = abort
 	a.currentCPU = max(cpuUsed, 0)
 	a.currentMemMB = maxInt64(memoryUsedMB, 0)
 }

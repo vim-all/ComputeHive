@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -64,6 +65,7 @@ func (e *DockerExecutor) Run(ctx context.Context, job domain.Job, bundle artifac
 		loadStdout, loadStderr, err := e.runDockerCommand(ctx, "load", "-i", bundle.ArchivePath)
 		if err != nil {
 			result.Error = "docker load failed: " + err.Error()
+			result.FailureReason = domain.FailureInfra
 			result.Stdout = loadStdout
 			result.Stderr = loadStderr
 			result.FinishedAt = time.Now().UTC()
@@ -74,6 +76,7 @@ func (e *DockerExecutor) Run(ctx context.Context, job domain.Job, bundle artifac
 
 		if _, _, err := e.runDockerCommand(ctx, "image", "inspect", job.ImageRef); err != nil {
 			result.Error = "loaded archive does not contain expected image_ref: " + job.ImageRef
+			result.FailureReason = domain.FailureInfra
 			result.Stdout = loadStdout
 			result.FinishedAt = time.Now().UTC()
 			result.DurationMillis = result.FinishedAt.Sub(startedAt).Milliseconds()
@@ -84,6 +87,7 @@ func (e *DockerExecutor) Run(ctx context.Context, job domain.Job, bundle artifac
 	args, err := e.buildRunArgs(job, outputRoot)
 	if err != nil {
 		result.Error = err.Error()
+		result.FailureReason = domain.FailureInfra
 		result.FinishedAt = time.Now().UTC()
 		result.DurationMillis = result.FinishedAt.Sub(startedAt).Milliseconds()
 		return result
@@ -95,16 +99,38 @@ func (e *DockerExecutor) Run(ctx context.Context, job domain.Job, bundle artifac
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
+	name := containerName(e.workerID, job.ID)
+	e.forceRemove(name) // a leftover from an earlier attempt would make `docker run --name` fail
+
 	runErr := cmd.Run()
 	result.Stdout = stdout.String()
 	result.Stderr = stderr.String()
 	result.FinishedAt = time.Now().UTC()
 	result.DurationMillis = result.FinishedAt.Sub(startedAt).Milliseconds()
 
+	// Cancelling the context only kills the `docker run` client; the container keeps
+	// running unless we remove it ourselves (timeouts, lease revocation, shutdown).
+	if ctx.Err() != nil {
+		e.forceRemove(name)
+	}
+
 	if runErr != nil {
 		result.Error = runErr.Error()
-		if exitErr, ok := runErr.(*exec.ExitError); ok {
+		switch exitErr := runErr.(type) {
+		case *exec.ExitError:
 			result.ExitCode = exitErr.ExitCode()
+			switch {
+			case errors.Is(ctx.Err(), context.DeadlineExceeded):
+				result.FailureReason = domain.FailureTimeout
+			case ctx.Err() != nil:
+				result.FailureReason = domain.FailureEvicted
+			case result.ExitCode == 125: // docker itself failed (daemon error, bad flags), not the job
+				result.FailureReason = domain.FailureInfra
+			default:
+				result.FailureReason = domain.FailureJobExit
+			}
+		default: // the docker CLI could not even start
+			result.FailureReason = domain.FailureInfra
 		}
 		return result
 	}
@@ -178,6 +204,13 @@ func (e *DockerExecutor) runDockerCommand(ctx context.Context, args ...string) (
 
 	err := cmd.Run()
 	return stdout.String(), stderr.String(), err
+}
+
+// forceRemove kills and removes a container by name, ignoring "no such container".
+func (e *DockerExecutor) forceRemove(name string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, _, _ = e.runDockerCommand(ctx, "rm", "-f", name)
 }
 
 func (e *DockerExecutor) cleanupImage(imageRef string) {

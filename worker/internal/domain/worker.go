@@ -25,6 +25,11 @@ type WorkerHeartbeat struct {
 	Capabilities  WorkerCapabilities `json:"capabilities"`
 	LastHeartbeat int64              `json:"last_heartbeat"`
 	Stats         WorkerStats        `json:"stats"`
+
+	RunningJobs []string `json:"running_jobs,omitempty"`
+	Overloaded  bool     `json:"overloaded,omitempty"`
+	Draining    bool     `json:"draining,omitempty"`
+	MaxJobs     int      `json:"max_jobs,omitempty"`
 }
 
 type WorkerResources struct {

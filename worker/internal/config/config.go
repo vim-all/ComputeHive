@@ -31,6 +31,7 @@ type Config struct {
 	HeartbeatInterval       time.Duration
 	HeartbeatTTL            time.Duration
 	PollTimeout             time.Duration
+	PollInterval            time.Duration // idle wait between RequestJob calls when the queue is empty
 	DefaultJobTimeout       time.Duration
 	ResultTTL               time.Duration
 	RedisDialTimeout        time.Duration
@@ -81,7 +82,8 @@ func parse(args []string, getenv func(string) string) (Config, error) {
 		JobKeyPrefix:            envOr(getenv, "JOB_KEY_PREFIX", "computehive:jobs"),
 		WorkerEventsChannel:     envOr(getenv, "WORKER_EVENTS_CHANNEL", "computehive:events:workers"),
 		JobEventsChannel:        envOr(getenv, "JOB_EVENTS_CHANNEL", "computehive:events:jobs"),
-		HeartbeatInterval:       envDuration(getenv, "HEARTBEAT_INTERVAL", 5*time.Second),
+		HeartbeatInterval:       envDuration(getenv, "HEARTBEAT_INTERVAL", 2*time.Second),
+		PollInterval:            envDuration(getenv, "POLL_INTERVAL", 500*time.Millisecond),
 		HeartbeatTTL:            envDuration(getenv, "HEARTBEAT_TTL", 15*time.Second),
 		PollTimeout:             envDuration(getenv, "POLL_TIMEOUT", 5*time.Second),
 		DefaultJobTimeout:       envDuration(getenv, "DEFAULT_JOB_TIMEOUT", 30*time.Minute),
@@ -138,6 +140,7 @@ func parse(args []string, getenv func(string) string) (Config, error) {
 	fs.StringVar(&cfg.WorkerEventsChannel, "worker-events-channel", cfg.WorkerEventsChannel, "Redis pub/sub channel for worker events")
 	fs.StringVar(&cfg.JobEventsChannel, "job-events-channel", cfg.JobEventsChannel, "Redis pub/sub channel for job events")
 	fs.DurationVar(&cfg.HeartbeatInterval, "heartbeat-interval", cfg.HeartbeatInterval, "How often the worker sends heartbeats")
+	fs.DurationVar(&cfg.PollInterval, "poll-interval", cfg.PollInterval, "Idle wait between job requests when the queue is empty")
 	fs.DurationVar(&cfg.HeartbeatTTL, "heartbeat-ttl", cfg.HeartbeatTTL, "TTL for worker heartbeat records")
 	fs.DurationVar(&cfg.PollTimeout, "poll-timeout", cfg.PollTimeout, "Blocking timeout while waiting for jobs")
 	fs.DurationVar(&cfg.DefaultJobTimeout, "default-job-timeout", cfg.DefaultJobTimeout, "Fallback timeout for jobs without their own timeout")
@@ -192,6 +195,9 @@ func parse(args []string, getenv func(string) string) (Config, error) {
 	}
 	if cfg.HeartbeatTTL < cfg.HeartbeatInterval {
 		cfg.HeartbeatTTL = 3 * cfg.HeartbeatInterval
+	}
+	if cfg.PollInterval <= 0 {
+		return Config{}, fmt.Errorf("poll-interval must be > 0")
 	}
 	if cfg.PollTimeout <= 0 {
 		return Config{}, fmt.Errorf("poll-timeout must be > 0")

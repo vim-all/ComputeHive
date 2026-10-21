@@ -132,11 +132,29 @@ cd client && pnpm install && pnpm tauri dev
 
 See [`client/README.md`](client/README.md). The desktop client is not exercised by CI.
 
+## Reliability guarantees (and how they are tested)
+
+| Guarantee | Mechanism | Test |
+|---|---|---|
+| A job is assigned to exactly one worker | one atomic Lua script moves it from pending to leased | `TestConcurrentClaimNeverDoubleAssigns` |
+| FIFO, preserved on retry | pending set scored by the job's original sequence number | `TestRequeueKeepsFIFOPositionAndCountsAttempt` |
+| Dead workers' jobs are requeued in under 15s | 2s heartbeats, dead after 6s, reaper every 1s (about 7s worst case) | `TestWorkerKilledMidJobIsRequeuedUnder15s...`, `scripts/chaos-cluster.sh` |
+| A late result from a presumed-dead worker cannot corrupt state | per-attempt lease tokens; stale and duplicate results are discarded | `TestPartitionedWorkerNeverCommitsOverRequeuedJob` |
+| No job lost or run to completion twice | all state in Redis (AOF); stateless coordinator | `TestCoordinatorCrashAndRestartLosesNothing`, `TestRedisRestartKeepsState`, `TestThousandJobsWithRandomWorkerKills` |
+| Lost assignment replies are recovered | heartbeat reconciliation of unreported leases | `TestLostClaimReplyIsReconciledByHeartbeat` |
+
+Retries: a job's own failure (non-zero exit, timeout) is terminal; infrastructure failures are retried with exponential backoff
+up to `MAX_ATTEMPTS` (default 3), after which the job is parked as `DEAD`. Evictions do not count against the job.
+Run the fault-injection suite yourself with `make chaos`. Design rationale: [`docs/decisions.md`](docs/decisions.md).
+
+Note: "exactly once" means **committed** exactly once. A worker killed mid-job means the job body may run again elsewhere, so
+jobs should be safe to re-run (idempotent) or write only to their output directory.
+
 ## Known limitations (today)
 
 - No authentication or TLS between components; run on a trusted network only.
 - Job containers have `--network none`, `--cpus` and `--memory`, but the full sandbox
   hardening, resource-pressure limits and untrusted-code protections are not done yet.
-- Scheduling is first-come-first-served pull; requeue-on-failure exists but its timing and
-  exactly-once properties are not yet proven. See `docs/AUDIT.md`.
+- Scheduling is first-come-first-served pull with capability filtering (no best-fit scoring yet).
+- Single-node Redis only (the Lua scripts address keys dynamically; Redis Cluster would need hash tags).
 - Metrics and the Grafana dashboard are not wired yet (Prometheus scrape target is down by design).

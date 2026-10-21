@@ -34,7 +34,8 @@ Usage:
 
 Commands:
   submit <dir>      Build <dir> (Dockerfile) into an image, upload it, submit a job
-  status <job-id>   Show job state and assigned worker
+  status <job-id>   Show job state, attempt, queue position and assigned worker
+  cancel <job-id>   Cancel a queued or running job
   result <job-id>   Show the job result (exit code, output excerpts)
   logs <job-id>     Show captured stdout/stderr excerpts of a finished job
   workers           List registered workers
@@ -89,6 +90,8 @@ func run(args []string, out, errOut io.Writer) int {
 		err = cmdSubmit(ctx, g, rest[1:], out)
 	case "status":
 		err = withClient(g, func(c pb.ClientServiceClient) error { return cmdStatus(ctx, c, rest[1:], out) })
+	case "cancel":
+		err = withClient(g, func(c pb.ClientServiceClient) error { return cmdCancel(ctx, c, rest[1:], out) })
 	case "result":
 		err = withClient(g, func(c pb.ClientServiceClient) error { return cmdResult(ctx, c, rest[1:], out, false) })
 	case "logs":
@@ -140,7 +143,28 @@ func cmdStatus(ctx context.Context, c pb.ClientServiceClient, args []string, out
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "job:    %s\nstatus: %s\nworker: %s\n", id, shortStatus(resp.GetStatus()), orDash(resp.GetAssignedWorkerId()))
+	fmt.Fprintf(out, "job:      %s\nstatus:   %s\nworker:   %s\nattempt:  %d of %d\nqueue #:  %d\n",
+		id, shortStatus(resp.GetStatus()), orDash(resp.GetAssignedWorkerId()), resp.GetAttempt(), resp.GetMaxAttempts(), resp.GetQueueSeq())
+	if resp.GetLastFailure() != "" {
+		fmt.Fprintf(out, "last failure: %s\n", resp.GetLastFailure())
+	}
+	return nil
+}
+
+func cmdCancel(ctx context.Context, c pb.ClientServiceClient, args []string, out io.Writer) error {
+	id, err := jobIDArg(args, "cancel")
+	if err != nil {
+		return err
+	}
+	resp, err := c.CancelJob(ctx, &pb.CancelJobRequest{JobId: &pb.JobID{Value: id}})
+	if err != nil {
+		return err
+	}
+	if resp.GetDisposition() == "duplicate" {
+		fmt.Fprintf(out, "job %s had already finished; nothing to cancel\n", id)
+		return nil
+	}
+	fmt.Fprintf(out, "job %s canceled\n", id)
 	return nil
 }
 
@@ -175,10 +199,15 @@ func cmdResult(ctx context.Context, c pb.ClientServiceClient, args []string, out
 		if err != nil {
 			return err
 		}
-		terminal := resp.GetStatus() == pb.Status_STATUS_SUCCEEDED || resp.GetStatus() == pb.Status_STATUS_FAILED || resp.GetStatus() == pb.Status_STATUS_CANCELED
+		terminal := resp.GetStatus() == pb.Status_STATUS_SUCCEEDED || resp.GetStatus() == pb.Status_STATUS_FAILED ||
+			resp.GetStatus() == pb.Status_STATUS_CANCELED || resp.GetStatus() == pb.Status_STATUS_DEAD
 		if resp.GetResultAvailable() && (terminal || !*wait) {
 			printResult(out, id, resp, logsOnly)
 			return nil
+		}
+		if terminal { // DEAD / CANCELED jobs finish without a result
+			fmt.Fprintf(out, "job %s ended: %s (no result; see `computehive status %s`)\n", id, shortStatus(resp.GetStatus()), id)
+			return errNonSuccess
 		}
 		if !*wait {
 			fmt.Fprintf(out, "job %s: %s (no result yet)\n", id, shortStatus(resp.GetStatus()))
@@ -344,6 +373,8 @@ func cmdSubmit(ctx context.Context, g globals, args []string, out io.Writer) err
 		return cmdResult(ctx, c, []string{id, "--wait"}, out, false)
 	})
 }
+
+var errNonSuccess = errors.New("job did not succeed")
 
 type multiFlag []string
 

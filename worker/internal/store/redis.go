@@ -1,3 +1,5 @@
+// Package store is the worker's client for the coordinator's WorkerService.
+// (The file name is historical: the worker no longer talks to Redis directly.)
 package store
 
 import (
@@ -15,123 +17,231 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+// Store talks to the coordinator. The worker's identity is its configured WorkerID,
+// so it keeps the same identity across restarts and reconnects.
 type Store struct {
 	cfg config.Config
 
-	mu                  sync.Mutex
-	coordinatorConn     *grpc.ClientConn
-	coordinatorClient   pb.WorkerServiceClient
-	coordinatorWorkerID string
+	mu         sync.Mutex
+	conn       *grpc.ClientConn
+	client     pb.WorkerServiceClient
+	registered bool
+	leases     map[string]string // jobID -> lease token of the attempt this worker holds
+	lastRes    *pb.ResourceSpec  // last resources announced, reused when re-registering
 }
 
 func New(cfg config.Config) *Store {
-	return &Store{cfg: cfg}
+	return &Store{cfg: cfg, leases: make(map[string]string)}
 }
 
+// Close releases the connection.
+func (s *Store) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.conn != nil {
+		return s.conn.Close()
+	}
+	return nil
+}
+
+func (s *Store) connect() (pb.WorkerServiceClient, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.client == nil {
+		// NewClient connects lazily; an unreachable coordinator surfaces as an RPC
+		// error (and is retried by the agent loop) instead of blocking here.
+		conn, err := grpc.NewClient(s.cfg.CoordinatorAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			return nil, fmt.Errorf("dial coordinator: %w", err)
+		}
+		s.conn = conn
+		s.client = pb.NewWorkerServiceClient(conn)
+	}
+	return s.client, nil
+}
+
+func (s *Store) workerID() *pb.WorkerID { return &pb.WorkerID{Value: s.cfg.WorkerID} }
+
+// register (re)announces this worker under its stable ID.
+func (s *Store) register(ctx context.Context, client pb.WorkerServiceClient, res *pb.ResourceSpec) error {
+	s.mu.Lock()
+	if res == nil {
+		res = s.lastRes
+	} else {
+		s.lastRes = res
+	}
+	s.mu.Unlock()
+	resp, err := client.RegisterWorker(ctx, &pb.RegisterWorkerRequest{
+		AvailableResources: res,
+		WorkerVersion:      s.cfg.Version,
+		WorkerId:           s.cfg.WorkerID,
+		MaxJobs:            1,
+	})
+	if err != nil {
+		return fmt.Errorf("register worker %s: %w", s.cfg.WorkerID, err)
+	}
+	if got := resp.GetWorkerId().GetValue(); got != s.cfg.WorkerID {
+		return fmt.Errorf("coordinator assigned id %q, wanted %q", got, s.cfg.WorkerID)
+	}
+	s.mu.Lock()
+	s.registered = true
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *Store) ensureRegistered(ctx context.Context, client pb.WorkerServiceClient) error {
+	s.mu.Lock()
+	ok := s.registered
+	s.mu.Unlock()
+	if ok {
+		return nil
+	}
+	return s.register(ctx, client, nil)
+}
+
+func (s *Store) unregistered() {
+	s.mu.Lock()
+	s.registered = false
+	s.mu.Unlock()
+}
+
+// PullJob asks the coordinator for the next job. The returned job carries the lease
+// token that must accompany every report about it.
 func (s *Store) PullJob(ctx context.Context) (*domain.Job, bool, error) {
-	client, workerID, err := s.coordinator(ctx)
+	client, err := s.connect()
 	if err != nil {
 		return nil, false, err
 	}
-
-	requestCtx, cancel := context.WithTimeout(ctx, s.cfg.PollTimeout+s.cfg.RedisIOTimeout)
+	reqCtx, cancel := context.WithTimeout(ctx, s.cfg.PollTimeout+s.cfg.RedisIOTimeout)
 	defer cancel()
 
-	response, err := client.RequestJob(requestCtx, &pb.RequestJobRequest{
-		WorkerId: &pb.WorkerID{Value: workerID},
-	})
-	if isNotFound(err) {
-		newWorkerID, registerErr := s.reRegister(requestCtx)
-		if registerErr != nil {
-			return nil, false, fmt.Errorf("request job from coordinator: worker re-register failed: %w", registerErr)
+	if err := s.ensureRegistered(reqCtx, client); err != nil {
+		return nil, false, err
+	}
+	resp, err := client.RequestJob(reqCtx, &pb.RequestJobRequest{WorkerId: s.workerID()})
+	if isNotFound(err) { // coordinator forgot us (e.g. we were declared dead): rejoin under the same ID
+		s.unregistered()
+		if err := s.ensureRegistered(reqCtx, client); err != nil {
+			return nil, false, err
 		}
-		response, err = client.RequestJob(requestCtx, &pb.RequestJobRequest{
-			WorkerId: &pb.WorkerID{Value: newWorkerID},
-		})
+		resp, err = client.RequestJob(reqCtx, &pb.RequestJobRequest{WorkerId: s.workerID()})
 	}
 	if err != nil {
 		return nil, false, fmt.Errorf("request job from coordinator: %w", err)
 	}
-	if !response.GetHasJob() || response.GetJob() == nil {
+	if !resp.GetHasJob() || resp.GetJob() == nil {
 		return nil, false, nil
 	}
 
-	jobMessage := response.GetJob()
-	resources := jobMessage.GetRequiredResources()
+	m := resp.GetJob()
+	res := m.GetRequiredResources()
 	job := &domain.Job{
-		ID:             strings.TrimSpace(jobMessage.GetJobId().GetValue()),
+		ID:             strings.TrimSpace(m.GetJobId().GetValue()),
 		Status:         domain.JobStatusAssigned,
-		ImageRef:       strings.TrimSpace(jobMessage.GetContainerImage()),
-		Command:        append([]string(nil), jobMessage.GetCommand()...),
-		Env:            cloneStringMap(jobMessage.GetEnvironment()),
-		CreatedAtUnix:  jobMessage.GetCreatedAtUnix(),
-		TimeoutSeconds: int(jobMessage.GetMaxRuntimeSeconds()),
-		ArtifactURL:    strings.TrimSpace(jobMessage.GetArtifactUrl()),
-		ArtifactSHA256: strings.TrimSpace(jobMessage.GetArtifactSha256()),
+		ImageRef:       strings.TrimSpace(m.GetContainerImage()),
+		Command:        append([]string(nil), m.GetCommand()...),
+		Env:            cloneStringMap(m.GetEnvironment()),
+		CreatedAtUnix:  m.GetCreatedAtUnix(),
+		TimeoutSeconds: int(m.GetMaxRuntimeSeconds()),
+		ArtifactURL:    strings.TrimSpace(m.GetArtifactUrl()),
+		ArtifactSHA256: strings.TrimSpace(m.GetArtifactSha256()),
+		Attempt:        int(m.GetAttempt()),
+		LeaseToken:     m.GetLeaseToken(),
 	}
-	if resources != nil {
-		job.CPUCores = float64(resources.GetCpuCores())
-		job.MemoryMB = int64(resources.GetMemoryMb())
-		job.GPU = resources.GetGpuCount() > 0
+	if res != nil {
+		job.CPUCores = float64(res.GetCpuCores())
+		job.MemoryMB = int64(res.GetMemoryMb())
+		job.GPU = res.GetGpuCount() > 0
 	}
-
+	s.mu.Lock()
+	s.leases[job.ID] = job.LeaseToken
+	s.mu.Unlock()
 	return job, true, nil
 }
 
-func (s *Store) PublishHeartbeat(ctx context.Context, heartbeat domain.WorkerHeartbeat) error {
-	client, workerID, err := s.coordinator(ctx)
+// PublishHeartbeat reports liveness, capacity and running jobs. It returns the jobs
+// the coordinator says this worker no longer owns, which it must abort.
+func (s *Store) PublishHeartbeat(ctx context.Context, hb domain.WorkerHeartbeat) ([]string, error) {
+	client, err := s.connect()
 	if err != nil {
-		return err
+		return nil, err
 	}
-
-	_, err = client.Heartbeat(ctx, &pb.HeartbeatRequest{
-		WorkerId: &pb.WorkerID{Value: workerID},
-		AvailableResources: &pb.ResourceSpec{
-			CpuCores: int32(heartbeat.Resources.CPUCores),
-			MemoryMb: int32(heartbeat.Resources.MemoryMB),
-			GpuCount: boolToGPUCount(heartbeat.Resources.GPU),
-		},
-	})
+	res := &pb.ResourceSpec{
+		CpuCores: int32(hb.Resources.CPUCores),
+		MemoryMb: int32(hb.Resources.MemoryMB),
+		GpuCount: boolToGPUCount(hb.Resources.GPU),
+	}
+	if err := s.ensureRegistered(ctx, client); err != nil {
+		return nil, err
+	}
+	req := &pb.HeartbeatRequest{
+		WorkerId:           s.workerID(),
+		AvailableResources: res,
+		Overloaded:         hb.Overloaded,
+		Draining:           hb.Draining,
+		MaxJobs:            int32(max(hb.MaxJobs, 1)),
+	}
+	for _, id := range hb.RunningJobs {
+		req.RunningJobs = append(req.RunningJobs, &pb.JobID{Value: id})
+	}
+	resp, err := client.Heartbeat(ctx, req)
 	if isNotFound(err) {
-		if _, registerErr := s.reRegister(ctx); registerErr != nil {
-			return fmt.Errorf("publish coordinator heartbeat: worker re-register failed: %w", registerErr)
+		if err := s.register(ctx, client, res); err != nil {
+			return nil, err
 		}
-		_, err = client.Heartbeat(ctx, &pb.HeartbeatRequest{
-			WorkerId: &pb.WorkerID{Value: s.coordinatorWorkerID},
-			AvailableResources: &pb.ResourceSpec{
-				CpuCores: int32(heartbeat.Resources.CPUCores),
-				MemoryMb: int32(heartbeat.Resources.MemoryMB),
-				GpuCount: boolToGPUCount(heartbeat.Resources.GPU),
-			},
-		})
+		resp, err = client.Heartbeat(ctx, req)
 	}
 	if err != nil {
-		return fmt.Errorf("publish coordinator heartbeat: %w", err)
+		return nil, fmt.Errorf("publish coordinator heartbeat: %w", err)
 	}
-
-	return nil
+	return resp.GetCancelJobIds(), nil
 }
 
-func (s *Store) PublishJobStatus(ctx context.Context, status domain.JobState) error {
-	_ = ctx
-	_ = status
-	return nil
+func (s *Store) leaseFor(jobID string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tok, ok := s.leases[jobID]
+	if !ok {
+		return "", fmt.Errorf("no lease token for job %s", jobID)
+	}
+	return tok, nil
 }
 
-func (s *Store) PublishAssignment(ctx context.Context, assignment domain.Assignment) error {
-	_ = ctx
-	_ = assignment
-	return nil
-}
-
-func (s *Store) PublishJobResult(ctx context.Context, result domain.JobResult) error {
-	client, workerID, err := s.coordinator(ctx)
+// ReportRunning tells the coordinator the attempt started executing.
+func (s *Store) ReportRunning(ctx context.Context, jobID string) error {
+	client, err := s.connect()
 	if err != nil {
 		return err
 	}
-
+	token, err := s.leaseFor(jobID)
+	if err != nil {
+		return err
+	}
 	_, err = client.SubmitResult(ctx, &pb.SubmitResultRequest{
-		WorkerId: &pb.WorkerID{Value: workerID},
+		WorkerId:   s.workerID(),
+		LeaseToken: token,
+		Result:     &pb.Result{JobId: &pb.JobID{Value: jobID}, Status: pb.Status_STATUS_RUNNING},
+	})
+	if err != nil {
+		return fmt.Errorf("report running: %w", err)
+	}
+	return nil
+}
+
+// PublishJobResult commits the attempt's outcome. The returned disposition is
+// "ok", "duplicate" or "stale"; a stale result was discarded by the coordinator.
+func (s *Store) PublishJobResult(ctx context.Context, result domain.JobResult) (string, error) {
+	client, err := s.connect()
+	if err != nil {
+		return "", err
+	}
+	token, err := s.leaseFor(result.JobID)
+	if err != nil {
+		return "", err
+	}
+	resp, err := client.SubmitResult(ctx, &pb.SubmitResultRequest{
+		WorkerId:   s.workerID(),
+		LeaseToken: token,
 		Result: &pb.Result{
 			JobId:           &pb.JobID{Value: result.JobID},
 			Status:          domainStatusToPB(result.Status),
@@ -144,77 +254,21 @@ func (s *Store) PublishJobResult(ctx context.Context, result domain.JobResult) e
 			OutputSizeBytes: result.OutputSizeBytes,
 			OutputArtifacts: toPBOutputArtifacts(result.OutputArtifacts),
 			FinishedAtUnix:  result.FinishedAt.UTC().Unix(),
+			FailureReason:   result.FailureReason,
 		},
 	})
-	if isNotFound(err) {
-		newWorkerID, registerErr := s.reRegister(ctx)
-		if registerErr != nil {
-			return fmt.Errorf("submit result to coordinator: worker re-register failed: %w", registerErr)
-		}
-		_, err = client.SubmitResult(ctx, &pb.SubmitResultRequest{
-			WorkerId: &pb.WorkerID{Value: newWorkerID},
-			Result: &pb.Result{
-				JobId:           &pb.JobID{Value: result.JobID},
-				Status:          domainStatusToPB(result.Status),
-				ExitCode:        int32(result.ExitCode),
-				StdoutExcerpt:   trimTo(result.Stdout, 4096),
-				StderrExcerpt:   trimTo(result.Stderr, 4096),
-				OutputUri:       result.OutputURI,
-				OutputApiUrl:    result.OutputAPIURL,
-				OutputPublicUrl: result.OutputPublicURL,
-				OutputSizeBytes: result.OutputSizeBytes,
-				OutputArtifacts: toPBOutputArtifacts(result.OutputArtifacts),
-				FinishedAtUnix:  result.FinishedAt.UTC().Unix(),
-			},
-		})
-	}
 	if err != nil {
-		return fmt.Errorf("submit result to coordinator: %w", err)
+		return "", fmt.Errorf("submit result to coordinator: %w", err)
 	}
-
-	return nil
+	s.Forget(result.JobID)
+	return resp.GetDisposition(), nil
 }
 
-func (s *Store) coordinator(ctx context.Context) (pb.WorkerServiceClient, string, error) {
+// Forget drops the lease token for a job this worker no longer holds.
+func (s *Store) Forget(jobID string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.coordinatorClient == nil {
-		// NewClient connects lazily; an unreachable coordinator surfaces as an RPC
-		// error (and is retried by the agent loop) instead of blocking here.
-		conn, err := grpc.NewClient(s.cfg.CoordinatorAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-		if err != nil {
-			return nil, "", fmt.Errorf("dial coordinator: %w", err)
-		}
-
-		s.coordinatorConn = conn
-		s.coordinatorClient = pb.NewWorkerServiceClient(conn)
-	}
-
-	if strings.TrimSpace(s.coordinatorWorkerID) == "" {
-		if _, err := s.reRegister(ctx); err != nil {
-			return nil, "", fmt.Errorf("register worker with coordinator: %w", err)
-		}
-	}
-
-	return s.coordinatorClient, s.coordinatorWorkerID, nil
-}
-
-func (s *Store) reRegister(ctx context.Context) (string, error) {
-	registerResponse, err := s.coordinatorClient.RegisterWorker(ctx, &pb.RegisterWorkerRequest{
-		WorkerVersion: s.cfg.Version,
-	})
-	if err != nil {
-		return "", err
-	}
-
-	workerID := strings.TrimSpace(registerResponse.GetWorkerId().GetValue())
-	if workerID == "" {
-		return "", fmt.Errorf("coordinator returned empty worker id")
-	}
-
-	s.coordinatorWorkerID = workerID
-	return workerID, nil
+	delete(s.leases, jobID)
+	s.mu.Unlock()
 }
 
 func boolToGPUCount(gpu bool) int32 {
@@ -228,7 +282,7 @@ func domainStatusToPB(status string) pb.Status {
 	switch strings.TrimSpace(status) {
 	case domain.JobStatusRunning:
 		return pb.Status_STATUS_RUNNING
-	case domain.JobStatusCompleted:
+	case domain.JobStatusSucceeded:
 		return pb.Status_STATUS_SUCCEEDED
 	case domain.JobStatusFailed:
 		return pb.Status_STATUS_FAILED
@@ -245,17 +299,13 @@ func trimTo(value string, maxLen int) string {
 }
 
 func isNotFound(err error) bool {
-	if err == nil {
-		return false
-	}
-	return status.Code(err) == codes.NotFound
+	return err != nil && status.Code(err) == codes.NotFound
 }
 
 func cloneStringMap(source map[string]string) map[string]string {
 	if len(source) == 0 {
 		return nil
 	}
-
 	cloned := make(map[string]string, len(source))
 	for key, value := range source {
 		cloned[key] = value
@@ -267,20 +317,12 @@ func toPBOutputArtifacts(artifacts []domain.OutputArtifact) []*pb.OutputArtifact
 	if len(artifacts) == 0 {
 		return nil
 	}
-
 	items := make([]*pb.OutputArtifact, 0, len(artifacts))
-	for _, artifact := range artifacts {
+	for _, a := range artifacts {
 		items = append(items, &pb.OutputArtifact{
-			RelativePath: artifact.RelativePath,
-			ObjectKey:    artifact.ObjectKey,
-			Uri:          artifact.URI,
-			ApiUrl:       artifact.APIURL,
-			PublicUrl:    artifact.PublicURL,
-			Sha256:       artifact.SHA256,
-			SizeBytes:    artifact.SizeBytes,
-			ContentType:  artifact.ContentType,
+			RelativePath: a.RelativePath, ObjectKey: a.ObjectKey, Uri: a.URI, ApiUrl: a.APIURL,
+			PublicUrl: a.PublicURL, Sha256: a.SHA256, SizeBytes: a.SizeBytes, ContentType: a.ContentType,
 		})
 	}
-
 	return items
 }

@@ -46,8 +46,9 @@ demo: build ## run examples/hello on the running cluster and print its result
 	./$(BIN)/computehive workers
 	./$(BIN)/computehive submit examples/hello --wait
 
-chaos: ## fault-injection suite (worker/coordinator/redis kills)
-	@echo "chaos suite is implemented in the scheduler-correctness phase" >&2; exit 1
+chaos: build ## fault injection: in-process suite (Redis in Docker), then SIGKILL workers in the running cluster
+	cd coordinator && go test -race -count=1 -timeout 20m -v ./internal/chaos/
+	chmod +x scripts/chaos-cluster.sh && scripts/chaos-cluster.sh 3
 
 bench: ## throughput / latency benchmarks
 	@echo "benchmarks are implemented in the benchmarking phase" >&2; exit 1

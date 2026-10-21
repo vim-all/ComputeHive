@@ -192,6 +192,10 @@ const (
 	Status_STATUS_SUCCEEDED   Status = 4
 	Status_STATUS_FAILED      Status = 5
 	Status_STATUS_CANCELED    Status = 6
+	// Failed attempt waiting to be re-assigned (original queue position kept).
+	Status_STATUS_REQUEUED Status = 7
+	// Exhausted max attempts; parked in the dead-letter set.
+	Status_STATUS_DEAD Status = 8
 )
 
 // Enum value maps for Status.
@@ -204,6 +208,8 @@ var (
 		4: "STATUS_SUCCEEDED",
 		5: "STATUS_FAILED",
 		6: "STATUS_CANCELED",
+		7: "STATUS_REQUEUED",
+		8: "STATUS_DEAD",
 	}
 	Status_value = map[string]int32{
 		"STATUS_UNSPECIFIED": 0,
@@ -213,6 +219,8 @@ var (
 		"STATUS_SUCCEEDED":   4,
 		"STATUS_FAILED":      5,
 		"STATUS_CANCELED":    6,
+		"STATUS_REQUEUED":    7,
+		"STATUS_DEAD":        8,
 	}
 )
 
@@ -1251,8 +1259,12 @@ type Job struct {
 	MaxRuntimeSeconds int32                  `protobuf:"varint,8,opt,name=max_runtime_seconds,json=maxRuntimeSeconds,proto3" json:"max_runtime_seconds,omitempty"`
 	ArtifactUrl       string                 `protobuf:"bytes,9,opt,name=artifact_url,json=artifactUrl,proto3" json:"artifact_url,omitempty"`
 	ArtifactSha256    string                 `protobuf:"bytes,10,opt,name=artifact_sha256,json=artifactSha256,proto3" json:"artifact_sha256,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// 1-based attempt number of this assignment.
+	Attempt int32 `protobuf:"varint,11,opt,name=attempt,proto3" json:"attempt,omitempty"`
+	// Opaque token proving ownership of this attempt; must accompany SubmitResult.
+	LeaseToken    string `protobuf:"bytes,12,opt,name=lease_token,json=leaseToken,proto3" json:"lease_token,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Job) Reset() {
@@ -1355,6 +1367,20 @@ func (x *Job) GetArtifactSha256() string {
 	return ""
 }
 
+func (x *Job) GetAttempt() int32 {
+	if x != nil {
+		return x.Attempt
+	}
+	return 0
+}
+
+func (x *Job) GetLeaseToken() string {
+	if x != nil {
+		return x.LeaseToken
+	}
+	return ""
+}
+
 // Worker-reported job execution result.
 type Result struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
@@ -1369,8 +1395,12 @@ type Result struct {
 	OutputApiUrl    string                 `protobuf:"bytes,9,opt,name=output_api_url,json=outputApiUrl,proto3" json:"output_api_url,omitempty"`
 	OutputPublicUrl string                 `protobuf:"bytes,10,opt,name=output_public_url,json=outputPublicUrl,proto3" json:"output_public_url,omitempty"`
 	OutputSizeBytes int64                  `protobuf:"varint,11,opt,name=output_size_bytes,json=outputSizeBytes,proto3" json:"output_size_bytes,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// Why a non-successful attempt ended: "job_exit" (the job's own failure, terminal),
+	// "timeout" (job exceeded its runtime, terminal), "infra" (worker-side problem, retried),
+	// "evicted" (worker shed load, retried without burning an attempt).
+	FailureReason string `protobuf:"bytes,12,opt,name=failure_reason,json=failureReason,proto3" json:"failure_reason,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Result) Reset() {
@@ -1480,13 +1510,24 @@ func (x *Result) GetOutputSizeBytes() int64 {
 	return 0
 }
 
+func (x *Result) GetFailureReason() string {
+	if x != nil {
+		return x.FailureReason
+	}
+	return ""
+}
+
 type RegisterWorkerRequest struct {
 	state              protoimpl.MessageState `protogen:"open.v1"`
 	AvailableResources *ResourceSpec          `protobuf:"bytes,1,opt,name=available_resources,json=availableResources,proto3" json:"available_resources,omitempty"`
 	WorkerVersion      string                 `protobuf:"bytes,2,opt,name=worker_version,json=workerVersion,proto3" json:"worker_version,omitempty"`
 	Worker             *WorkerSchema          `protobuf:"bytes,3,opt,name=worker,proto3" json:"worker,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// Stable identity requested by the worker; kept across restarts. Empty = server assigns one.
+	WorkerId string `protobuf:"bytes,4,opt,name=worker_id,json=workerId,proto3" json:"worker_id,omitempty"`
+	// Maximum concurrent jobs this worker will run (default 1).
+	MaxJobs       int32 `protobuf:"varint,5,opt,name=max_jobs,json=maxJobs,proto3" json:"max_jobs,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *RegisterWorkerRequest) Reset() {
@@ -1538,6 +1579,20 @@ func (x *RegisterWorkerRequest) GetWorker() *WorkerSchema {
 		return x.Worker
 	}
 	return nil
+}
+
+func (x *RegisterWorkerRequest) GetWorkerId() string {
+	if x != nil {
+		return x.WorkerId
+	}
+	return ""
+}
+
+func (x *RegisterWorkerRequest) GetMaxJobs() int32 {
+	if x != nil {
+		return x.MaxJobs
+	}
+	return 0
 }
 
 type RegisterWorkerResponse struct {
@@ -1598,8 +1653,13 @@ type HeartbeatRequest struct {
 	AvailableResources *ResourceSpec          `protobuf:"bytes,2,opt,name=available_resources,json=availableResources,proto3" json:"available_resources,omitempty"`
 	RunningJobs        []*JobID               `protobuf:"bytes,3,rep,name=running_jobs,json=runningJobs,proto3" json:"running_jobs,omitempty"`
 	CurrentLoad        *WorkerCurrentLoad     `protobuf:"bytes,4,opt,name=current_load,json=currentLoad,proto3" json:"current_load,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// Worker is over its resource thresholds: the coordinator must not assign it jobs.
+	Overloaded bool `protobuf:"varint,5,opt,name=overloaded,proto3" json:"overloaded,omitempty"`
+	// Worker is shutting down or paused: finish current jobs, take no new ones.
+	Draining      bool  `protobuf:"varint,6,opt,name=draining,proto3" json:"draining,omitempty"`
+	MaxJobs       int32 `protobuf:"varint,7,opt,name=max_jobs,json=maxJobs,proto3" json:"max_jobs,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *HeartbeatRequest) Reset() {
@@ -1660,12 +1720,36 @@ func (x *HeartbeatRequest) GetCurrentLoad() *WorkerCurrentLoad {
 	return nil
 }
 
+func (x *HeartbeatRequest) GetOverloaded() bool {
+	if x != nil {
+		return x.Overloaded
+	}
+	return false
+}
+
+func (x *HeartbeatRequest) GetDraining() bool {
+	if x != nil {
+		return x.Draining
+	}
+	return false
+}
+
+func (x *HeartbeatRequest) GetMaxJobs() int32 {
+	if x != nil {
+		return x.MaxJobs
+	}
+	return 0
+}
+
 type HeartbeatResponse struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	Accepted       bool                   `protobuf:"varint,1,opt,name=accepted,proto3" json:"accepted,omitempty"`
 	ServerTimeUnix int64                  `protobuf:"varint,2,opt,name=server_time_unix,json=serverTimeUnix,proto3" json:"server_time_unix,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// Jobs the worker reports running that it no longer owns (requeued, cancelled, or
+	// already finished elsewhere). The worker must abort them and discard their results.
+	CancelJobIds  []string `protobuf:"bytes,3,rep,name=cancel_job_ids,json=cancelJobIds,proto3" json:"cancel_job_ids,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *HeartbeatResponse) Reset() {
@@ -1710,6 +1794,13 @@ func (x *HeartbeatResponse) GetServerTimeUnix() int64 {
 		return x.ServerTimeUnix
 	}
 	return 0
+}
+
+func (x *HeartbeatResponse) GetCancelJobIds() []string {
+	if x != nil {
+		return x.CancelJobIds
+	}
+	return nil
 }
 
 type RequestJobRequest struct {
@@ -1825,10 +1916,12 @@ func (x *RequestJobResponse) GetAssignment() *AssignmentSchema {
 }
 
 type SubmitResultRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	WorkerId      *WorkerID              `protobuf:"bytes,1,opt,name=worker_id,json=workerId,proto3" json:"worker_id,omitempty"`
-	Result        *Result                `protobuf:"bytes,2,opt,name=result,proto3" json:"result,omitempty"`
-	ResultSchema  *JobResultSchema       `protobuf:"bytes,3,opt,name=result_schema,json=resultSchema,proto3" json:"result_schema,omitempty"`
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	WorkerId     *WorkerID              `protobuf:"bytes,1,opt,name=worker_id,json=workerId,proto3" json:"worker_id,omitempty"`
+	Result       *Result                `protobuf:"bytes,2,opt,name=result,proto3" json:"result,omitempty"`
+	ResultSchema *JobResultSchema       `protobuf:"bytes,3,opt,name=result_schema,json=resultSchema,proto3" json:"result_schema,omitempty"`
+	// Lease token from the Job this result belongs to.
+	LeaseToken    string `protobuf:"bytes,4,opt,name=lease_token,json=leaseToken,proto3" json:"lease_token,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1884,9 +1977,18 @@ func (x *SubmitResultRequest) GetResultSchema() *JobResultSchema {
 	return nil
 }
 
+func (x *SubmitResultRequest) GetLeaseToken() string {
+	if x != nil {
+		return x.LeaseToken
+	}
+	return ""
+}
+
 type SubmitResultResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Accepted      bool                   `protobuf:"varint,1,opt,name=accepted,proto3" json:"accepted,omitempty"`
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	Accepted bool                   `protobuf:"varint,1,opt,name=accepted,proto3" json:"accepted,omitempty"`
+	// "ok", "duplicate" (job already finished: no-op), or "stale" (lease no longer valid: discarded).
+	Disposition   string `protobuf:"bytes,2,opt,name=disposition,proto3" json:"disposition,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1926,6 +2028,13 @@ func (x *SubmitResultResponse) GetAccepted() bool {
 		return x.Accepted
 	}
 	return false
+}
+
+func (x *SubmitResultResponse) GetDisposition() string {
+	if x != nil {
+		return x.Disposition
+	}
+	return ""
 }
 
 var File_worker_proto protoreflect.FileDescriptor
@@ -2012,7 +2121,7 @@ const file_worker_proto_rawDesc = "" +
 	"\fResourceSpec\x12\x1b\n" +
 	"\tcpu_cores\x18\x01 \x01(\x05R\bcpuCores\x12\x1b\n" +
 	"\tgpu_count\x18\x02 \x01(\x05R\bgpuCount\x12\x1b\n" +
-	"\tmemory_mb\x18\x03 \x01(\x05R\bmemoryMb\"\x8f\x04\n" +
+	"\tmemory_mb\x18\x03 \x01(\x05R\bmemoryMb\"\xca\x04\n" +
 	"\x03Job\x12(\n" +
 	"\x06job_id\x18\x01 \x01(\v2\x11.compute.v1.JobIDR\x05jobId\x12'\n" +
 	"\x0fcontainer_image\x18\x02 \x01(\tR\x0econtainerImage\x12\x18\n" +
@@ -2024,10 +2133,13 @@ const file_worker_proto_rawDesc = "" +
 	"\x13max_runtime_seconds\x18\b \x01(\x05R\x11maxRuntimeSeconds\x12!\n" +
 	"\fartifact_url\x18\t \x01(\tR\vartifactUrl\x12'\n" +
 	"\x0fartifact_sha256\x18\n" +
-	" \x01(\tR\x0eartifactSha256\x1a>\n" +
+	" \x01(\tR\x0eartifactSha256\x12\x18\n" +
+	"\aattempt\x18\v \x01(\x05R\aattempt\x12\x1f\n" +
+	"\vlease_token\x18\f \x01(\tR\n" +
+	"leaseToken\x1a>\n" +
 	"\x10EnvironmentEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xd7\x03\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xfe\x03\n" +
 	"\x06Result\x12(\n" +
 	"\x06job_id\x18\x01 \x01(\v2\x11.compute.v1.JobIDR\x05jobId\x12*\n" +
 	"\x06status\x18\x02 \x01(\x0e2\x12.compute.v1.StatusR\x06status\x12\x1b\n" +
@@ -2041,22 +2153,31 @@ const file_worker_proto_rawDesc = "" +
 	"\x0eoutput_api_url\x18\t \x01(\tR\foutputApiUrl\x12*\n" +
 	"\x11output_public_url\x18\n" +
 	" \x01(\tR\x0foutputPublicUrl\x12*\n" +
-	"\x11output_size_bytes\x18\v \x01(\x03R\x0foutputSizeBytes\"\xbb\x01\n" +
+	"\x11output_size_bytes\x18\v \x01(\x03R\x0foutputSizeBytes\x12%\n" +
+	"\x0efailure_reason\x18\f \x01(\tR\rfailureReason\"\xf3\x01\n" +
 	"\x15RegisterWorkerRequest\x12I\n" +
 	"\x13available_resources\x18\x01 \x01(\v2\x18.compute.v1.ResourceSpecR\x12availableResources\x12%\n" +
 	"\x0eworker_version\x18\x02 \x01(\tR\rworkerVersion\x120\n" +
-	"\x06worker\x18\x03 \x01(\v2\x18.compute.v1.WorkerSchemaR\x06worker\"\x89\x01\n" +
+	"\x06worker\x18\x03 \x01(\v2\x18.compute.v1.WorkerSchemaR\x06worker\x12\x1b\n" +
+	"\tworker_id\x18\x04 \x01(\tR\bworkerId\x12\x19\n" +
+	"\bmax_jobs\x18\x05 \x01(\x05R\amaxJobs\"\x89\x01\n" +
 	"\x16RegisterWorkerResponse\x121\n" +
 	"\tworker_id\x18\x01 \x01(\v2\x14.compute.v1.WorkerIDR\bworkerId\x12<\n" +
-	"\x1aheartbeat_interval_seconds\x18\x02 \x01(\x05R\x18heartbeatIntervalSeconds\"\x88\x02\n" +
+	"\x1aheartbeat_interval_seconds\x18\x02 \x01(\x05R\x18heartbeatIntervalSeconds\"\xdf\x02\n" +
 	"\x10HeartbeatRequest\x121\n" +
 	"\tworker_id\x18\x01 \x01(\v2\x14.compute.v1.WorkerIDR\bworkerId\x12I\n" +
 	"\x13available_resources\x18\x02 \x01(\v2\x18.compute.v1.ResourceSpecR\x12availableResources\x124\n" +
 	"\frunning_jobs\x18\x03 \x03(\v2\x11.compute.v1.JobIDR\vrunningJobs\x12@\n" +
-	"\fcurrent_load\x18\x04 \x01(\v2\x1d.compute.v1.WorkerCurrentLoadR\vcurrentLoad\"Y\n" +
+	"\fcurrent_load\x18\x04 \x01(\v2\x1d.compute.v1.WorkerCurrentLoadR\vcurrentLoad\x12\x1e\n" +
+	"\n" +
+	"overloaded\x18\x05 \x01(\bR\n" +
+	"overloaded\x12\x1a\n" +
+	"\bdraining\x18\x06 \x01(\bR\bdraining\x12\x19\n" +
+	"\bmax_jobs\x18\a \x01(\x05R\amaxJobs\"\x7f\n" +
 	"\x11HeartbeatResponse\x12\x1a\n" +
 	"\baccepted\x18\x01 \x01(\bR\baccepted\x12(\n" +
-	"\x10server_time_unix\x18\x02 \x01(\x03R\x0eserverTimeUnix\"F\n" +
+	"\x10server_time_unix\x18\x02 \x01(\x03R\x0eserverTimeUnix\x12$\n" +
+	"\x0ecancel_job_ids\x18\x03 \x03(\tR\fcancelJobIds\"F\n" +
 	"\x11RequestJobRequest\x121\n" +
 	"\tworker_id\x18\x01 \x01(\v2\x14.compute.v1.WorkerIDR\bworkerId\"\xc4\x01\n" +
 	"\x12RequestJobResponse\x12\x17\n" +
@@ -2066,13 +2187,16 @@ const file_worker_proto_rawDesc = "" +
 	"job_schema\x18\x03 \x01(\v2\x15.compute.v1.JobSchemaR\tjobSchema\x12<\n" +
 	"\n" +
 	"assignment\x18\x04 \x01(\v2\x1c.compute.v1.AssignmentSchemaR\n" +
-	"assignment\"\xb6\x01\n" +
+	"assignment\"\xd7\x01\n" +
 	"\x13SubmitResultRequest\x121\n" +
 	"\tworker_id\x18\x01 \x01(\v2\x14.compute.v1.WorkerIDR\bworkerId\x12*\n" +
 	"\x06result\x18\x02 \x01(\v2\x12.compute.v1.ResultR\x06result\x12@\n" +
-	"\rresult_schema\x18\x03 \x01(\v2\x1b.compute.v1.JobResultSchemaR\fresultSchema\"2\n" +
+	"\rresult_schema\x18\x03 \x01(\v2\x1b.compute.v1.JobResultSchemaR\fresultSchema\x12\x1f\n" +
+	"\vlease_token\x18\x04 \x01(\tR\n" +
+	"leaseToken\"T\n" +
 	"\x14SubmitResultResponse\x12\x1a\n" +
-	"\baccepted\x18\x01 \x01(\bR\baccepted*\xe6\x01\n" +
+	"\baccepted\x18\x01 \x01(\bR\baccepted\x12 \n" +
+	"\vdisposition\x18\x02 \x01(\tR\vdisposition*\xe6\x01\n" +
 	"\x12JobLifecycleStatus\x12$\n" +
 	" JOB_LIFECYCLE_STATUS_UNSPECIFIED\x10\x00\x12 \n" +
 	"\x1cJOB_LIFECYCLE_STATUS_PENDING\x10\x01\x12!\n" +
@@ -2088,7 +2212,7 @@ const file_worker_proto_rawDesc = "" +
 	"\x19AssignmentLifecycleStatus\x12+\n" +
 	"'ASSIGNMENT_LIFECYCLE_STATUS_UNSPECIFIED\x10\x00\x12(\n" +
 	"$ASSIGNMENT_LIFECYCLE_STATUS_ASSIGNED\x10\x01\x12'\n" +
-	"#ASSIGNMENT_LIFECYCLE_STATUS_RUNNING\x10\x02*\x9a\x01\n" +
+	"#ASSIGNMENT_LIFECYCLE_STATUS_RUNNING\x10\x02*\xc0\x01\n" +
 	"\x06Status\x12\x16\n" +
 	"\x12STATUS_UNSPECIFIED\x10\x00\x12\x11\n" +
 	"\rSTATUS_QUEUED\x10\x01\x12\x13\n" +
@@ -2096,7 +2220,9 @@ const file_worker_proto_rawDesc = "" +
 	"\x0eSTATUS_RUNNING\x10\x03\x12\x14\n" +
 	"\x10STATUS_SUCCEEDED\x10\x04\x12\x11\n" +
 	"\rSTATUS_FAILED\x10\x05\x12\x13\n" +
-	"\x0fSTATUS_CANCELED\x10\x062\xd2\x02\n" +
+	"\x0fSTATUS_CANCELED\x10\x06\x12\x13\n" +
+	"\x0fSTATUS_REQUEUED\x10\a\x12\x0f\n" +
+	"\vSTATUS_DEAD\x10\b2\xd2\x02\n" +
 	"\rWorkerService\x12W\n" +
 	"\x0eRegisterWorker\x12!.compute.v1.RegisterWorkerRequest\x1a\".compute.v1.RegisterWorkerResponse\x12H\n" +
 	"\tHeartbeat\x12\x1c.compute.v1.HeartbeatRequest\x1a\x1d.compute.v1.HeartbeatResponse\x12K\n" +

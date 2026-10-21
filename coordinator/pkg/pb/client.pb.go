@@ -31,8 +31,14 @@ type SubmitJobRequest struct {
 	Job               *JobSchema             `protobuf:"bytes,6,opt,name=job,proto3" json:"job,omitempty"`
 	ArtifactUrl       string                 `protobuf:"bytes,7,opt,name=artifact_url,json=artifactUrl,proto3" json:"artifact_url,omitempty"`
 	ArtifactSha256    string                 `protobuf:"bytes,8,opt,name=artifact_sha256,json=artifactSha256,proto3" json:"artifact_sha256,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// Max assignment attempts before the job is parked as DEAD (0 = server default).
+	MaxAttempts int32 `protobuf:"varint,9,opt,name=max_attempts,json=maxAttempts,proto3" json:"max_attempts,omitempty"`
+	// Submitting user, used for per-user concurrency limits and fairness.
+	User string `protobuf:"bytes,10,opt,name=user,proto3" json:"user,omitempty"`
+	// Run on two workers and compare output hashes (untrusted-worker mitigation).
+	Verify        bool `protobuf:"varint,11,opt,name=verify,proto3" json:"verify,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *SubmitJobRequest) Reset() {
@@ -119,6 +125,27 @@ func (x *SubmitJobRequest) GetArtifactSha256() string {
 		return x.ArtifactSha256
 	}
 	return ""
+}
+
+func (x *SubmitJobRequest) GetMaxAttempts() int32 {
+	if x != nil {
+		return x.MaxAttempts
+	}
+	return 0
+}
+
+func (x *SubmitJobRequest) GetUser() string {
+	if x != nil {
+		return x.User
+	}
+	return ""
+}
+
+func (x *SubmitJobRequest) GetVerify() bool {
+	if x != nil {
+		return x.Verify
+	}
+	return false
 }
 
 type SubmitJobResponse struct {
@@ -232,6 +259,10 @@ type GetJobStatusResponse struct {
 	UpdatedAtUnix    int64                  `protobuf:"varint,3,opt,name=updated_at_unix,json=updatedAtUnix,proto3" json:"updated_at_unix,omitempty"`
 	Assignment       *AssignmentSchema      `protobuf:"bytes,4,opt,name=assignment,proto3" json:"assignment,omitempty"`
 	JobStatus        JobLifecycleStatus     `protobuf:"varint,5,opt,name=job_status,json=jobStatus,proto3,enum=compute.v1.JobLifecycleStatus" json:"job_status,omitempty"`
+	Attempt          int32                  `protobuf:"varint,6,opt,name=attempt,proto3" json:"attempt,omitempty"`
+	MaxAttempts      int32                  `protobuf:"varint,7,opt,name=max_attempts,json=maxAttempts,proto3" json:"max_attempts,omitempty"`
+	LastFailure      string                 `protobuf:"bytes,8,opt,name=last_failure,json=lastFailure,proto3" json:"last_failure,omitempty"`
+	QueueSeq         int64                  `protobuf:"varint,9,opt,name=queue_seq,json=queueSeq,proto3" json:"queue_seq,omitempty"`
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache
 }
@@ -301,6 +332,123 @@ func (x *GetJobStatusResponse) GetJobStatus() JobLifecycleStatus {
 	return JobLifecycleStatus_JOB_LIFECYCLE_STATUS_UNSPECIFIED
 }
 
+func (x *GetJobStatusResponse) GetAttempt() int32 {
+	if x != nil {
+		return x.Attempt
+	}
+	return 0
+}
+
+func (x *GetJobStatusResponse) GetMaxAttempts() int32 {
+	if x != nil {
+		return x.MaxAttempts
+	}
+	return 0
+}
+
+func (x *GetJobStatusResponse) GetLastFailure() string {
+	if x != nil {
+		return x.LastFailure
+	}
+	return ""
+}
+
+func (x *GetJobStatusResponse) GetQueueSeq() int64 {
+	if x != nil {
+		return x.QueueSeq
+	}
+	return 0
+}
+
+type CancelJobRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	JobId         *JobID                 `protobuf:"bytes,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CancelJobRequest) Reset() {
+	*x = CancelJobRequest{}
+	mi := &file_client_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CancelJobRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CancelJobRequest) ProtoMessage() {}
+
+func (x *CancelJobRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_client_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CancelJobRequest.ProtoReflect.Descriptor instead.
+func (*CancelJobRequest) Descriptor() ([]byte, []int) {
+	return file_client_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *CancelJobRequest) GetJobId() *JobID {
+	if x != nil {
+		return x.JobId
+	}
+	return nil
+}
+
+type CancelJobResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// "ok", or "duplicate" if the job had already reached a terminal state.
+	Disposition   string `protobuf:"bytes,1,opt,name=disposition,proto3" json:"disposition,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CancelJobResponse) Reset() {
+	*x = CancelJobResponse{}
+	mi := &file_client_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CancelJobResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CancelJobResponse) ProtoMessage() {}
+
+func (x *CancelJobResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_client_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CancelJobResponse.ProtoReflect.Descriptor instead.
+func (*CancelJobResponse) Descriptor() ([]byte, []int) {
+	return file_client_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *CancelJobResponse) GetDisposition() string {
+	if x != nil {
+		return x.Disposition
+	}
+	return ""
+}
+
 type GetJobResultRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	JobId         *JobID                 `protobuf:"bytes,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
@@ -310,7 +458,7 @@ type GetJobResultRequest struct {
 
 func (x *GetJobResultRequest) Reset() {
 	*x = GetJobResultRequest{}
-	mi := &file_client_proto_msgTypes[4]
+	mi := &file_client_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -322,7 +470,7 @@ func (x *GetJobResultRequest) String() string {
 func (*GetJobResultRequest) ProtoMessage() {}
 
 func (x *GetJobResultRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_client_proto_msgTypes[4]
+	mi := &file_client_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -335,7 +483,7 @@ func (x *GetJobResultRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetJobResultRequest.ProtoReflect.Descriptor instead.
 func (*GetJobResultRequest) Descriptor() ([]byte, []int) {
-	return file_client_proto_rawDescGZIP(), []int{4}
+	return file_client_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *GetJobResultRequest) GetJobId() *JobID {
@@ -358,7 +506,7 @@ type GetJobResultResponse struct {
 
 func (x *GetJobResultResponse) Reset() {
 	*x = GetJobResultResponse{}
-	mi := &file_client_proto_msgTypes[5]
+	mi := &file_client_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -370,7 +518,7 @@ func (x *GetJobResultResponse) String() string {
 func (*GetJobResultResponse) ProtoMessage() {}
 
 func (x *GetJobResultResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_client_proto_msgTypes[5]
+	mi := &file_client_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -383,7 +531,7 @@ func (x *GetJobResultResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetJobResultResponse.ProtoReflect.Descriptor instead.
 func (*GetJobResultResponse) Descriptor() ([]byte, []int) {
-	return file_client_proto_rawDescGZIP(), []int{5}
+	return file_client_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *GetJobResultResponse) GetStatus() Status {
@@ -437,7 +585,7 @@ type WorkerInfo struct {
 
 func (x *WorkerInfo) Reset() {
 	*x = WorkerInfo{}
-	mi := &file_client_proto_msgTypes[6]
+	mi := &file_client_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -449,7 +597,7 @@ func (x *WorkerInfo) String() string {
 func (*WorkerInfo) ProtoMessage() {}
 
 func (x *WorkerInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_client_proto_msgTypes[6]
+	mi := &file_client_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -462,7 +610,7 @@ func (x *WorkerInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WorkerInfo.ProtoReflect.Descriptor instead.
 func (*WorkerInfo) Descriptor() ([]byte, []int) {
-	return file_client_proto_rawDescGZIP(), []int{6}
+	return file_client_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *WorkerInfo) GetWorkerId() *WorkerID {
@@ -522,7 +670,7 @@ type ListWorkersRequest struct {
 
 func (x *ListWorkersRequest) Reset() {
 	*x = ListWorkersRequest{}
-	mi := &file_client_proto_msgTypes[7]
+	mi := &file_client_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -534,7 +682,7 @@ func (x *ListWorkersRequest) String() string {
 func (*ListWorkersRequest) ProtoMessage() {}
 
 func (x *ListWorkersRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_client_proto_msgTypes[7]
+	mi := &file_client_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -547,7 +695,7 @@ func (x *ListWorkersRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListWorkersRequest.ProtoReflect.Descriptor instead.
 func (*ListWorkersRequest) Descriptor() ([]byte, []int) {
-	return file_client_proto_rawDescGZIP(), []int{7}
+	return file_client_proto_rawDescGZIP(), []int{9}
 }
 
 type ListWorkersResponse struct {
@@ -559,7 +707,7 @@ type ListWorkersResponse struct {
 
 func (x *ListWorkersResponse) Reset() {
 	*x = ListWorkersResponse{}
-	mi := &file_client_proto_msgTypes[8]
+	mi := &file_client_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -571,7 +719,7 @@ func (x *ListWorkersResponse) String() string {
 func (*ListWorkersResponse) ProtoMessage() {}
 
 func (x *ListWorkersResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_client_proto_msgTypes[8]
+	mi := &file_client_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -584,7 +732,7 @@ func (x *ListWorkersResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListWorkersResponse.ProtoReflect.Descriptor instead.
 func (*ListWorkersResponse) Descriptor() ([]byte, []int) {
-	return file_client_proto_rawDescGZIP(), []int{8}
+	return file_client_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *ListWorkersResponse) GetWorkers() []*WorkerInfo {
@@ -599,7 +747,7 @@ var File_client_proto protoreflect.FileDescriptor
 const file_client_proto_rawDesc = "" +
 	"\n" +
 	"\fclient.proto\x12\n" +
-	"compute.v1\x1a\fworker.proto\"\xd4\x03\n" +
+	"compute.v1\x1a\fworker.proto\"\xa3\x04\n" +
 	"\x10SubmitJobRequest\x12'\n" +
 	"\x0fcontainer_image\x18\x01 \x01(\tR\x0econtainerImage\x12\x18\n" +
 	"\acommand\x18\x02 \x03(\tR\acommand\x12G\n" +
@@ -608,7 +756,11 @@ const file_client_proto_rawDesc = "" +
 	"\x13max_runtime_seconds\x18\x05 \x01(\x05R\x11maxRuntimeSeconds\x12'\n" +
 	"\x03job\x18\x06 \x01(\v2\x15.compute.v1.JobSchemaR\x03job\x12!\n" +
 	"\fartifact_url\x18\a \x01(\tR\vartifactUrl\x12'\n" +
-	"\x0fartifact_sha256\x18\b \x01(\tR\x0eartifactSha256\x1a>\n" +
+	"\x0fartifact_sha256\x18\b \x01(\tR\x0eartifactSha256\x12!\n" +
+	"\fmax_attempts\x18\t \x01(\x05R\vmaxAttempts\x12\x12\n" +
+	"\x04user\x18\n" +
+	" \x01(\tR\x04user\x12\x16\n" +
+	"\x06verify\x18\v \x01(\bR\x06verify\x1a>\n" +
 	"\x10EnvironmentEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xa8\x01\n" +
@@ -618,7 +770,7 @@ const file_client_proto_rawDesc = "" +
 	"\n" +
 	"job_status\x18\x03 \x01(\x0e2\x1e.compute.v1.JobLifecycleStatusR\tjobStatus\"?\n" +
 	"\x13GetJobStatusRequest\x12(\n" +
-	"\x06job_id\x18\x01 \x01(\v2\x11.compute.v1.JobIDR\x05jobId\"\x95\x02\n" +
+	"\x06job_id\x18\x01 \x01(\v2\x11.compute.v1.JobIDR\x05jobId\"\x92\x03\n" +
 	"\x14GetJobStatusResponse\x12*\n" +
 	"\x06status\x18\x01 \x01(\x0e2\x12.compute.v1.StatusR\x06status\x12,\n" +
 	"\x12assigned_worker_id\x18\x02 \x01(\tR\x10assignedWorkerId\x12&\n" +
@@ -627,7 +779,15 @@ const file_client_proto_rawDesc = "" +
 	"assignment\x18\x04 \x01(\v2\x1c.compute.v1.AssignmentSchemaR\n" +
 	"assignment\x12=\n" +
 	"\n" +
-	"job_status\x18\x05 \x01(\x0e2\x1e.compute.v1.JobLifecycleStatusR\tjobStatus\"?\n" +
+	"job_status\x18\x05 \x01(\x0e2\x1e.compute.v1.JobLifecycleStatusR\tjobStatus\x12\x18\n" +
+	"\aattempt\x18\x06 \x01(\x05R\aattempt\x12!\n" +
+	"\fmax_attempts\x18\a \x01(\x05R\vmaxAttempts\x12!\n" +
+	"\flast_failure\x18\b \x01(\tR\vlastFailure\x12\x1b\n" +
+	"\tqueue_seq\x18\t \x01(\x03R\bqueueSeq\"<\n" +
+	"\x10CancelJobRequest\x12(\n" +
+	"\x06job_id\x18\x01 \x01(\v2\x11.compute.v1.JobIDR\x05jobId\"5\n" +
+	"\x11CancelJobResponse\x12 \n" +
+	"\vdisposition\x18\x01 \x01(\tR\vdisposition\"?\n" +
 	"\x13GetJobResultRequest\x12(\n" +
 	"\x06job_id\x18\x01 \x01(\v2\x11.compute.v1.JobIDR\x05jobId\"\x9a\x02\n" +
 	"\x14GetJobResultResponse\x12*\n" +
@@ -648,8 +808,9 @@ const file_client_proto_rawDesc = "" +
 	"\frunning_jobs\x18\a \x03(\v2\x11.compute.v1.JobIDR\vrunningJobs\"\x14\n" +
 	"\x12ListWorkersRequest\"G\n" +
 	"\x13ListWorkersResponse\x120\n" +
-	"\aworkers\x18\x01 \x03(\v2\x16.compute.v1.WorkerInfoR\aworkers2\xcf\x02\n" +
-	"\rClientService\x12N\n" +
+	"\aworkers\x18\x01 \x03(\v2\x16.compute.v1.WorkerInfoR\aworkers2\x99\x03\n" +
+	"\rClientService\x12H\n" +
+	"\tCancelJob\x12\x1c.compute.v1.CancelJobRequest\x1a\x1d.compute.v1.CancelJobResponse\x12N\n" +
 	"\vListWorkers\x12\x1e.compute.v1.ListWorkersRequest\x1a\x1f.compute.v1.ListWorkersResponse\x12H\n" +
 	"\tSubmitJob\x12\x1c.compute.v1.SubmitJobRequest\x1a\x1d.compute.v1.SubmitJobResponse\x12Q\n" +
 	"\fGetJobStatus\x12\x1f.compute.v1.GetJobStatusRequest\x1a .compute.v1.GetJobStatusResponse\x12Q\n" +
@@ -667,61 +828,66 @@ func file_client_proto_rawDescGZIP() []byte {
 	return file_client_proto_rawDescData
 }
 
-var file_client_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
+var file_client_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
 var file_client_proto_goTypes = []any{
 	(*SubmitJobRequest)(nil),     // 0: compute.v1.SubmitJobRequest
 	(*SubmitJobResponse)(nil),    // 1: compute.v1.SubmitJobResponse
 	(*GetJobStatusRequest)(nil),  // 2: compute.v1.GetJobStatusRequest
 	(*GetJobStatusResponse)(nil), // 3: compute.v1.GetJobStatusResponse
-	(*GetJobResultRequest)(nil),  // 4: compute.v1.GetJobResultRequest
-	(*GetJobResultResponse)(nil), // 5: compute.v1.GetJobResultResponse
-	(*WorkerInfo)(nil),           // 6: compute.v1.WorkerInfo
-	(*ListWorkersRequest)(nil),   // 7: compute.v1.ListWorkersRequest
-	(*ListWorkersResponse)(nil),  // 8: compute.v1.ListWorkersResponse
-	nil,                          // 9: compute.v1.SubmitJobRequest.EnvironmentEntry
-	(*ResourceSpec)(nil),         // 10: compute.v1.ResourceSpec
-	(*JobSchema)(nil),            // 11: compute.v1.JobSchema
-	(*JobID)(nil),                // 12: compute.v1.JobID
-	(Status)(0),                  // 13: compute.v1.Status
-	(JobLifecycleStatus)(0),      // 14: compute.v1.JobLifecycleStatus
-	(*AssignmentSchema)(nil),     // 15: compute.v1.AssignmentSchema
-	(*Result)(nil),               // 16: compute.v1.Result
-	(*JobResultSchema)(nil),      // 17: compute.v1.JobResultSchema
-	(*WorkerID)(nil),             // 18: compute.v1.WorkerID
+	(*CancelJobRequest)(nil),     // 4: compute.v1.CancelJobRequest
+	(*CancelJobResponse)(nil),    // 5: compute.v1.CancelJobResponse
+	(*GetJobResultRequest)(nil),  // 6: compute.v1.GetJobResultRequest
+	(*GetJobResultResponse)(nil), // 7: compute.v1.GetJobResultResponse
+	(*WorkerInfo)(nil),           // 8: compute.v1.WorkerInfo
+	(*ListWorkersRequest)(nil),   // 9: compute.v1.ListWorkersRequest
+	(*ListWorkersResponse)(nil),  // 10: compute.v1.ListWorkersResponse
+	nil,                          // 11: compute.v1.SubmitJobRequest.EnvironmentEntry
+	(*ResourceSpec)(nil),         // 12: compute.v1.ResourceSpec
+	(*JobSchema)(nil),            // 13: compute.v1.JobSchema
+	(*JobID)(nil),                // 14: compute.v1.JobID
+	(Status)(0),                  // 15: compute.v1.Status
+	(JobLifecycleStatus)(0),      // 16: compute.v1.JobLifecycleStatus
+	(*AssignmentSchema)(nil),     // 17: compute.v1.AssignmentSchema
+	(*Result)(nil),               // 18: compute.v1.Result
+	(*JobResultSchema)(nil),      // 19: compute.v1.JobResultSchema
+	(*WorkerID)(nil),             // 20: compute.v1.WorkerID
 }
 var file_client_proto_depIdxs = []int32{
-	10, // 0: compute.v1.SubmitJobRequest.required_resources:type_name -> compute.v1.ResourceSpec
-	9,  // 1: compute.v1.SubmitJobRequest.environment:type_name -> compute.v1.SubmitJobRequest.EnvironmentEntry
-	11, // 2: compute.v1.SubmitJobRequest.job:type_name -> compute.v1.JobSchema
-	12, // 3: compute.v1.SubmitJobResponse.job_id:type_name -> compute.v1.JobID
-	13, // 4: compute.v1.SubmitJobResponse.status:type_name -> compute.v1.Status
-	14, // 5: compute.v1.SubmitJobResponse.job_status:type_name -> compute.v1.JobLifecycleStatus
-	12, // 6: compute.v1.GetJobStatusRequest.job_id:type_name -> compute.v1.JobID
-	13, // 7: compute.v1.GetJobStatusResponse.status:type_name -> compute.v1.Status
-	15, // 8: compute.v1.GetJobStatusResponse.assignment:type_name -> compute.v1.AssignmentSchema
-	14, // 9: compute.v1.GetJobStatusResponse.job_status:type_name -> compute.v1.JobLifecycleStatus
-	12, // 10: compute.v1.GetJobResultRequest.job_id:type_name -> compute.v1.JobID
-	13, // 11: compute.v1.GetJobResultResponse.status:type_name -> compute.v1.Status
-	16, // 12: compute.v1.GetJobResultResponse.result:type_name -> compute.v1.Result
-	17, // 13: compute.v1.GetJobResultResponse.result_schema:type_name -> compute.v1.JobResultSchema
-	14, // 14: compute.v1.GetJobResultResponse.job_status:type_name -> compute.v1.JobLifecycleStatus
-	18, // 15: compute.v1.WorkerInfo.worker_id:type_name -> compute.v1.WorkerID
-	10, // 16: compute.v1.WorkerInfo.resources:type_name -> compute.v1.ResourceSpec
-	12, // 17: compute.v1.WorkerInfo.running_jobs:type_name -> compute.v1.JobID
-	6,  // 18: compute.v1.ListWorkersResponse.workers:type_name -> compute.v1.WorkerInfo
-	7,  // 19: compute.v1.ClientService.ListWorkers:input_type -> compute.v1.ListWorkersRequest
-	0,  // 20: compute.v1.ClientService.SubmitJob:input_type -> compute.v1.SubmitJobRequest
-	2,  // 21: compute.v1.ClientService.GetJobStatus:input_type -> compute.v1.GetJobStatusRequest
-	4,  // 22: compute.v1.ClientService.GetJobResult:input_type -> compute.v1.GetJobResultRequest
-	8,  // 23: compute.v1.ClientService.ListWorkers:output_type -> compute.v1.ListWorkersResponse
-	1,  // 24: compute.v1.ClientService.SubmitJob:output_type -> compute.v1.SubmitJobResponse
-	3,  // 25: compute.v1.ClientService.GetJobStatus:output_type -> compute.v1.GetJobStatusResponse
-	5,  // 26: compute.v1.ClientService.GetJobResult:output_type -> compute.v1.GetJobResultResponse
-	23, // [23:27] is the sub-list for method output_type
-	19, // [19:23] is the sub-list for method input_type
-	19, // [19:19] is the sub-list for extension type_name
-	19, // [19:19] is the sub-list for extension extendee
-	0,  // [0:19] is the sub-list for field type_name
+	12, // 0: compute.v1.SubmitJobRequest.required_resources:type_name -> compute.v1.ResourceSpec
+	11, // 1: compute.v1.SubmitJobRequest.environment:type_name -> compute.v1.SubmitJobRequest.EnvironmentEntry
+	13, // 2: compute.v1.SubmitJobRequest.job:type_name -> compute.v1.JobSchema
+	14, // 3: compute.v1.SubmitJobResponse.job_id:type_name -> compute.v1.JobID
+	15, // 4: compute.v1.SubmitJobResponse.status:type_name -> compute.v1.Status
+	16, // 5: compute.v1.SubmitJobResponse.job_status:type_name -> compute.v1.JobLifecycleStatus
+	14, // 6: compute.v1.GetJobStatusRequest.job_id:type_name -> compute.v1.JobID
+	15, // 7: compute.v1.GetJobStatusResponse.status:type_name -> compute.v1.Status
+	17, // 8: compute.v1.GetJobStatusResponse.assignment:type_name -> compute.v1.AssignmentSchema
+	16, // 9: compute.v1.GetJobStatusResponse.job_status:type_name -> compute.v1.JobLifecycleStatus
+	14, // 10: compute.v1.CancelJobRequest.job_id:type_name -> compute.v1.JobID
+	14, // 11: compute.v1.GetJobResultRequest.job_id:type_name -> compute.v1.JobID
+	15, // 12: compute.v1.GetJobResultResponse.status:type_name -> compute.v1.Status
+	18, // 13: compute.v1.GetJobResultResponse.result:type_name -> compute.v1.Result
+	19, // 14: compute.v1.GetJobResultResponse.result_schema:type_name -> compute.v1.JobResultSchema
+	16, // 15: compute.v1.GetJobResultResponse.job_status:type_name -> compute.v1.JobLifecycleStatus
+	20, // 16: compute.v1.WorkerInfo.worker_id:type_name -> compute.v1.WorkerID
+	12, // 17: compute.v1.WorkerInfo.resources:type_name -> compute.v1.ResourceSpec
+	14, // 18: compute.v1.WorkerInfo.running_jobs:type_name -> compute.v1.JobID
+	8,  // 19: compute.v1.ListWorkersResponse.workers:type_name -> compute.v1.WorkerInfo
+	4,  // 20: compute.v1.ClientService.CancelJob:input_type -> compute.v1.CancelJobRequest
+	9,  // 21: compute.v1.ClientService.ListWorkers:input_type -> compute.v1.ListWorkersRequest
+	0,  // 22: compute.v1.ClientService.SubmitJob:input_type -> compute.v1.SubmitJobRequest
+	2,  // 23: compute.v1.ClientService.GetJobStatus:input_type -> compute.v1.GetJobStatusRequest
+	6,  // 24: compute.v1.ClientService.GetJobResult:input_type -> compute.v1.GetJobResultRequest
+	5,  // 25: compute.v1.ClientService.CancelJob:output_type -> compute.v1.CancelJobResponse
+	10, // 26: compute.v1.ClientService.ListWorkers:output_type -> compute.v1.ListWorkersResponse
+	1,  // 27: compute.v1.ClientService.SubmitJob:output_type -> compute.v1.SubmitJobResponse
+	3,  // 28: compute.v1.ClientService.GetJobStatus:output_type -> compute.v1.GetJobStatusResponse
+	7,  // 29: compute.v1.ClientService.GetJobResult:output_type -> compute.v1.GetJobResultResponse
+	25, // [25:30] is the sub-list for method output_type
+	20, // [20:25] is the sub-list for method input_type
+	20, // [20:20] is the sub-list for extension type_name
+	20, // [20:20] is the sub-list for extension extendee
+	0,  // [0:20] is the sub-list for field type_name
 }
 
 func init() { file_client_proto_init() }
@@ -736,7 +902,7 @@ func file_client_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_client_proto_rawDesc), len(file_client_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   10,
+			NumMessages:   12,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

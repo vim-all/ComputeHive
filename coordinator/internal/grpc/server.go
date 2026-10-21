@@ -3,42 +3,46 @@ package grpcserver
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
-	"time"
 
 	"coordinator/internal/config"
-	"coordinator/internal/scheduler"
+	"coordinator/internal/queue"
 	pb "coordinator/pkg/pb"
 
-	"github.com/redis/go-redis/v9"
 	"google.golang.org/grpc"
 )
 
 // Server implements both worker-facing and client-facing gRPC services.
+// It holds no state of its own: everything lives in the queue (Redis), so any
+// number of coordinators can serve the same cluster and a crash loses nothing.
 type Server struct {
 	pb.UnimplementedWorkerServiceServer
 	pb.UnimplementedClientServiceServer
-	redis     *redis.Client
-	scheduler *scheduler.Scheduler
+	queue *queue.Queue
+	cfg   config.Config
+	log   *slog.Logger
 }
 
-// Redis exposes the Redis client for readiness probes.
-func (s *Server) Redis() *redis.Client { return s.redis }
-
-func NewServer(redisClient *redis.Client) *Server {
-	return &Server{
-		redis:     redisClient,
-		scheduler: scheduler.New(redisClient),
-	}
+// NewServer builds the gRPC service over q.
+func NewServer(q *queue.Queue, cfg config.Config, log *slog.Logger) *Server {
+	return &Server{queue: q, cfg: cfg, log: log}
 }
 
+// Queue exposes the queue (readiness probes, metrics).
+func (s *Server) Queue() *queue.Queue { return s.queue }
+
+// Start serves gRPC until ctx is cancelled, then stops gracefully.
 func Start(ctx context.Context, cfg config.Config, svc *Server) error {
 	listener, err := net.Listen("tcp", cfg.GRPCListenAddr())
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", cfg.GRPCListenAddr(), err)
 	}
+	return Serve(ctx, listener, svc)
+}
 
+// Serve serves gRPC on an existing listener (tests use ephemeral ports).
+func Serve(ctx context.Context, listener net.Listener, svc *Server) error {
 	grpcServer := grpc.NewServer()
 	pb.RegisterWorkerServiceServer(grpcServer, svc)
 	pb.RegisterClientServiceServer(grpcServer, svc)
@@ -48,8 +52,6 @@ func Start(ctx context.Context, cfg config.Config, svc *Server) error {
 		grpcServer.GracefulStop()
 	}()
 
-	go svc.scheduler.StartWorkerMonitor(ctx, 3*time.Second)
-
-	log.Printf("coordinator gRPC server listening on %s", cfg.GRPCListenAddr())
+	svc.log.Info("coordinator gRPC server listening", "addr", listener.Addr().String())
 	return grpcServer.Serve(listener)
 }

@@ -3,7 +3,15 @@ package config
 import (
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestLoadRejectsMalformedDuration(t *testing.T) {
+	t.Setenv("WORKER_DEAD_AFTER", "six seconds")
+	if _, err := Load(nil); err == nil || !strings.Contains(err.Error(), "WORKER_DEAD_AFTER") {
+		t.Fatalf("want an error naming WORKER_DEAD_AFTER, got %v", err)
+	}
+}
 
 func TestLoadDefaultsAllowLocalRedis(t *testing.T) {
 	for _, k := range []string{"REDIS_URL", "REDIS_ADDR", "REDIS_HOST", "REDIS_PORT", "GRPC_PORT", "HTTP_PORT"} {
@@ -30,7 +38,9 @@ func TestLoadFlagsOverrideEnv(t *testing.T) {
 }
 
 func TestValidateErrors(t *testing.T) {
-	base := Config{GRPCPort: "50051", HTTPPort: "8080", RedisAddr: "r:6379", ArtifactDir: "d", ArtifactMaxBytes: 1}
+	base := Config{GRPCPort: "50051", HTTPPort: "8080", RedisAddr: "r:6379", ArtifactDir: "d", ArtifactMaxBytes: 1,
+		HeartbeatInterval: 2 * time.Second, WorkerDeadAfter: 6 * time.Second, ReapInterval: time.Second,
+		MaxAttempts: 3, BackoffBase: time.Second, BackoffMax: 30 * time.Second}
 	cases := []struct {
 		name    string
 		mutate  func(*Config)
@@ -43,6 +53,11 @@ func TestValidateErrors(t *testing.T) {
 		{"negative db", func(c *Config) { c.RedisDB = -1 }, "redis-db"},
 		{"no artifact dir", func(c *Config) { c.ArtifactDir = "" }, "artifact-dir"},
 		{"zero max bytes", func(c *Config) { c.ArtifactMaxBytes = 0 }, "artifact-max-bytes"},
+		{"dead-after too tight for heartbeat", func(c *Config) { c.WorkerDeadAfter = 3 * time.Second }, "worker-dead-after"},
+		{"zero heartbeat", func(c *Config) { c.HeartbeatInterval = 0 }, "heartbeat-interval"},
+		{"zero reap interval", func(c *Config) { c.ReapInterval = 0 }, "reap-interval"},
+		{"zero attempts", func(c *Config) { c.MaxAttempts = 0 }, "max-attempts"},
+		{"backoff inverted", func(c *Config) { c.BackoffMax = time.Millisecond }, "backoff-max"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

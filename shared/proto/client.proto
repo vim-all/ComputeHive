@@ -15,6 +15,12 @@ message SubmitJobRequest {
   JobSchema job = 6;
   string artifact_url = 7;
   string artifact_sha256 = 8;
+  // Max assignment attempts before the job is parked as DEAD (0 = server default).
+  int32 max_attempts = 9;
+  // Submitting user, used for per-user concurrency limits and fairness.
+  string user = 10;
+  // Run on two workers and compare output hashes (untrusted-worker mitigation).
+  bool verify = 11;
 }
 
 message SubmitJobResponse {
@@ -33,6 +39,19 @@ message GetJobStatusResponse {
   int64 updated_at_unix = 3;
   AssignmentSchema assignment = 4;
   JobLifecycleStatus job_status = 5;
+  int32 attempt = 6;
+  int32 max_attempts = 7;
+  string last_failure = 8;
+  int64 queue_seq = 9;
+}
+
+message CancelJobRequest {
+  JobID job_id = 1;
+}
+
+message CancelJobResponse {
+  // "ok", or "duplicate" if the job had already reached a terminal state.
+  string disposition = 1;
 }
 
 message GetJobResultRequest {
@@ -65,6 +84,9 @@ message ListWorkersResponse {
 }
 
 service ClientService {
+  // Cancels a job in any non-terminal state.
+  rpc CancelJob(CancelJobRequest) returns (CancelJobResponse);
+
   // Lists registered workers with liveness and assigned jobs.
   rpc ListWorkers(ListWorkersRequest) returns (ListWorkersResponse);
 

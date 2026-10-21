@@ -85,11 +85,11 @@ Docker 29.8 (runc only), Go 1.27, cargo 1.94, 16 cores / 15 GB RAM. Not verifiab
 
 | # | Finding | Resolved in |
 |---|---|---|
-| A1 | Claim script ignores liveness/overload; follow-up writes non-atomic | Phase 2 / 3 |
-| A2 | Requeue loses FIFO position; no attempt counter; no DEAD state | Phase 2 |
-| A3 | Liveness timings hard-coded and unmeasured | Phase 2 / 8 |
-| A4 | No lease/attempt tokens; late result can commit | Phase 2 |
-| A5 | No Redis persistence or coordinator recovery | Phase 1 / 2 |
+| A1 | Claim script ignores liveness/overload; follow-up writes non-atomic | **Phase 2 (done)**: single atomic claim script checks liveness, overload, drain, capacity, requirements. 90% rule wiring in Phase 3 |
+| A2 | Requeue loses FIFO position; no attempt counter; no DEAD state | **Phase 2 (done)**: ZSET keyed by original sequence; attempts, backoff, DEAD set, revive |
+| A3 | Liveness timings hard-coded and unmeasured | **Phase 2 (done)**: configurable and validated; measured 5.6-6.7s in-process, 4.7-5.9s on real containers. Full percentiles in Phase 8 |
+| A4 | No lease/attempt tokens; late result can commit | **Phase 2 (done)**: lease tokens; stale/duplicate results discarded |
+| A5 | No Redis persistence or coordinator recovery | **Phase 1+2 (done)**: AOF in compose; stateless coordinator; Redis SIGKILL and coordinator restart tests |
 | A6 | Heartbeat carries no usage; no 90% rule | Phase 3 |
 | A7 | Executor not hardened; unbounded output; container survives timeout | Phase 4 |
 | A8 | No auth/TLS/rate limit | Phase 4 |
@@ -101,3 +101,6 @@ Docker 29.8 (runc only), Go 1.27, cargo 1.94, 16 cores / 15 GB RAM. Not verifiab
 | A14 | Dead `worker/internal/store/resp.go` (raw-Redis client) and deprecated `grpc.DialContext/WithBlock`, found by staticcheck | Phase 1 (deleted; `grpc.NewClient`) |
 | A15 | Artifacts required external S3/R2, so a self-hosted cluster could not run a job without cloud credentials | Phase 1 (coordinator artifact store + `computehive-artifact://` references) |
 | A16 | `SubmitJob` required a command even when the image has a `CMD` | Phase 1 (allowed when an artifact is attached) |
+| A17 | A claim whose reply is lost (crash between the atomic claim and the worker hearing about it) strands the job on a live worker | **Phase 2 (done)**: found by the Redis-restart chaos test; fixed by heartbeat reconciliation (see decisions.md D-13) |
+| A18 | `docker run` timeout/cancel left the container running (only the CLI client was killed) | **Phase 2 (done)**: container removed by name; Phase 4 hardens further |
+| A19 | Worker polled `RequestJob` in a tight loop with no delay | **Phase 2 (done)**: `POLL_INTERVAL` (500ms) |

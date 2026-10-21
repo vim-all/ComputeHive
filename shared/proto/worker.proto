@@ -139,6 +139,10 @@ enum Status {
   STATUS_SUCCEEDED = 4;
   STATUS_FAILED = 5;
   STATUS_CANCELED = 6;
+  // Failed attempt waiting to be re-assigned (original queue position kept).
+  STATUS_REQUEUED = 7;
+  // Exhausted max attempts; parked in the dead-letter set.
+  STATUS_DEAD = 8;
 }
 
 // Minimal executable job definition for worker execution.
@@ -153,6 +157,10 @@ message Job {
   int32 max_runtime_seconds = 8;
   string artifact_url = 9;
   string artifact_sha256 = 10;
+  // 1-based attempt number of this assignment.
+  int32 attempt = 11;
+  // Opaque token proving ownership of this attempt; must accompany SubmitResult.
+  string lease_token = 12;
 }
 
 // Worker-reported job execution result.
@@ -168,12 +176,20 @@ message Result {
   string output_api_url = 9;
   string output_public_url = 10;
   int64 output_size_bytes = 11;
+  // Why a non-successful attempt ended: "job_exit" (the job's own failure, terminal),
+  // "timeout" (job exceeded its runtime, terminal), "infra" (worker-side problem, retried),
+  // "evicted" (worker shed load, retried without burning an attempt).
+  string failure_reason = 12;
 }
 
 message RegisterWorkerRequest {
   ResourceSpec available_resources = 1;
   string worker_version = 2;
   WorkerSchema worker = 3;
+  // Stable identity requested by the worker; kept across restarts. Empty = server assigns one.
+  string worker_id = 4;
+  // Maximum concurrent jobs this worker will run (default 1).
+  int32 max_jobs = 5;
 }
 
 message RegisterWorkerResponse {
@@ -186,11 +202,19 @@ message HeartbeatRequest {
   ResourceSpec available_resources = 2;
   repeated JobID running_jobs = 3;
   WorkerCurrentLoad current_load = 4;
+  // Worker is over its resource thresholds: the coordinator must not assign it jobs.
+  bool overloaded = 5;
+  // Worker is shutting down or paused: finish current jobs, take no new ones.
+  bool draining = 6;
+  int32 max_jobs = 7;
 }
 
 message HeartbeatResponse {
   bool accepted = 1;
   int64 server_time_unix = 2;
+  // Jobs the worker reports running that it no longer owns (requeued, cancelled, or
+  // already finished elsewhere). The worker must abort them and discard their results.
+  repeated string cancel_job_ids = 3;
 }
 
 message RequestJobRequest {
@@ -208,10 +232,14 @@ message SubmitResultRequest {
   WorkerID worker_id = 1;
   Result result = 2;
   JobResultSchema result_schema = 3;
+  // Lease token from the Job this result belongs to.
+  string lease_token = 4;
 }
 
 message SubmitResultResponse {
   bool accepted = 1;
+  // "ok", "duplicate" (job already finished: no-op), or "stale" (lease no longer valid: discarded).
+  string disposition = 2;
 }
 
 service WorkerService {
