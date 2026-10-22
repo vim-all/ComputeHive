@@ -21,6 +21,7 @@ type Metrics struct {
 	Load5      float64
 	Load15     float64
 
+	WorkDiskFreeMB        int64   // free space on that filesystem, for disk-hungry jobs
 	WorkDiskUsedPercent   float64 // filesystem holding job work directories
 	DockerDiskUsedPercent float64 // filesystem holding Docker's data root (falls back to the work dir)
 

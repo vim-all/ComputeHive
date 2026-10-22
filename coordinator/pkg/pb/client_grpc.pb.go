@@ -19,6 +19,7 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
+	ClientService_ExplainJob_FullMethodName   = "/compute.v1.ClientService/ExplainJob"
 	ClientService_CancelJob_FullMethodName    = "/compute.v1.ClientService/CancelJob"
 	ClientService_ListWorkers_FullMethodName  = "/compute.v1.ClientService/ListWorkers"
 	ClientService_SubmitJob_FullMethodName    = "/compute.v1.ClientService/SubmitJob"
@@ -30,6 +31,8 @@ const (
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type ClientServiceClient interface {
+	// Shows why each worker was chosen or rejected for a job.
+	ExplainJob(ctx context.Context, in *ExplainJobRequest, opts ...grpc.CallOption) (*ExplainJobResponse, error)
 	// Cancels a job in any non-terminal state.
 	CancelJob(ctx context.Context, in *CancelJobRequest, opts ...grpc.CallOption) (*CancelJobResponse, error)
 	// Lists registered workers with liveness and assigned jobs.
@@ -48,6 +51,16 @@ type clientServiceClient struct {
 
 func NewClientServiceClient(cc grpc.ClientConnInterface) ClientServiceClient {
 	return &clientServiceClient{cc}
+}
+
+func (c *clientServiceClient) ExplainJob(ctx context.Context, in *ExplainJobRequest, opts ...grpc.CallOption) (*ExplainJobResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ExplainJobResponse)
+	err := c.cc.Invoke(ctx, ClientService_ExplainJob_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (c *clientServiceClient) CancelJob(ctx context.Context, in *CancelJobRequest, opts ...grpc.CallOption) (*CancelJobResponse, error) {
@@ -104,6 +117,8 @@ func (c *clientServiceClient) GetJobResult(ctx context.Context, in *GetJobResult
 // All implementations must embed UnimplementedClientServiceServer
 // for forward compatibility.
 type ClientServiceServer interface {
+	// Shows why each worker was chosen or rejected for a job.
+	ExplainJob(context.Context, *ExplainJobRequest) (*ExplainJobResponse, error)
 	// Cancels a job in any non-terminal state.
 	CancelJob(context.Context, *CancelJobRequest) (*CancelJobResponse, error)
 	// Lists registered workers with liveness and assigned jobs.
@@ -124,6 +139,9 @@ type ClientServiceServer interface {
 // pointer dereference when methods are called.
 type UnimplementedClientServiceServer struct{}
 
+func (UnimplementedClientServiceServer) ExplainJob(context.Context, *ExplainJobRequest) (*ExplainJobResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ExplainJob not implemented")
+}
 func (UnimplementedClientServiceServer) CancelJob(context.Context, *CancelJobRequest) (*CancelJobResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CancelJob not implemented")
 }
@@ -158,6 +176,24 @@ func RegisterClientServiceServer(s grpc.ServiceRegistrar, srv ClientServiceServe
 		t.testEmbeddedByValue()
 	}
 	s.RegisterService(&ClientService_ServiceDesc, srv)
+}
+
+func _ClientService_ExplainJob_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ExplainJobRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ClientServiceServer).ExplainJob(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ClientService_ExplainJob_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ClientServiceServer).ExplainJob(ctx, req.(*ExplainJobRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
 func _ClientService_CancelJob_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
@@ -257,6 +293,10 @@ var ClientService_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "compute.v1.ClientService",
 	HandlerType: (*ClientServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "ExplainJob",
+			Handler:    _ClientService_ExplainJob_Handler,
+		},
 		{
 			MethodName: "CancelJob",
 			Handler:    _ClientService_CancelJob_Handler,

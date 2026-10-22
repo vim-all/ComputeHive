@@ -42,7 +42,12 @@ type SubmitJobRequest struct {
 	// Hosts the job needs to reach (for example "pypi.org"). Off by default: jobs get no network.
 	// Honoured only by workers whose contributor allows network jobs and lists the host; the
 	// worker's filtering proxy still refuses private, loopback and metadata addresses.
-	NetworkHosts  []string `protobuf:"bytes,13,rep,name=network_hosts,json=networkHosts,proto3" json:"network_hosts,omitempty"`
+	NetworkHosts []string `protobuf:"bytes,13,rep,name=network_hosts,json=networkHosts,proto3" json:"network_hosts,omitempty"`
+	// Placement requirements (all optional; 0 / empty = no requirement).
+	MinDiskMb     int32    `protobuf:"varint,14,opt,name=min_disk_mb,json=minDiskMb,proto3" json:"min_disk_mb,omitempty"`
+	Os            string   `protobuf:"bytes,15,opt,name=os,proto3" json:"os,omitempty"`         // "linux", "darwin", "windows"
+	Arch          string   `protobuf:"bytes,16,opt,name=arch,proto3" json:"arch,omitempty"`     // "amd64", "arm64"
+	Labels        []string `protobuf:"bytes,17,rep,name=labels,proto3" json:"labels,omitempty"` // "key=value": the worker must carry every one
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -164,6 +169,34 @@ func (x *SubmitJobRequest) GetRequiredIsolation() string {
 func (x *SubmitJobRequest) GetNetworkHosts() []string {
 	if x != nil {
 		return x.NetworkHosts
+	}
+	return nil
+}
+
+func (x *SubmitJobRequest) GetMinDiskMb() int32 {
+	if x != nil {
+		return x.MinDiskMb
+	}
+	return 0
+}
+
+func (x *SubmitJobRequest) GetOs() string {
+	if x != nil {
+		return x.Os
+	}
+	return ""
+}
+
+func (x *SubmitJobRequest) GetArch() string {
+	if x != nil {
+		return x.Arch
+	}
+	return ""
+}
+
+func (x *SubmitJobRequest) GetLabels() []string {
+	if x != nil {
+		return x.Labels
 	}
 	return nil
 }
@@ -614,6 +647,11 @@ type WorkerInfo struct {
 	Usage         *ResourceUsage `protobuf:"bytes,10,opt,name=usage,proto3" json:"usage,omitempty"`
 	Isolation     string         `protobuf:"bytes,11,opt,name=isolation,proto3" json:"isolation,omitempty"`
 	AllowsNetwork bool           `protobuf:"varint,12,opt,name=allows_network,json=allowsNetwork,proto3" json:"allows_network,omitempty"`
+	Os            string         `protobuf:"bytes,13,opt,name=os,proto3" json:"os,omitempty"`
+	Arch          string         `protobuf:"bytes,14,opt,name=arch,proto3" json:"arch,omitempty"`
+	Labels        []string       `protobuf:"bytes,15,rep,name=labels,proto3" json:"labels,omitempty"`
+	Reliability   float64        `protobuf:"fixed64,16,opt,name=reliability,proto3" json:"reliability,omitempty"` // 0-1, decayed success rate of recent jobs
+	Preference    int32          `protobuf:"varint,17,opt,name=preference,proto3" json:"preference,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -732,6 +770,41 @@ func (x *WorkerInfo) GetAllowsNetwork() bool {
 	return false
 }
 
+func (x *WorkerInfo) GetOs() string {
+	if x != nil {
+		return x.Os
+	}
+	return ""
+}
+
+func (x *WorkerInfo) GetArch() string {
+	if x != nil {
+		return x.Arch
+	}
+	return ""
+}
+
+func (x *WorkerInfo) GetLabels() []string {
+	if x != nil {
+		return x.Labels
+	}
+	return nil
+}
+
+func (x *WorkerInfo) GetReliability() float64 {
+	if x != nil {
+		return x.Reliability
+	}
+	return 0
+}
+
+func (x *WorkerInfo) GetPreference() int32 {
+	if x != nil {
+		return x.Preference
+	}
+	return 0
+}
+
 type ListWorkersRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -812,12 +885,251 @@ func (x *ListWorkersResponse) GetWorkers() []*WorkerInfo {
 	return nil
 }
 
+// One worker's evaluation for a job: why it was rejected, or how it scored.
+type WorkerEvaluation struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	WorkerId      *WorkerID              `protobuf:"bytes,1,opt,name=worker_id,json=workerId,proto3" json:"worker_id,omitempty"`
+	Eligible      bool                   `protobuf:"varint,2,opt,name=eligible,proto3" json:"eligible,omitempty"`
+	Reasons       []string               `protobuf:"bytes,3,rep,name=reasons,proto3" json:"reasons,omitempty"`                                                                         // why it cannot run the job (empty if eligible)
+	Score         float64                `protobuf:"fixed64,4,opt,name=score,proto3" json:"score,omitempty"`                                                                           // total weighted score (eligible workers only)
+	Parts         map[string]float64     `protobuf:"bytes,5,rep,name=parts,proto3" json:"parts,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"fixed64,2,opt,name=value"` // weighted contribution of each scoring component
+	Chosen        bool                   `protobuf:"varint,6,opt,name=chosen,proto3" json:"chosen,omitempty"`
+	Busy          bool                   `protobuf:"varint,7,opt,name=busy,proto3" json:"busy,omitempty"` // eligible but has no free slot right now
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WorkerEvaluation) Reset() {
+	*x = WorkerEvaluation{}
+	mi := &file_client_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WorkerEvaluation) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WorkerEvaluation) ProtoMessage() {}
+
+func (x *WorkerEvaluation) ProtoReflect() protoreflect.Message {
+	mi := &file_client_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WorkerEvaluation.ProtoReflect.Descriptor instead.
+func (*WorkerEvaluation) Descriptor() ([]byte, []int) {
+	return file_client_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *WorkerEvaluation) GetWorkerId() *WorkerID {
+	if x != nil {
+		return x.WorkerId
+	}
+	return nil
+}
+
+func (x *WorkerEvaluation) GetEligible() bool {
+	if x != nil {
+		return x.Eligible
+	}
+	return false
+}
+
+func (x *WorkerEvaluation) GetReasons() []string {
+	if x != nil {
+		return x.Reasons
+	}
+	return nil
+}
+
+func (x *WorkerEvaluation) GetScore() float64 {
+	if x != nil {
+		return x.Score
+	}
+	return 0
+}
+
+func (x *WorkerEvaluation) GetParts() map[string]float64 {
+	if x != nil {
+		return x.Parts
+	}
+	return nil
+}
+
+func (x *WorkerEvaluation) GetChosen() bool {
+	if x != nil {
+		return x.Chosen
+	}
+	return false
+}
+
+func (x *WorkerEvaluation) GetBusy() bool {
+	if x != nil {
+		return x.Busy
+	}
+	return false
+}
+
+type ExplainJobRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	JobId         *JobID                 `protobuf:"bytes,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ExplainJobRequest) Reset() {
+	*x = ExplainJobRequest{}
+	mi := &file_client_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ExplainJobRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ExplainJobRequest) ProtoMessage() {}
+
+func (x *ExplainJobRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_client_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ExplainJobRequest.ProtoReflect.Descriptor instead.
+func (*ExplainJobRequest) Descriptor() ([]byte, []int) {
+	return file_client_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *ExplainJobRequest) GetJobId() *JobID {
+	if x != nil {
+		return x.JobId
+	}
+	return nil
+}
+
+type ExplainJobResponse struct {
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	JobId   *JobID                 `protobuf:"bytes,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
+	Status  Status                 `protobuf:"varint,2,opt,name=status,proto3,enum=compute.v1.Status" json:"status,omitempty"`
+	Summary string                 `protobuf:"bytes,3,opt,name=summary,proto3" json:"summary,omitempty"`
+	// True if this is the record made when the job was assigned; false if it is a live evaluation
+	// of the current cluster for a job that is still waiting.
+	Recorded         bool                `protobuf:"varint,4,opt,name=recorded,proto3" json:"recorded,omitempty"`
+	EvaluatedAtUnix  int64               `protobuf:"varint,5,opt,name=evaluated_at_unix,json=evaluatedAtUnix,proto3" json:"evaluated_at_unix,omitempty"`
+	AssignedWorkerId string              `protobuf:"bytes,6,opt,name=assigned_worker_id,json=assignedWorkerId,proto3" json:"assigned_worker_id,omitempty"`
+	Evaluations      []*WorkerEvaluation `protobuf:"bytes,7,rep,name=evaluations,proto3" json:"evaluations,omitempty"`
+	Weights          map[string]float64  `protobuf:"bytes,8,rep,name=weights,proto3" json:"weights,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"fixed64,2,opt,name=value"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *ExplainJobResponse) Reset() {
+	*x = ExplainJobResponse{}
+	mi := &file_client_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ExplainJobResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ExplainJobResponse) ProtoMessage() {}
+
+func (x *ExplainJobResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_client_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ExplainJobResponse.ProtoReflect.Descriptor instead.
+func (*ExplainJobResponse) Descriptor() ([]byte, []int) {
+	return file_client_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *ExplainJobResponse) GetJobId() *JobID {
+	if x != nil {
+		return x.JobId
+	}
+	return nil
+}
+
+func (x *ExplainJobResponse) GetStatus() Status {
+	if x != nil {
+		return x.Status
+	}
+	return Status_STATUS_UNSPECIFIED
+}
+
+func (x *ExplainJobResponse) GetSummary() string {
+	if x != nil {
+		return x.Summary
+	}
+	return ""
+}
+
+func (x *ExplainJobResponse) GetRecorded() bool {
+	if x != nil {
+		return x.Recorded
+	}
+	return false
+}
+
+func (x *ExplainJobResponse) GetEvaluatedAtUnix() int64 {
+	if x != nil {
+		return x.EvaluatedAtUnix
+	}
+	return 0
+}
+
+func (x *ExplainJobResponse) GetAssignedWorkerId() string {
+	if x != nil {
+		return x.AssignedWorkerId
+	}
+	return ""
+}
+
+func (x *ExplainJobResponse) GetEvaluations() []*WorkerEvaluation {
+	if x != nil {
+		return x.Evaluations
+	}
+	return nil
+}
+
+func (x *ExplainJobResponse) GetWeights() map[string]float64 {
+	if x != nil {
+		return x.Weights
+	}
+	return nil
+}
+
 var File_client_proto protoreflect.FileDescriptor
 
 const file_client_proto_rawDesc = "" +
 	"\n" +
 	"\fclient.proto\x12\n" +
-	"compute.v1\x1a\fworker.proto\"\xf7\x04\n" +
+	"compute.v1\x1a\fworker.proto\"\xd3\x05\n" +
 	"\x10SubmitJobRequest\x12'\n" +
 	"\x0fcontainer_image\x18\x01 \x01(\tR\x0econtainerImage\x12\x18\n" +
 	"\acommand\x18\x02 \x03(\tR\acommand\x12G\n" +
@@ -832,7 +1144,11 @@ const file_client_proto_rawDesc = "" +
 	" \x01(\tR\x04user\x12\x16\n" +
 	"\x06verify\x18\v \x01(\bR\x06verify\x12-\n" +
 	"\x12required_isolation\x18\f \x01(\tR\x11requiredIsolation\x12#\n" +
-	"\rnetwork_hosts\x18\r \x03(\tR\fnetworkHosts\x1a>\n" +
+	"\rnetwork_hosts\x18\r \x03(\tR\fnetworkHosts\x12\x1e\n" +
+	"\vmin_disk_mb\x18\x0e \x01(\x05R\tminDiskMb\x12\x0e\n" +
+	"\x02os\x18\x0f \x01(\tR\x02os\x12\x12\n" +
+	"\x04arch\x18\x10 \x01(\tR\x04arch\x12\x16\n" +
+	"\x06labels\x18\x11 \x03(\tR\x06labels\x1a>\n" +
 	"\x10EnvironmentEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xa8\x01\n" +
@@ -870,7 +1186,7 @@ const file_client_proto_rawDesc = "" +
 	"\x06result\x18\x03 \x01(\v2\x12.compute.v1.ResultR\x06result\x12@\n" +
 	"\rresult_schema\x18\x04 \x01(\v2\x1b.compute.v1.JobResultSchemaR\fresultSchema\x12=\n" +
 	"\n" +
-	"job_status\x18\x05 \x01(\x0e2\x1e.compute.v1.JobLifecycleStatusR\tjobStatus\"\xed\x03\n" +
+	"job_status\x18\x05 \x01(\x0e2\x1e.compute.v1.JobLifecycleStatusR\tjobStatus\"\xeb\x04\n" +
 	"\n" +
 	"WorkerInfo\x121\n" +
 	"\tworker_id\x18\x01 \x01(\v2\x14.compute.v1.WorkerIDR\bworkerId\x126\n" +
@@ -887,11 +1203,46 @@ const file_client_proto_rawDesc = "" +
 	"\x05usage\x18\n" +
 	" \x01(\v2\x19.compute.v1.ResourceUsageR\x05usage\x12\x1c\n" +
 	"\tisolation\x18\v \x01(\tR\tisolation\x12%\n" +
-	"\x0eallows_network\x18\f \x01(\bR\rallowsNetwork\"\x14\n" +
+	"\x0eallows_network\x18\f \x01(\bR\rallowsNetwork\x12\x0e\n" +
+	"\x02os\x18\r \x01(\tR\x02os\x12\x12\n" +
+	"\x04arch\x18\x0e \x01(\tR\x04arch\x12\x16\n" +
+	"\x06labels\x18\x0f \x03(\tR\x06labels\x12 \n" +
+	"\vreliability\x18\x10 \x01(\x01R\vreliability\x12\x1e\n" +
+	"\n" +
+	"preference\x18\x11 \x01(\x05R\n" +
+	"preference\"\x14\n" +
 	"\x12ListWorkersRequest\"G\n" +
 	"\x13ListWorkersResponse\x120\n" +
-	"\aworkers\x18\x01 \x03(\v2\x16.compute.v1.WorkerInfoR\aworkers2\x99\x03\n" +
-	"\rClientService\x12H\n" +
+	"\aworkers\x18\x01 \x03(\v2\x16.compute.v1.WorkerInfoR\aworkers\"\xb6\x02\n" +
+	"\x10WorkerEvaluation\x121\n" +
+	"\tworker_id\x18\x01 \x01(\v2\x14.compute.v1.WorkerIDR\bworkerId\x12\x1a\n" +
+	"\beligible\x18\x02 \x01(\bR\beligible\x12\x18\n" +
+	"\areasons\x18\x03 \x03(\tR\areasons\x12\x14\n" +
+	"\x05score\x18\x04 \x01(\x01R\x05score\x12=\n" +
+	"\x05parts\x18\x05 \x03(\v2'.compute.v1.WorkerEvaluation.PartsEntryR\x05parts\x12\x16\n" +
+	"\x06chosen\x18\x06 \x01(\bR\x06chosen\x12\x12\n" +
+	"\x04busy\x18\a \x01(\bR\x04busy\x1a8\n" +
+	"\n" +
+	"PartsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\x01R\x05value:\x028\x01\"=\n" +
+	"\x11ExplainJobRequest\x12(\n" +
+	"\x06job_id\x18\x01 \x01(\v2\x11.compute.v1.JobIDR\x05jobId\"\xbd\x03\n" +
+	"\x12ExplainJobResponse\x12(\n" +
+	"\x06job_id\x18\x01 \x01(\v2\x11.compute.v1.JobIDR\x05jobId\x12*\n" +
+	"\x06status\x18\x02 \x01(\x0e2\x12.compute.v1.StatusR\x06status\x12\x18\n" +
+	"\asummary\x18\x03 \x01(\tR\asummary\x12\x1a\n" +
+	"\brecorded\x18\x04 \x01(\bR\brecorded\x12*\n" +
+	"\x11evaluated_at_unix\x18\x05 \x01(\x03R\x0fevaluatedAtUnix\x12,\n" +
+	"\x12assigned_worker_id\x18\x06 \x01(\tR\x10assignedWorkerId\x12>\n" +
+	"\vevaluations\x18\a \x03(\v2\x1c.compute.v1.WorkerEvaluationR\vevaluations\x12E\n" +
+	"\aweights\x18\b \x03(\v2+.compute.v1.ExplainJobResponse.WeightsEntryR\aweights\x1a:\n" +
+	"\fWeightsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\x01R\x05value:\x028\x012\xe6\x03\n" +
+	"\rClientService\x12K\n" +
+	"\n" +
+	"ExplainJob\x12\x1d.compute.v1.ExplainJobRequest\x1a\x1e.compute.v1.ExplainJobResponse\x12H\n" +
 	"\tCancelJob\x12\x1c.compute.v1.CancelJobRequest\x1a\x1d.compute.v1.CancelJobResponse\x12N\n" +
 	"\vListWorkers\x12\x1e.compute.v1.ListWorkersRequest\x1a\x1f.compute.v1.ListWorkersResponse\x12H\n" +
 	"\tSubmitJob\x12\x1c.compute.v1.SubmitJobRequest\x1a\x1d.compute.v1.SubmitJobResponse\x12Q\n" +
@@ -910,7 +1261,7 @@ func file_client_proto_rawDescGZIP() []byte {
 	return file_client_proto_rawDescData
 }
 
-var file_client_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
+var file_client_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
 var file_client_proto_goTypes = []any{
 	(*SubmitJobRequest)(nil),     // 0: compute.v1.SubmitJobRequest
 	(*SubmitJobResponse)(nil),    // 1: compute.v1.SubmitJobResponse
@@ -923,55 +1274,69 @@ var file_client_proto_goTypes = []any{
 	(*WorkerInfo)(nil),           // 8: compute.v1.WorkerInfo
 	(*ListWorkersRequest)(nil),   // 9: compute.v1.ListWorkersRequest
 	(*ListWorkersResponse)(nil),  // 10: compute.v1.ListWorkersResponse
-	nil,                          // 11: compute.v1.SubmitJobRequest.EnvironmentEntry
-	(*ResourceSpec)(nil),         // 12: compute.v1.ResourceSpec
-	(*JobSchema)(nil),            // 13: compute.v1.JobSchema
-	(*JobID)(nil),                // 14: compute.v1.JobID
-	(Status)(0),                  // 15: compute.v1.Status
-	(JobLifecycleStatus)(0),      // 16: compute.v1.JobLifecycleStatus
-	(*AssignmentSchema)(nil),     // 17: compute.v1.AssignmentSchema
-	(*Result)(nil),               // 18: compute.v1.Result
-	(*JobResultSchema)(nil),      // 19: compute.v1.JobResultSchema
-	(*WorkerID)(nil),             // 20: compute.v1.WorkerID
-	(*ResourceUsage)(nil),        // 21: compute.v1.ResourceUsage
+	(*WorkerEvaluation)(nil),     // 11: compute.v1.WorkerEvaluation
+	(*ExplainJobRequest)(nil),    // 12: compute.v1.ExplainJobRequest
+	(*ExplainJobResponse)(nil),   // 13: compute.v1.ExplainJobResponse
+	nil,                          // 14: compute.v1.SubmitJobRequest.EnvironmentEntry
+	nil,                          // 15: compute.v1.WorkerEvaluation.PartsEntry
+	nil,                          // 16: compute.v1.ExplainJobResponse.WeightsEntry
+	(*ResourceSpec)(nil),         // 17: compute.v1.ResourceSpec
+	(*JobSchema)(nil),            // 18: compute.v1.JobSchema
+	(*JobID)(nil),                // 19: compute.v1.JobID
+	(Status)(0),                  // 20: compute.v1.Status
+	(JobLifecycleStatus)(0),      // 21: compute.v1.JobLifecycleStatus
+	(*AssignmentSchema)(nil),     // 22: compute.v1.AssignmentSchema
+	(*Result)(nil),               // 23: compute.v1.Result
+	(*JobResultSchema)(nil),      // 24: compute.v1.JobResultSchema
+	(*WorkerID)(nil),             // 25: compute.v1.WorkerID
+	(*ResourceUsage)(nil),        // 26: compute.v1.ResourceUsage
 }
 var file_client_proto_depIdxs = []int32{
-	12, // 0: compute.v1.SubmitJobRequest.required_resources:type_name -> compute.v1.ResourceSpec
-	11, // 1: compute.v1.SubmitJobRequest.environment:type_name -> compute.v1.SubmitJobRequest.EnvironmentEntry
-	13, // 2: compute.v1.SubmitJobRequest.job:type_name -> compute.v1.JobSchema
-	14, // 3: compute.v1.SubmitJobResponse.job_id:type_name -> compute.v1.JobID
-	15, // 4: compute.v1.SubmitJobResponse.status:type_name -> compute.v1.Status
-	16, // 5: compute.v1.SubmitJobResponse.job_status:type_name -> compute.v1.JobLifecycleStatus
-	14, // 6: compute.v1.GetJobStatusRequest.job_id:type_name -> compute.v1.JobID
-	15, // 7: compute.v1.GetJobStatusResponse.status:type_name -> compute.v1.Status
-	17, // 8: compute.v1.GetJobStatusResponse.assignment:type_name -> compute.v1.AssignmentSchema
-	16, // 9: compute.v1.GetJobStatusResponse.job_status:type_name -> compute.v1.JobLifecycleStatus
-	14, // 10: compute.v1.CancelJobRequest.job_id:type_name -> compute.v1.JobID
-	14, // 11: compute.v1.GetJobResultRequest.job_id:type_name -> compute.v1.JobID
-	15, // 12: compute.v1.GetJobResultResponse.status:type_name -> compute.v1.Status
-	18, // 13: compute.v1.GetJobResultResponse.result:type_name -> compute.v1.Result
-	19, // 14: compute.v1.GetJobResultResponse.result_schema:type_name -> compute.v1.JobResultSchema
-	16, // 15: compute.v1.GetJobResultResponse.job_status:type_name -> compute.v1.JobLifecycleStatus
-	20, // 16: compute.v1.WorkerInfo.worker_id:type_name -> compute.v1.WorkerID
-	12, // 17: compute.v1.WorkerInfo.resources:type_name -> compute.v1.ResourceSpec
-	14, // 18: compute.v1.WorkerInfo.running_jobs:type_name -> compute.v1.JobID
-	21, // 19: compute.v1.WorkerInfo.usage:type_name -> compute.v1.ResourceUsage
+	17, // 0: compute.v1.SubmitJobRequest.required_resources:type_name -> compute.v1.ResourceSpec
+	14, // 1: compute.v1.SubmitJobRequest.environment:type_name -> compute.v1.SubmitJobRequest.EnvironmentEntry
+	18, // 2: compute.v1.SubmitJobRequest.job:type_name -> compute.v1.JobSchema
+	19, // 3: compute.v1.SubmitJobResponse.job_id:type_name -> compute.v1.JobID
+	20, // 4: compute.v1.SubmitJobResponse.status:type_name -> compute.v1.Status
+	21, // 5: compute.v1.SubmitJobResponse.job_status:type_name -> compute.v1.JobLifecycleStatus
+	19, // 6: compute.v1.GetJobStatusRequest.job_id:type_name -> compute.v1.JobID
+	20, // 7: compute.v1.GetJobStatusResponse.status:type_name -> compute.v1.Status
+	22, // 8: compute.v1.GetJobStatusResponse.assignment:type_name -> compute.v1.AssignmentSchema
+	21, // 9: compute.v1.GetJobStatusResponse.job_status:type_name -> compute.v1.JobLifecycleStatus
+	19, // 10: compute.v1.CancelJobRequest.job_id:type_name -> compute.v1.JobID
+	19, // 11: compute.v1.GetJobResultRequest.job_id:type_name -> compute.v1.JobID
+	20, // 12: compute.v1.GetJobResultResponse.status:type_name -> compute.v1.Status
+	23, // 13: compute.v1.GetJobResultResponse.result:type_name -> compute.v1.Result
+	24, // 14: compute.v1.GetJobResultResponse.result_schema:type_name -> compute.v1.JobResultSchema
+	21, // 15: compute.v1.GetJobResultResponse.job_status:type_name -> compute.v1.JobLifecycleStatus
+	25, // 16: compute.v1.WorkerInfo.worker_id:type_name -> compute.v1.WorkerID
+	17, // 17: compute.v1.WorkerInfo.resources:type_name -> compute.v1.ResourceSpec
+	19, // 18: compute.v1.WorkerInfo.running_jobs:type_name -> compute.v1.JobID
+	26, // 19: compute.v1.WorkerInfo.usage:type_name -> compute.v1.ResourceUsage
 	8,  // 20: compute.v1.ListWorkersResponse.workers:type_name -> compute.v1.WorkerInfo
-	4,  // 21: compute.v1.ClientService.CancelJob:input_type -> compute.v1.CancelJobRequest
-	9,  // 22: compute.v1.ClientService.ListWorkers:input_type -> compute.v1.ListWorkersRequest
-	0,  // 23: compute.v1.ClientService.SubmitJob:input_type -> compute.v1.SubmitJobRequest
-	2,  // 24: compute.v1.ClientService.GetJobStatus:input_type -> compute.v1.GetJobStatusRequest
-	6,  // 25: compute.v1.ClientService.GetJobResult:input_type -> compute.v1.GetJobResultRequest
-	5,  // 26: compute.v1.ClientService.CancelJob:output_type -> compute.v1.CancelJobResponse
-	10, // 27: compute.v1.ClientService.ListWorkers:output_type -> compute.v1.ListWorkersResponse
-	1,  // 28: compute.v1.ClientService.SubmitJob:output_type -> compute.v1.SubmitJobResponse
-	3,  // 29: compute.v1.ClientService.GetJobStatus:output_type -> compute.v1.GetJobStatusResponse
-	7,  // 30: compute.v1.ClientService.GetJobResult:output_type -> compute.v1.GetJobResultResponse
-	26, // [26:31] is the sub-list for method output_type
-	21, // [21:26] is the sub-list for method input_type
-	21, // [21:21] is the sub-list for extension type_name
-	21, // [21:21] is the sub-list for extension extendee
-	0,  // [0:21] is the sub-list for field type_name
+	25, // 21: compute.v1.WorkerEvaluation.worker_id:type_name -> compute.v1.WorkerID
+	15, // 22: compute.v1.WorkerEvaluation.parts:type_name -> compute.v1.WorkerEvaluation.PartsEntry
+	19, // 23: compute.v1.ExplainJobRequest.job_id:type_name -> compute.v1.JobID
+	19, // 24: compute.v1.ExplainJobResponse.job_id:type_name -> compute.v1.JobID
+	20, // 25: compute.v1.ExplainJobResponse.status:type_name -> compute.v1.Status
+	11, // 26: compute.v1.ExplainJobResponse.evaluations:type_name -> compute.v1.WorkerEvaluation
+	16, // 27: compute.v1.ExplainJobResponse.weights:type_name -> compute.v1.ExplainJobResponse.WeightsEntry
+	12, // 28: compute.v1.ClientService.ExplainJob:input_type -> compute.v1.ExplainJobRequest
+	4,  // 29: compute.v1.ClientService.CancelJob:input_type -> compute.v1.CancelJobRequest
+	9,  // 30: compute.v1.ClientService.ListWorkers:input_type -> compute.v1.ListWorkersRequest
+	0,  // 31: compute.v1.ClientService.SubmitJob:input_type -> compute.v1.SubmitJobRequest
+	2,  // 32: compute.v1.ClientService.GetJobStatus:input_type -> compute.v1.GetJobStatusRequest
+	6,  // 33: compute.v1.ClientService.GetJobResult:input_type -> compute.v1.GetJobResultRequest
+	13, // 34: compute.v1.ClientService.ExplainJob:output_type -> compute.v1.ExplainJobResponse
+	5,  // 35: compute.v1.ClientService.CancelJob:output_type -> compute.v1.CancelJobResponse
+	10, // 36: compute.v1.ClientService.ListWorkers:output_type -> compute.v1.ListWorkersResponse
+	1,  // 37: compute.v1.ClientService.SubmitJob:output_type -> compute.v1.SubmitJobResponse
+	3,  // 38: compute.v1.ClientService.GetJobStatus:output_type -> compute.v1.GetJobStatusResponse
+	7,  // 39: compute.v1.ClientService.GetJobResult:output_type -> compute.v1.GetJobResultResponse
+	34, // [34:40] is the sub-list for method output_type
+	28, // [28:34] is the sub-list for method input_type
+	28, // [28:28] is the sub-list for extension type_name
+	28, // [28:28] is the sub-list for extension extendee
+	0,  // [0:28] is the sub-list for field type_name
 }
 
 func init() { file_client_proto_init() }
@@ -986,7 +1351,7 @@ func file_client_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_client_proto_rawDesc), len(file_client_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   12,
+			NumMessages:   17,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

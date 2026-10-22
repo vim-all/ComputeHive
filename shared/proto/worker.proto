@@ -201,6 +201,10 @@ message RegisterWorkerRequest {
   string isolation = 6;
   // The contributor's policy permits jobs that ask for network access.
   bool allows_network = 7;
+  string os = 9;
+  string arch = 10;
+  repeated string labels = 11;
+  int32 preference = 12;
   // Expiring token issued by an operator. Needed only the first time a worker ID enrols; afterwards
   // the worker authenticates with the credential it was given.
   string enrollment_token = 8;
@@ -239,6 +243,8 @@ message ResourceUsage {
   // Why the worker considers itself overloaded, e.g. "ram>=90%".
   repeated string overload_reasons = 17;
   int64 sampled_at_unix = 18;
+  // Free space (MB) on the filesystem holding job work directories.
+  int64 work_disk_free_mb = 19;
 }
 
 message HeartbeatRequest {
@@ -254,6 +260,12 @@ message HeartbeatRequest {
   ResourceUsage usage = 8;
   string isolation = 9;
   bool allows_network = 10;
+  // Facts the scheduler uses to place jobs.
+  string os = 11;
+  string arch = 12;
+  repeated string labels = 13;         // "key=value" tags set by the contributor, e.g. "zone=eu"
+  int32 preference = 14;               // contributor's willingness to take work, 0-100 (default 50)
+  repeated string cached_artifacts = 15; // SHA-256s of job artifacts already on this machine
 }
 
 message HeartbeatResponse {

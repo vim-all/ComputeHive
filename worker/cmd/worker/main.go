@@ -49,6 +49,12 @@ func main() {
 		Service:         cfg.S3SigningService,
 	})
 	artifactFetcher.WithCoordinator(cfg.CoordinatorHTTPURL, redisStore.TLS(), redisStore.ArtifactAuth())
+	artifactCache, err := artifact.NewCache(filepath.Join(cfg.StateDir, "artifact-cache"), cfg.ArtifactCacheMB<<20)
+	if err != nil {
+		logger.Error("cannot open the artifact cache", "error", err)
+		os.Exit(2)
+	}
+	artifactFetcher.WithCache(artifactCache)
 	resourceReporter := resources.NewReporter(cfg.DockerBinary)
 	outputManager, err := workeroutput.NewManager(workeroutput.Config{
 		BucketURL:       cfg.S3BucketURL,

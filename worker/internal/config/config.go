@@ -7,6 +7,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -40,20 +42,28 @@ type Config struct {
 	RedisIOTimeout          time.Duration
 	ArtifactDownloadTimeout time.Duration
 	ArtifactMaxBytes        int64
-	OutputCollectionDir     string
-	OutputMaxFiles          int
-	OutputMaxBytes          int64
-	S3SignRequests          bool
-	S3BucketURL             string
-	S3PublicBucketURL       string
-	S3AccessKeyID           string
-	S3SecretAccessKey       string
-	S3SessionToken          string
-	S3SigningRegion         string
-	S3SigningService        string
-	DockerBinary            string
-	AllowGPUJobs            bool
-	Version                 string
+	ArtifactCacheMB         int64 // size of the local artifact cache (0 disables it)
+
+	// Scheduling facts announced to the coordinator.
+	OS         string
+	Arch       string
+	Labels     []string // tags a job can require, e.g. fast-disk
+	Preference int      // 0-100: how keen this machine's owner is to take work
+
+	OutputCollectionDir string
+	OutputMaxFiles      int
+	OutputMaxBytes      int64
+	S3SignRequests      bool
+	S3BucketURL         string
+	S3PublicBucketURL   string
+	S3AccessKeyID       string
+	S3SecretAccessKey   string
+	S3SessionToken      string
+	S3SigningRegion     string
+	S3SigningService    string
+	DockerBinary        string
+	AllowGPUJobs        bool
+	Version             string
 
 	// Resource safety (see internal/monitor). Percentages are of host capacity.
 	RAMLimitPercent  float64       // no new jobs while RAM used >= this
@@ -132,6 +142,11 @@ func parse(args []string, getenv func(string) string) (Config, error) {
 		RedisIOTimeout:          envDuration(getenv, "REDIS_IO_TIMEOUT", 5*time.Second),
 		ArtifactDownloadTimeout: envDuration(getenv, "ARTIFACT_DOWNLOAD_TIMEOUT", 10*time.Minute),
 		ArtifactMaxBytes:        envInt64(getenv, "ARTIFACT_MAX_BYTES", 1<<30),
+		ArtifactCacheMB:         envInt64(getenv, "ARTIFACT_CACHE_MB", 2048),
+		OS:                      envOr(getenv, "WORKER_OS", runtime.GOOS),
+		Arch:                    envOr(getenv, "WORKER_ARCH", runtime.GOARCH),
+		Labels:                  splitList(getenv("WORKER_LABELS")),
+		Preference:              envInt(getenv, "WORKER_PREFERENCE", 50),
 		OutputCollectionDir:     envOr(getenv, "OUTPUT_COLLECTION_DIR", "/computehive/output"),
 		OutputMaxFiles:          envInt(getenv, "OUTPUT_MAX_FILES", 256),
 		OutputMaxBytes:          envInt64(getenv, "OUTPUT_MAX_BYTES", 10<<30),
@@ -219,6 +234,11 @@ func parse(args []string, getenv func(string) string) (Config, error) {
 	fs.DurationVar(&cfg.RedisIOTimeout, "redis-io-timeout", cfg.RedisIOTimeout, "Read/write timeout for Redis")
 	fs.DurationVar(&cfg.ArtifactDownloadTimeout, "artifact-download-timeout", cfg.ArtifactDownloadTimeout, "Timeout for downloading artifact archives")
 	fs.Int64Var(&cfg.ArtifactMaxBytes, "artifact-max-bytes", cfg.ArtifactMaxBytes, "Maximum allowed artifact archive size in bytes")
+	fs.Int64Var(&cfg.ArtifactCacheMB, "artifact-cache-mb", cfg.ArtifactCacheMB, "Size of the local artifact cache in MB (0 disables it)")
+	fs.StringVar(&cfg.OS, "os", cfg.OS, "Operating system announced to the scheduler")
+	fs.StringVar(&cfg.Arch, "arch", cfg.Arch, "CPU architecture announced to the scheduler")
+	fs.Func("labels", "Comma-separated labels jobs may require (env WORKER_LABELS)", func(v string) error { cfg.Labels = splitList(v); return nil })
+	fs.IntVar(&cfg.Preference, "preference", cfg.Preference, "0-100: how keen this machine's owner is to take work; the scheduler weighs it")
 	fs.StringVar(&cfg.OutputCollectionDir, "output-collection-dir", cfg.OutputCollectionDir, "Directory exposed inside the job container for returned job outputs")
 	fs.IntVar(&cfg.OutputMaxFiles, "output-max-files", cfg.OutputMaxFiles, "Maximum number of output files to collect from a job")
 	fs.Int64Var(&cfg.OutputMaxBytes, "output-max-bytes", cfg.OutputMaxBytes, "Maximum total size in bytes for collected job outputs")
@@ -346,6 +366,20 @@ func parse(args []string, getenv func(string) string) (Config, error) {
 	if cfg.ArtifactMaxBytes <= 0 {
 		return Config{}, fmt.Errorf("artifact-max-bytes must be > 0")
 	}
+	if cfg.ArtifactCacheMB < 0 {
+		return Config{}, fmt.Errorf("artifact-cache-mb must be >= 0")
+	}
+	if cfg.Preference < 0 || cfg.Preference > 100 {
+		return Config{}, fmt.Errorf("preference must be 0-100, got %d", cfg.Preference)
+	}
+	if len(cfg.Labels) > 16 {
+		return Config{}, fmt.Errorf("at most 16 labels are allowed, got %d", len(cfg.Labels))
+	}
+	for _, l := range cfg.Labels {
+		if !labelPattern.MatchString(l) {
+			return Config{}, fmt.Errorf("label %q must match %s", l, labelPattern)
+		}
+	}
 	if strings.TrimSpace(cfg.OutputCollectionDir) == "" {
 		return Config{}, fmt.Errorf("output-collection-dir is required")
 	}
@@ -384,6 +418,19 @@ func envFloat(getenv func(string) string, key string, fallback float64) float64 
 		}
 	}
 	return fallback
+}
+
+// labelPattern matches what the coordinator accepts as a label; anything else would be dropped there.
+var labelPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._=-]{0,63}$`)
+
+func splitList(v string) []string {
+	var out []string
+	for _, p := range strings.Split(v, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func envInt(getenv func(string) string, key string, fallback int) int {

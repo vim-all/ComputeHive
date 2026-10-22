@@ -322,3 +322,68 @@ Verified: hostile suite on real containers, argument audit, image policy, auth/T
 controls, network allow-list on real Docker, verification, and the secured cluster (`make up`, `demo`, `chaos`, `pressure`).
 Not verified: gVisor; Windows/macOS Docker Desktop behaviour; network mode when the worker itself runs in a container (unsupported).
 Not done: output retention; per-user quotas (Phase 5); the Tauri client's contributor UI (Phase 7).
+
+---
+
+## Phase 5: best-fit worker selection
+
+### D-43: Keep pull-based workers; make the coordinator decide whether *this* asker is the best fit
+- **Options:** (a) push assignment (the coordinator picks a worker and sends the job); (b) keep workers pulling but let the coordinator
+  withhold a job from a worker that is not its best fit; (c) leave claim first-come-first-served and just add filters.
+- **Decision:** (b). Workers keep calling `RequestJob`, which works behind NAT with outbound-only connections and needs no new
+  coordinator-to-worker channel; the coordinator evaluates all workers and hands the job over only to the best idle fit.
+- **Tradeoff:** a job can wait for its best worker instead of starting immediately on a mediocre one; bounded by the patience window (D-46).
+  Rejected (a): needs inbound connectivity to workers. Rejected (c): filters alone cannot express "prefer the emptier machine".
+
+### D-44: The scheduler is pure logic; the Lua claim stays the safety net
+- `internal/scheduler` does no I/O, so every decision is reproducible from a snapshot and unit-testable in microseconds.
+- The `claim` script re-checks overload, capacity, requirements, isolation, headroom and the per-user limit atomically, so a stale
+  snapshot (up to 250 ms) can only make a placement worse, never violate a rule. This keeps the no-double-assignment proof from Phase 2 intact.
+
+### D-45: A transparent weighted score, deterministic, stored with the job
+- Eight components, each 0..1 times a published weight (free RAM, reliability, free CPU, load, locality, fit, uptime, preference).
+  The breakdown is stored on the job at assignment time and shown by `computehive explain`; a waiting job is evaluated live.
+- **Why not a learned or opaque model:** nothing to train on yet, and an unexplainable placement is a support burden. Weights are hand-set
+  and visible so they can be tuned later against measurements.
+- **Bug found by the tests:** summing the score components by iterating a Go map made identical workers differ in the last bit
+  (float addition is not associative), which broke the deterministic tie-break. Components are now summed in a fixed order.
+
+### D-46: Patience instead of reservations
+- A job is held for its best idle worker; after `SCHED_PATIENCE` (5 s) any eligible idle worker may take it. No reservation state to
+  leak when a worker vanishes, and starvation is bounded. Patience relaxes the preference only, never a filter (tested with an
+  overloaded worker and an infinite wait).
+
+### D-47: Reliability is a decayed, smoothed success rate with a conservative blacklist
+- `(ok + 2) / (ok + fail + 4)` with a 1-hour half-life: new workers start at 0.5, old failures fade, and blacklisting needs both
+  reliability < 0.2 and at least 5 recent samples, so one bad job cannot exile a worker.
+- **Known side effect (documented):** a worker with more history scores higher and wins ties (observed 0.88 vs 0.50 in the live cluster).
+
+### D-48: Artifact locality needs byte-identical artifacts, so the CLI caches the saved image by directory hash
+- **Finding (live):** the CLI tagged each build with a timestamp, so every submit produced a different tarball and a worker's cache could
+  never match. Tagging by image ID did not help either: this Docker embeds the build time in the image, so two builds of identical
+  sources differ (verified by diffing the blobs).
+- **Decision:** cache the saved tarball by a hash of the job directory (paths, modes, contents; `.git` skipped). An unchanged directory
+  reuses the exact tarball (no rebuild, same digest); `--rebuild` forces a build. Workers keep verified artifacts in an LRU cache keyed
+  by SHA-256, re-hash on every read, and advertise digests for the locality score.
+- **Tradeoff:** a changed base image is not noticed until `--rebuild`. Measured: repeat artifact ready in 4 ms from the worker cache.
+
+### D-49: Job requirements from a tiny manifest; unknown keys are errors
+- `computehive.yaml` is flat `key: value` (no YAML dependency) and Dockerfile `LABEL computehive.<key>=` is accepted too. Precedence: flags,
+  manifest, Dockerfile labels, defaults. A typo (`mem_mb`) is a hard error rather than a job silently running with the wrong resources.
+
+### D-50: Defects Phase 5 surfaced (kept here because they are the lesson)
+1. **Claim script read job fields at the wrong HMGET indexes** (an off-by-one after adding fields), which broke OS/arch/label/disk constraints
+   (a Lua error) and made the per-user limit treat the user name as a required label. The unit tests of the scripts did not exercise those paths;
+   the gRPC-level heterogeneous-cluster test on a real Redis did. Fixed, and that test now guards it.
+2. **Timestamped image tags made caching impossible** (D-48), found by looking at `explain` on the live cluster, not by any test.
+3. **A heartbeat edit was lost** (the worker did not send OS/arch/cached digests) and nothing failed: the fields silently stayed empty.
+   Found only because the live `explain` showed `locality 0.000`. Gap: no automated test covers the worker-to-coordinator plumbing of these
+   fields; the live check is the evidence.
+
+### Phase 5 outcome
+Verified: scheduler filters and scoring (table-driven, deterministic over 20 runs under `-race`); heterogeneous cluster on a real Redis
+(GPU job never lands on a CPU-only worker, overloaded workers never chosen even after waiting, patience releases aged jobs, OS/arch/labels/disk/
+isolation, per-user limit); artifact cache (LRU, tamper detection); manifest parsing; full `make lint` and `make test` including the chaos suite;
+live cluster: `explain` with score breakdown, locality 0.100 on the worker holding the artifact.
+Measured: scheduler cost 5.2 us / 60 us / 0.77 ms per decision at 10 / 100 / 1000 workers (pure CPU, i7-13620H).
+Not verified: behaviour with more than 2 live workers on real containers (end-to-end scheduling latency is Phase 8); weights are not tuned.

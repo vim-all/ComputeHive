@@ -1552,7 +1552,11 @@ type RegisterWorkerRequest struct {
 	// Isolation level the worker provides: "hardened-runc" or "gvisor".
 	Isolation string `protobuf:"bytes,6,opt,name=isolation,proto3" json:"isolation,omitempty"`
 	// The contributor's policy permits jobs that ask for network access.
-	AllowsNetwork bool `protobuf:"varint,7,opt,name=allows_network,json=allowsNetwork,proto3" json:"allows_network,omitempty"`
+	AllowsNetwork bool     `protobuf:"varint,7,opt,name=allows_network,json=allowsNetwork,proto3" json:"allows_network,omitempty"`
+	Os            string   `protobuf:"bytes,9,opt,name=os,proto3" json:"os,omitempty"`
+	Arch          string   `protobuf:"bytes,10,opt,name=arch,proto3" json:"arch,omitempty"`
+	Labels        []string `protobuf:"bytes,11,rep,name=labels,proto3" json:"labels,omitempty"`
+	Preference    int32    `protobuf:"varint,12,opt,name=preference,proto3" json:"preference,omitempty"`
 	// Expiring token issued by an operator. Needed only the first time a worker ID enrols; afterwards
 	// the worker authenticates with the credential it was given.
 	EnrollmentToken string `protobuf:"bytes,8,opt,name=enrollment_token,json=enrollmentToken,proto3" json:"enrollment_token,omitempty"`
@@ -1637,6 +1641,34 @@ func (x *RegisterWorkerRequest) GetAllowsNetwork() bool {
 		return x.AllowsNetwork
 	}
 	return false
+}
+
+func (x *RegisterWorkerRequest) GetOs() string {
+	if x != nil {
+		return x.Os
+	}
+	return ""
+}
+
+func (x *RegisterWorkerRequest) GetArch() string {
+	if x != nil {
+		return x.Arch
+	}
+	return ""
+}
+
+func (x *RegisterWorkerRequest) GetLabels() []string {
+	if x != nil {
+		return x.Labels
+	}
+	return nil
+}
+
+func (x *RegisterWorkerRequest) GetPreference() int32 {
+	if x != nil {
+		return x.Preference
+	}
+	return 0
 }
 
 func (x *RegisterWorkerRequest) GetEnrollmentToken() string {
@@ -1734,8 +1766,10 @@ type ResourceUsage struct {
 	// Why the worker considers itself overloaded, e.g. "ram>=90%".
 	OverloadReasons []string `protobuf:"bytes,17,rep,name=overload_reasons,json=overloadReasons,proto3" json:"overload_reasons,omitempty"`
 	SampledAtUnix   int64    `protobuf:"varint,18,opt,name=sampled_at_unix,json=sampledAtUnix,proto3" json:"sampled_at_unix,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// Free space (MB) on the filesystem holding job work directories.
+	WorkDiskFreeMb int64 `protobuf:"varint,19,opt,name=work_disk_free_mb,json=workDiskFreeMb,proto3" json:"work_disk_free_mb,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *ResourceUsage) Reset() {
@@ -1894,6 +1928,13 @@ func (x *ResourceUsage) GetSampledAtUnix() int64 {
 	return 0
 }
 
+func (x *ResourceUsage) GetWorkDiskFreeMb() int64 {
+	if x != nil {
+		return x.WorkDiskFreeMb
+	}
+	return 0
+}
+
 type HeartbeatRequest struct {
 	state              protoimpl.MessageState `protogen:"open.v1"`
 	WorkerId           *WorkerID              `protobuf:"bytes,1,opt,name=worker_id,json=workerId,proto3" json:"worker_id,omitempty"`
@@ -1908,8 +1949,14 @@ type HeartbeatRequest struct {
 	Usage         *ResourceUsage `protobuf:"bytes,8,opt,name=usage,proto3" json:"usage,omitempty"`
 	Isolation     string         `protobuf:"bytes,9,opt,name=isolation,proto3" json:"isolation,omitempty"`
 	AllowsNetwork bool           `protobuf:"varint,10,opt,name=allows_network,json=allowsNetwork,proto3" json:"allows_network,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// Facts the scheduler uses to place jobs.
+	Os              string   `protobuf:"bytes,11,opt,name=os,proto3" json:"os,omitempty"`
+	Arch            string   `protobuf:"bytes,12,opt,name=arch,proto3" json:"arch,omitempty"`
+	Labels          []string `protobuf:"bytes,13,rep,name=labels,proto3" json:"labels,omitempty"`                                          // "key=value" tags set by the contributor, e.g. "zone=eu"
+	Preference      int32    `protobuf:"varint,14,opt,name=preference,proto3" json:"preference,omitempty"`                                 // contributor's willingness to take work, 0-100 (default 50)
+	CachedArtifacts []string `protobuf:"bytes,15,rep,name=cached_artifacts,json=cachedArtifacts,proto3" json:"cached_artifacts,omitempty"` // SHA-256s of job artifacts already on this machine
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *HeartbeatRequest) Reset() {
@@ -2010,6 +2057,41 @@ func (x *HeartbeatRequest) GetAllowsNetwork() bool {
 		return x.AllowsNetwork
 	}
 	return false
+}
+
+func (x *HeartbeatRequest) GetOs() string {
+	if x != nil {
+		return x.Os
+	}
+	return ""
+}
+
+func (x *HeartbeatRequest) GetArch() string {
+	if x != nil {
+		return x.Arch
+	}
+	return ""
+}
+
+func (x *HeartbeatRequest) GetLabels() []string {
+	if x != nil {
+		return x.Labels
+	}
+	return nil
+}
+
+func (x *HeartbeatRequest) GetPreference() int32 {
+	if x != nil {
+		return x.Preference
+	}
+	return 0
+}
+
+func (x *HeartbeatRequest) GetCachedArtifacts() []string {
+	if x != nil {
+		return x.CachedArtifacts
+	}
+	return nil
 }
 
 type HeartbeatResponse struct {
@@ -2427,7 +2509,7 @@ const file_worker_proto_rawDesc = "" +
 	" \x01(\tR\x0foutputPublicUrl\x12*\n" +
 	"\x11output_size_bytes\x18\v \x01(\x03R\x0foutputSizeBytes\x12%\n" +
 	"\x0efailure_reason\x18\f \x01(\tR\rfailureReason\x12#\n" +
-	"\routput_digest\x18\r \x01(\tR\foutputDigest\"\xe3\x02\n" +
+	"\routput_digest\x18\r \x01(\tR\foutputDigest\"\xbf\x03\n" +
 	"\x15RegisterWorkerRequest\x12I\n" +
 	"\x13available_resources\x18\x01 \x01(\v2\x18.compute.v1.ResourceSpecR\x12availableResources\x12%\n" +
 	"\x0eworker_version\x18\x02 \x01(\tR\rworkerVersion\x120\n" +
@@ -2435,14 +2517,21 @@ const file_worker_proto_rawDesc = "" +
 	"\tworker_id\x18\x04 \x01(\tR\bworkerId\x12\x19\n" +
 	"\bmax_jobs\x18\x05 \x01(\x05R\amaxJobs\x12\x1c\n" +
 	"\tisolation\x18\x06 \x01(\tR\tisolation\x12%\n" +
-	"\x0eallows_network\x18\a \x01(\bR\rallowsNetwork\x12)\n" +
+	"\x0eallows_network\x18\a \x01(\bR\rallowsNetwork\x12\x0e\n" +
+	"\x02os\x18\t \x01(\tR\x02os\x12\x12\n" +
+	"\x04arch\x18\n" +
+	" \x01(\tR\x04arch\x12\x16\n" +
+	"\x06labels\x18\v \x03(\tR\x06labels\x12\x1e\n" +
+	"\n" +
+	"preference\x18\f \x01(\x05R\n" +
+	"preference\x12)\n" +
 	"\x10enrollment_token\x18\b \x01(\tR\x0fenrollmentToken\"\xa9\x01\n" +
 	"\x16RegisterWorkerResponse\x121\n" +
 	"\tworker_id\x18\x01 \x01(\v2\x14.compute.v1.WorkerIDR\bworkerId\x12<\n" +
 	"\x1aheartbeat_interval_seconds\x18\x02 \x01(\x05R\x18heartbeatIntervalSeconds\x12\x1e\n" +
 	"\n" +
 	"credential\x18\x03 \x01(\tR\n" +
-	"credential\"\xba\x05\n" +
+	"credential\"\xe5\x05\n" +
 	"\rResourceUsage\x12 \n" +
 	"\fmem_total_mb\x18\x01 \x01(\x03R\n" +
 	"memTotalMb\x12\x1e\n" +
@@ -2465,7 +2554,8 @@ const file_worker_proto_rawDesc = "" +
 	"\x18net_egress_bytes_per_sec\x18\x0f \x01(\x01R\x14netEgressBytesPerSec\x12'\n" +
 	"\x10jobs_mem_used_mb\x18\x10 \x01(\x03R\rjobsMemUsedMb\x12)\n" +
 	"\x10overload_reasons\x18\x11 \x03(\tR\x0foverloadReasons\x12&\n" +
-	"\x0fsampled_at_unix\x18\x12 \x01(\x03R\rsampledAtUnix\"\xd5\x03\n" +
+	"\x0fsampled_at_unix\x18\x12 \x01(\x03R\rsampledAtUnix\x12)\n" +
+	"\x11work_disk_free_mb\x18\x13 \x01(\x03R\x0eworkDiskFreeMb\"\xdc\x04\n" +
 	"\x10HeartbeatRequest\x121\n" +
 	"\tworker_id\x18\x01 \x01(\v2\x14.compute.v1.WorkerIDR\bworkerId\x12I\n" +
 	"\x13available_resources\x18\x02 \x01(\v2\x18.compute.v1.ResourceSpecR\x12availableResources\x124\n" +
@@ -2479,7 +2569,14 @@ const file_worker_proto_rawDesc = "" +
 	"\x05usage\x18\b \x01(\v2\x19.compute.v1.ResourceUsageR\x05usage\x12\x1c\n" +
 	"\tisolation\x18\t \x01(\tR\tisolation\x12%\n" +
 	"\x0eallows_network\x18\n" +
-	" \x01(\bR\rallowsNetwork\"\x7f\n" +
+	" \x01(\bR\rallowsNetwork\x12\x0e\n" +
+	"\x02os\x18\v \x01(\tR\x02os\x12\x12\n" +
+	"\x04arch\x18\f \x01(\tR\x04arch\x12\x16\n" +
+	"\x06labels\x18\r \x03(\tR\x06labels\x12\x1e\n" +
+	"\n" +
+	"preference\x18\x0e \x01(\x05R\n" +
+	"preference\x12)\n" +
+	"\x10cached_artifacts\x18\x0f \x03(\tR\x0fcachedArtifacts\"\x7f\n" +
 	"\x11HeartbeatResponse\x12\x1a\n" +
 	"\baccepted\x18\x01 \x01(\bR\baccepted\x12(\n" +
 	"\x10server_time_unix\x18\x02 \x01(\x03R\x0eserverTimeUnix\x12$\n" +

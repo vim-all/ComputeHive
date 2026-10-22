@@ -77,6 +77,7 @@ func (s *SystemSampler) Sample(ctx context.Context) (Metrics, error) {
 	}
 	if u, err := disk.UsageWithContext(ctx, s.workDir); err == nil {
 		m.WorkDiskUsedPercent = u.UsedPercent
+		m.WorkDiskFreeMB = int64(u.Free >> 20)
 	} else {
 		return Metrics{}, fmt.Errorf("read disk usage of %s: %w", s.workDir, err)
 	}

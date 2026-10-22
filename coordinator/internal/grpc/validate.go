@@ -26,13 +26,21 @@ const (
 	maxGPUs        = 64
 	maxJobAttempts = 20
 	maxNetHosts    = 16
+	maxDiskMB      = 16 * 1024 * 1024
+	maxLabels      = 16
+	// maxCachedArtifacts bounds how many artifact digests one worker may advertise for locality scoring.
+	maxCachedArtifacts = 64
 )
 
 var (
 	sha256Hex  = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	envKeyName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 	userName   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._@-]*$`)
-	hostName   = regexp.MustCompile(`^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)*[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$`)
+	// platformName and labelName are identifiers, not free text: they end up in Redis keys and comma-joined
+	// indexes, so no separators or whitespace are allowed.
+	platformName = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,31}$`)
+	labelName    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._=-]{0,63}$`)
+	hostName     = regexp.MustCompile(`^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)*[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$`)
 )
 
 func invalid(format string, a ...any) error {
@@ -107,5 +115,50 @@ func validateSubmit(req *pb.SubmitJobRequest) error {
 	if u := req.GetUser(); u != "" && (len(u) > maxUserLen || !userName.MatchString(u)) {
 		return invalid("user must match %s and be at most %d bytes", userName, maxUserLen)
 	}
+	if req.GetMinDiskMb() < 0 || req.GetMinDiskMb() > maxDiskMB {
+		return invalid("min_disk_mb must be 0-%d", maxDiskMB)
+	}
+	if o := req.GetOs(); o != "" && !platformName.MatchString(o) {
+		return invalid("os %q is not a valid platform name (e.g. linux, darwin, windows)", o)
+	}
+	if a := req.GetArch(); a != "" && !platformName.MatchString(a) {
+		return invalid("arch %q is not a valid platform name (e.g. amd64, arm64)", a)
+	}
+	if len(req.GetLabels()) > maxLabels {
+		return invalid("labels has more than %d entries", maxLabels)
+	}
+	for _, l := range req.GetLabels() {
+		if !labelName.MatchString(l) {
+			return invalid("label %q must match %s", l, labelName)
+		}
+	}
 	return nil
+}
+
+// cleanLabels keeps only well-formed labels from a worker's announcement, so a hostile or buggy worker
+// cannot inject separators into the label index or bloat it.
+func cleanLabels(in []string) []string {
+	var out []string
+	for _, l := range in {
+		if labelName.MatchString(l) && len(out) < maxLabels {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// cleanHashes keeps only well-formed artifact digests (and a bounded number of them).
+func cleanHashes(in []string) []string {
+	var out []string
+	for _, h := range in {
+		if sha256Hex.MatchString(h) && len(out) < maxCachedArtifacts {
+			out = append(out, h)
+		}
+	}
+	return out
+}
+
+// clampPref bounds a contributor's willingness score to 0-100 (0 means "unset", treated as 50).
+func clampPref(p int32) int {
+	return int(max(0, min(100, p)))
 }

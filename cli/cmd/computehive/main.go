@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -37,6 +38,7 @@ Commands:
   admin revoke <id> Cut a worker off and requeue its jobs
   result <job-id>   Show the job result (exit code, output excerpts)
   logs <job-id>     Show captured stdout/stderr excerpts of a finished job
+  explain <job-id>  Show why a job went to the worker it did (or why it is still waiting)
   workers           List registered workers
   worker join       Run a worker on this machine (checks prerequisites first)
   worker status|pause|resume|kill|history|policy   control the worker on this machine
@@ -108,6 +110,8 @@ func run(args []string, out, errOut io.Writer) int {
 		err = withClient(g, func(c pb.ClientServiceClient) error { return cmdResult(ctx, g, c, rest[1:], out, false) })
 	case "logs":
 		err = withClient(g, func(c pb.ClientServiceClient) error { return cmdResult(ctx, g, c, rest[1:], out, true) })
+	case "explain":
+		err = withClient(g, func(c pb.ClientServiceClient) error { return cmdExplain(ctx, c, rest[1:], out) })
 	case "workers":
 		err = withClient(g, func(c pb.ClientServiceClient) error { return cmdWorkers(ctx, c, out) })
 	case "worker":
@@ -280,7 +284,7 @@ func cmdWorkers(ctx context.Context, c pb.ClientServiceClient, out io.Writer) er
 		return nil
 	}
 	tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "WORKER\tSTATE\tCPU\tMEM(MB)\tGPU\tRAM%\tCPU%\tDISK%\tJOBS\tLAST HEARTBEAT")
+	fmt.Fprintln(tw, "WORKER\tSTATE\tCPU\tMEM(MB)\tGPU\tRAM%\tCPU%\tDISK%\tJOBS\tPLATFORM\tRELIABILITY\tLAST HEARTBEAT")
 	for _, w := range resp.GetWorkers() {
 		res, u := w.GetResources(), w.GetUsage()
 		hb := "-"
@@ -304,10 +308,61 @@ func cmdWorkers(ctx context.Context, c pb.ClientServiceClient, out io.Writer) er
 			ram, cpu = fmt.Sprintf("%.0f", u.GetMemUsedPercent()), fmt.Sprintf("%.0f", u.GetCpuPercent())
 			dsk = fmt.Sprintf("%.0f", max(u.GetWorkDiskUsedPercent(), u.GetDockerDiskUsedPercent()))
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%d\t%s\t%s\t%s\t%d\t%s\n",
-			w.GetWorkerId().GetValue(), state, res.GetCpuCores(), res.GetMemoryMb(), res.GetGpuCount(), ram, cpu, dsk, len(w.GetRunningJobs()), hb)
+		platform := orDash(w.GetOs())
+		if w.GetArch() != "" {
+			platform += "/" + w.GetArch()
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%d\t%s\t%s\t%s\t%d\t%s\t%.2f\t%s\n",
+			w.GetWorkerId().GetValue(), state, res.GetCpuCores(), res.GetMemoryMb(), res.GetGpuCount(), ram, cpu, dsk, len(w.GetRunningJobs()),
+			platform, w.GetReliability(), hb)
 	}
 	return tw.Flush()
+}
+
+// cmdExplain prints the scheduler's reasoning for a job: every worker with its verdict, and for the
+// chosen one the weighted score breakdown.
+func cmdExplain(ctx context.Context, c pb.ClientServiceClient, args []string, out io.Writer) error {
+	id, err := jobIDArg(args, "explain")
+	if err != nil {
+		return err
+	}
+	resp, err := c.ExplainJob(ctx, &pb.ExplainJobRequest{JobId: &pb.JobID{Value: id}})
+	if err != nil {
+		return err
+	}
+	kind := "live evaluation of the current cluster"
+	if resp.GetRecorded() {
+		kind = "decision recorded when the job was assigned"
+	}
+	fmt.Fprintf(out, "job %s (%s)\n%s\n  %s\n", id, shortStatus(resp.GetStatus()), kind, resp.GetSummary())
+	for _, e := range resp.GetEvaluations() {
+		name := e.GetWorkerId().GetValue()
+		switch {
+		case !e.GetEligible():
+			fmt.Fprintf(out, "\n  x %s: rejected\n", name)
+			for _, r := range e.GetReasons() {
+				fmt.Fprintf(out, "      - %s\n", r)
+			}
+		default:
+			mark, note := " ", ""
+			if e.GetChosen() {
+				mark = "*"
+			}
+			if e.GetBusy() {
+				note = " (busy)"
+			}
+			fmt.Fprintf(out, "\n  %s %s: score %.3f%s\n", mark, name, e.GetScore(), note)
+			parts := make([]string, 0, len(e.GetParts()))
+			for k := range e.GetParts() {
+				parts = append(parts, k)
+			}
+			sort.Strings(parts)
+			for _, k := range parts {
+				fmt.Fprintf(out, "      %-12s %.3f  (weight %.2f)\n", k, e.GetParts()[k], resp.GetWeights()[k])
+			}
+		}
+	}
+	return nil
 }
 
 func cmdSubmit(ctx context.Context, g globals, args []string, out io.Writer) error {
@@ -321,7 +376,12 @@ func cmdSubmit(ctx context.Context, g globals, args []string, out io.Writer) err
 	isolation := fs.String("isolation", "", "only run on workers providing this isolation: gvisor")
 	user := fs.String("user", "", "submitting user name (for fairness and per-user limits)")
 	maxAttempts := fs.Int("max-attempts", 0, "attempts before the job is parked as dead (0 = cluster default)")
-	var netHosts, envs multiFlag
+	rebuild := fs.Bool("rebuild", false, "rebuild the image even if the directory is unchanged since the last submit")
+	minDisk := fs.Int("min-disk", 0, "free disk the worker must have, in MB")
+	osName := fs.String("os", "", "only run on workers with this operating system (linux, darwin, windows)")
+	arch := fs.String("arch", "", "only run on workers with this CPU architecture (amd64, arm64)")
+	var netHosts, envs, labels multiFlag
+	fs.Var(&labels, "label", "a label the worker must carry, for example fast-disk (repeatable)")
 	fs.Var(&netHosts, "network-host", "a host the job needs to reach, for example pypi.org (repeatable; only workers whose contributor allows it will run the job)")
 	fs.Var(&envs, "env", "KEY=VALUE environment variable (repeatable)")
 
@@ -343,6 +403,56 @@ func cmdSubmit(ctx context.Context, g globals, args []string, out io.Writer) err
 	}
 	command := fs.Args()
 
+	// Job defaults from the directory (Dockerfile LABELs, computehive.yaml); explicit flags win.
+	man, err := loadManifest(dir)
+	if err != nil {
+		return err
+	}
+	explicit := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { explicit[f.Name] = true })
+	var merr error
+	num := func(flagName, key string, dst *int) {
+		if !explicit[flagName] {
+			if v, err := man.integer(key, *dst); err != nil {
+				merr = err
+			} else {
+				*dst = v
+			}
+		}
+	}
+	num("cpu", "cpu", cpu)
+	num("mem", "mem", mem)
+	num("gpu", "gpu", gpu)
+	num("timeout", "timeout", timeout)
+	num("min-disk", "min_disk", minDisk)
+	num("max-attempts", "max_attempts", maxAttempts)
+	if merr != nil {
+		return merr
+	}
+	if !explicit["verify"] {
+		if *verify, err = man.boolean("verify", *verify); err != nil {
+			return err
+		}
+	}
+	if !explicit["os"] {
+		*osName = man.str("os", *osName)
+	}
+	if !explicit["arch"] {
+		*arch = man.str("arch", *arch)
+	}
+	if !explicit["isolation"] {
+		*isolation = man.str("isolation", *isolation)
+	}
+	if !explicit["user"] {
+		*user = man.str("user", *user)
+	}
+	if !explicit["label"] {
+		labels = append(labels, man.list("labels")...)
+	}
+	if !explicit["network-host"] {
+		netHosts = append(netHosts, man.list("network_hosts")...)
+	}
+
 	if err := checkDocker(ctx); err != nil {
 		return err
 	}
@@ -354,28 +464,18 @@ func cmdSubmit(ctx context.Context, g globals, args []string, out io.Writer) err
 		return fmt.Errorf("%s has no Dockerfile: a job directory must contain one", absDir)
 	}
 
-	tag := "computehive-job:" + fmt.Sprintf("%d", time.Now().UnixNano())
-	fmt.Fprintf(out, "building image from %s ...\n", absDir)
-	if err := runStreaming(ctx, io.Discard, "docker", "build", "-q", "-t", tag, absDir); err != nil {
-		return fmt.Errorf("docker build failed: %w", err)
-	}
-
-	tar, err := os.CreateTemp("", "computehive-image-*.tar")
+	tag, tarPath, cleanupImage, err := prepareImage(ctx, absDir, *rebuild, out)
 	if err != nil {
 		return err
 	}
-	defer os.Remove(tar.Name())
-	tar.Close()
-	if err := runStreaming(ctx, io.Discard, "docker", "save", "-o", tar.Name(), tag); err != nil {
-		return fmt.Errorf("docker save failed: %w", err)
-	}
+	defer cleanupImage()
 
-	sha, size, err := hashFile(tar.Name())
+	sha, size, err := hashFile(tarPath)
 	if err != nil {
 		return err
 	}
 	fmt.Fprintf(out, "uploading artifact sha256:%s (%d bytes) ...\n", sha[:12], size)
-	if err := uploadArtifact(ctx, g, g.httpURL, tar.Name(), sha); err != nil {
+	if err := uploadArtifact(ctx, g, g.httpURL, tarPath, sha); err != nil {
 		return err
 	}
 
@@ -404,6 +504,10 @@ func cmdSubmit(ctx context.Context, g globals, args []string, out io.Writer) err
 			User:              *user,
 			MaxAttempts:       int32(*maxAttempts),
 			NetworkHosts:      netHosts,
+			MinDiskMb:         int32(*minDisk),
+			Os:                *osName,
+			Arch:              *arch,
+			Labels:            labels,
 		})
 		return callErr
 	})

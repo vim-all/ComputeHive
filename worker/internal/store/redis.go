@@ -110,6 +110,10 @@ func (s *Store) register(ctx context.Context, client pb.WorkerServiceClient, res
 		MaxJobs:            1,
 		Isolation:          s.isolation,
 		AllowsNetwork:      s.allowsNet,
+		Os:                 s.cfg.OS,
+		Arch:               s.cfg.Arch,
+		Labels:             s.cfg.Labels,
+		Preference:         int32(s.cfg.Preference),
 	})
 	if err != nil {
 		return fmt.Errorf("register worker %s: %w", s.cfg.WorkerID, err)
@@ -227,6 +231,11 @@ func (s *Store) PublishHeartbeat(ctx context.Context, hb domain.WorkerHeartbeat)
 		Usage:              usageToPB(hb),
 		Isolation:          hb.Isolation,
 		AllowsNetwork:      hb.AllowsNetwork,
+		Os:                 hb.OS,
+		Arch:               hb.Arch,
+		Labels:             hb.Labels,
+		Preference:         int32(hb.Preference),
+		CachedArtifacts:    hb.CachedArtifacts,
 	}
 	for _, id := range hb.RunningJobs {
 		req.RunningJobs = append(req.RunningJobs, &pb.JobID{Value: id})
@@ -330,7 +339,7 @@ func usageToPB(hb domain.WorkerHeartbeat) *pb.ResourceUsage {
 		WorkDiskUsedPercent: m.WorkDiskUsedPercent, DockerDiskUsedPercent: m.DockerDiskUsedPercent,
 		SwapUsedPercent: m.SwapPercent, CpuTempC: m.CPUTempC, DockerHealthy: m.DockerHealthy,
 		GpuCount: int32(m.GPUCount), GpuUtilPercent: m.GPUUtilPercent, NetEgressBytesPerSec: m.NetEgressBytesPerSec,
-		JobsMemUsedMb: m.JobsMemUsedMB, OverloadReasons: hb.OverloadReasons, SampledAtUnix: m.At.Unix(),
+		JobsMemUsedMb: m.JobsMemUsedMB, OverloadReasons: hb.OverloadReasons, SampledAtUnix: m.At.Unix(), WorkDiskFreeMb: m.WorkDiskFreeMB,
 	}
 }
 

@@ -273,6 +273,13 @@ func (a *Agent) publishHeartbeat(ctx context.Context) {
 		MaxJobs:       1,
 		Isolation:     a.isolation,
 		AllowsNetwork: a.currentPolicy().AllowNetwork,
+		OS:            a.cfg.OS,
+		Arch:          a.cfg.Arch,
+		Labels:        a.cfg.Labels,
+		Preference:    a.cfg.Preference,
+	}
+	if c, ok := a.fetcher.(interface{ CachedDigests(limit int) []string }); ok {
+		heartbeat.CachedArtifacts = c.CachedDigests(64)
 	}
 	heartbeat.Resources.CPUCores, heartbeat.Resources.MemoryMB = a.donated(heartbeat.Resources.CPUCores, heartbeat.Resources.MemoryMB)
 	if adm := a.admission(); !adm.Allowed {

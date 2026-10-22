@@ -27,11 +27,13 @@ type Server struct {
 	cfg   config.Config
 	log   *slog.Logger
 	auth  *auth.Service // nil: no authentication (unit tests); production always sets it
+
+	placer *placer // best-fit scheduling on top of the atomic claim
 }
 
 // NewServer builds the gRPC service over q.
 func NewServer(q *queue.Queue, cfg config.Config, log *slog.Logger) *Server {
-	return &Server{queue: q, cfg: cfg, log: log}
+	return &Server{queue: q, cfg: cfg, log: log, placer: newPlacer(q, cfg)}
 }
 
 // WithAuth turns on authentication, rate limiting and the admin API.

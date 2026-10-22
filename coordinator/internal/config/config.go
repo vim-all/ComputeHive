@@ -42,6 +42,13 @@ type Config struct {
 	// VerifyTimeout: how long a replica of a verify=true job waits for its sibling before failing.
 	VerifyTimeout time.Duration
 
+	// Scheduling. UserLimit caps one user's running jobs (0 = unlimited). SchedPatience is how long a job waits
+	// for its best-fit worker before any eligible idle worker may take it. SchedSnapshotTTL bounds how stale
+	// the worker view used for placement can be.
+	UserLimit        int
+	SchedPatience    time.Duration
+	SchedSnapshotTTL time.Duration
+
 	// Trust.
 	APIToken        string // required for submitters/operators (env API_TOKEN or API_TOKEN_FILE)
 	AuthDisabled    bool   // AUTH_DISABLED=true: development only
@@ -162,6 +169,10 @@ func Load(args []string) (Config, error) {
 		RequireUsage:  envBool(getenv, "REQUIRE_USAGE", true),
 		VerifyTimeout: envDuration(getenv, "VERIFY_TIMEOUT", 10*time.Minute),
 
+		UserLimit:        envInt(getenv, "USER_LIMIT", 0),
+		SchedPatience:    envDuration(getenv, "SCHED_PATIENCE", 5*time.Second),
+		SchedSnapshotTTL: envDuration(getenv, "SCHED_SNAPSHOT_TTL", 250*time.Millisecond),
+
 		APIToken:        strings.TrimSpace(getenv("API_TOKEN")),
 		AuthDisabled:    envBool(getenv, "AUTH_DISABLED", false),
 		AllowInsecure:   envBool(getenv, "ALLOW_INSECURE", false),
@@ -220,6 +231,9 @@ func Load(args []string) (Config, error) {
 	fs.Float64Var(&cfg.ReleasePct, "release-percent", cfg.ReleasePct, "an overloaded worker recovers only after every metric stays below this")
 	fs.DurationVar(&cfg.ReleaseAfter, "release-after", cfg.ReleaseAfter, "... for this long")
 	fs.DurationVar(&cfg.VerifyTimeout, "verify-timeout", cfg.VerifyTimeout, "how long a verify=true replica waits for its sibling before the job fails")
+	fs.IntVar(&cfg.UserLimit, "user-limit", cfg.UserLimit, "max jobs one user may have running at once (0 = unlimited)")
+	fs.DurationVar(&cfg.SchedPatience, "sched-patience", cfg.SchedPatience, "how long a job waits for its best-fit worker before any eligible idle worker may take it")
+	fs.DurationVar(&cfg.SchedSnapshotTTL, "sched-snapshot-ttl", cfg.SchedSnapshotTTL, "maximum age of the worker view used for placement")
 	fs.BoolVar(&cfg.RequireUsage, "require-usage", cfg.RequireUsage, "refuse to assign jobs to workers that report no resource metrics")
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
@@ -299,6 +313,12 @@ func (c Config) Validate() error {
 	if c.ReleasePct <= 0 || c.ReleasePct >= min(c.LimitRAMPct, c.LimitCPUPct, c.LimitDiskPct) {
 		return fmt.Errorf("release-percent (%.1f) must be positive and below every limit (ram %.1f, cpu %.1f, disk %.1f), or the hysteresis band is empty and workers would flap",
 			c.ReleasePct, c.LimitRAMPct, c.LimitCPUPct, c.LimitDiskPct)
+	}
+	if c.UserLimit < 0 {
+		return fmt.Errorf("invalid user-limit %d (env USER_LIMIT): must be >= 0", c.UserLimit)
+	}
+	if c.SchedPatience < 0 || c.SchedSnapshotTTL < 0 {
+		return fmt.Errorf("sched-patience (%s) and sched-snapshot-ttl (%s) must be >= 0", c.SchedPatience, c.SchedSnapshotTTL)
 	}
 	if c.ReleaseAfter < 0 {
 		return fmt.Errorf("invalid release-after %s: must be >= 0", c.ReleaseAfter)

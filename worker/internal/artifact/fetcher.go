@@ -36,6 +36,8 @@ type Fetcher struct {
 
 	coordURL  string // only requests under this URL get the worker credential
 	coordAuth func(setHeader func(k, v string))
+
+	cache *Cache // nil: every job downloads its artifact
 }
 
 // WithCoordinator lets the fetcher authenticate to the coordinator's artifact store (and trust its
@@ -109,6 +111,10 @@ func (f *Fetcher) Fetch(ctx context.Context, job domain.Job) (Bundle, error) {
 		return Bundle{}, err
 	}
 
+	if bundle, ok := f.fromCache(job); ok {
+		return bundle, nil
+	}
+
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, job.ArtifactURL, nil)
 	if err != nil {
 		return Bundle{}, fmt.Errorf("create artifact request: %w", err)
@@ -147,8 +153,50 @@ func (f *Fetcher) Fetch(ctx context.Context, job domain.Job) (Bundle, error) {
 		_ = Cleanup(bundle)
 		return Bundle{}, err
 	}
+	// The bytes now match the digest the job declared, so they are safe to keep for the next job.
+	_ = f.cache.Put(bundle.SHA256, bundle.ArchivePath)
 
 	return bundle, nil
+}
+
+// WithCache lets the fetcher keep verified artifacts and serve repeat requests without downloading.
+func (f *Fetcher) WithCache(c *Cache) *Fetcher {
+	f.cache = c
+	return f
+}
+
+// CachedDigests lists the artifacts available locally, for the scheduler's locality scoring.
+func (f *Fetcher) CachedDigests(limit int) []string { return f.cache.Digests(limit) }
+
+// fromCache materialises a cached artifact into a fresh bundle directory (so Cleanup works the same way
+// for cached and downloaded bundles and the cache entry itself is never handed out for modification).
+func (f *Fetcher) fromCache(job domain.Job) (Bundle, bool) {
+	src, size, ok := f.cache.Open(job.ArtifactSHA256)
+	if !ok {
+		return Bundle{}, false
+	}
+	defer src.Close()
+	if f.maxBytes > 0 && size > f.maxBytes {
+		return Bundle{}, false
+	}
+	tempDir, err := os.MkdirTemp("", "computehive-artifact-*")
+	if err != nil {
+		return Bundle{}, false
+	}
+	bundle := Bundle{TempDir: tempDir, ArchivePath: filepath.Join(tempDir, archiveName(job.ID)),
+		SHA256: strings.ToLower(strings.TrimSpace(job.ArtifactSHA256)), SizeBytes: size}
+	dst, err := os.OpenFile(bundle.ArchivePath, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600)
+	if err == nil {
+		_, err = io.Copy(dst, src)
+		if cerr := dst.Close(); err == nil {
+			err = cerr
+		}
+	}
+	if err != nil {
+		_ = Cleanup(bundle)
+		return Bundle{}, false
+	}
+	return bundle, true
 }
 
 func Cleanup(bundle Bundle) error {

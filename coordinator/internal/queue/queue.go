@@ -72,6 +72,9 @@ type Config struct {
 	ReapInterval   time.Duration
 	// VerifyTimeout bounds how long a replica waits in VERIFYING for its sibling (default 10m).
 	VerifyTimeout time.Duration
+	// UserLimit caps how many jobs one user may have running at once (0 = unlimited). It keeps one
+	// submitter's flood from occupying the whole cluster.
+	UserLimit int
 	// OrphanGrace is how long a lease may go unreported by its worker before the job
 	// is taken back (a lost claim reply). It must exceed the worker's heartbeat interval
 	// plus the time a worker takes to register a freshly received job.
@@ -155,6 +158,10 @@ type Spec struct {
 	Verify            bool              `json:"verify,omitempty"`
 	RequiredIsolation string            `json:"required_isolation,omitempty"`
 	NetworkHosts      []string          `json:"network_hosts,omitempty"`
+	MinDiskMB         int32             `json:"min_disk_mb,omitempty"`
+	OS                string            `json:"os,omitempty"`
+	Arch              string            `json:"arch,omitempty"`
+	Labels            []string          `json:"labels,omitempty"`
 	CreatedAtUnix     int64             `json:"created_at_unix"`
 }
 
@@ -269,6 +276,26 @@ func disposition(s string) Disposition {
 
 // Enqueue adds a job at the tail of the FIFO. Re-enqueueing an existing ID is a
 // no-op that returns the original sequence number (created=false).
+// enqueueBlock is the 17 script arguments describing one job.
+func (q *Queue) enqueueBlock(sp Spec, maxAttempts int, verify bool) ([]any, error) {
+	payload, err := json.Marshal(sp)
+	if err != nil {
+		return nil, fmt.Errorf("marshal job spec: %w", err)
+	}
+	return []any{sp.ID, maxAttempts, sp.CPUCores, sp.MemoryMB, sp.GPUCount, sp.MaxRuntimeSeconds,
+		q.cfg.BackoffBase.Milliseconds(), q.cfg.BackoffMax.Milliseconds(), sp.User, boolArg(verify), payload,
+		sp.RequiredIsolation, boolArg(len(sp.NetworkHosts) > 0),
+		sp.MinDiskMB, sp.OS, sp.Arch, labelsKey(sp.Labels)}, nil
+}
+
+// labelsKey renders labels as ",k=v,k2=v2," for the claim script's substring matching.
+func labelsKey(labels []string) string {
+	if len(labels) == 0 {
+		return ""
+	}
+	return strings.Join(labels, ",")
+}
+
 func (q *Queue) Enqueue(ctx context.Context, spec Spec, maxAttempts int) (seq int64, created bool, err error) {
 	if spec.ID == "" {
 		return 0, false, errors.New("job id is required")
@@ -276,13 +303,11 @@ func (q *Queue) Enqueue(ctx context.Context, spec Spec, maxAttempts int) (seq in
 	if maxAttempts <= 0 {
 		maxAttempts = q.cfg.MaxAttempts
 	}
-	payload, err := json.Marshal(spec)
+	args, err := q.enqueueBlock(spec, maxAttempts, spec.Verify)
 	if err != nil {
-		return 0, false, fmt.Errorf("marshal job spec: %w", err)
+		return 0, false, err
 	}
-	res, err := enqueueScript.Run(ctx, q.rdb, nil,
-		spec.ID, maxAttempts, spec.CPUCores, spec.MemoryMB, spec.GPUCount, spec.MaxRuntimeSeconds,
-		q.cfg.BackoffBase.Milliseconds(), q.cfg.BackoffMax.Milliseconds(), spec.User, boolArg(spec.Verify), payload, spec.RequiredIsolation, boolArg(len(spec.NetworkHosts) > 0)).Result()
+	res, err := enqueueScript.Run(ctx, q.rdb, nil, args...).Result()
 	if err != nil {
 		return 0, false, fmt.Errorf("enqueue %s: %w", spec.ID, err)
 	}
@@ -311,13 +336,11 @@ func (q *Queue) EnqueuePair(ctx context.Context, spec Spec, maxAttempts int) (se
 	shadow.ID = ShadowID(spec.ID)
 	args := []any{}
 	for _, sp := range []Spec{spec, shadow} {
-		payload, err := json.Marshal(sp)
+		block, err := q.enqueueBlock(sp, maxAttempts, true)
 		if err != nil {
-			return 0, false, fmt.Errorf("marshal job spec: %w", err)
+			return 0, false, err
 		}
-		args = append(args, sp.ID, maxAttempts, sp.CPUCores, sp.MemoryMB, sp.GPUCount, sp.MaxRuntimeSeconds,
-			q.cfg.BackoffBase.Milliseconds(), q.cfg.BackoffMax.Milliseconds(), sp.User, boolArg(true), payload,
-			sp.RequiredIsolation, boolArg(len(sp.NetworkHosts) > 0))
+		args = append(args, block...)
 	}
 	res, err := enqueuePairScript.Run(ctx, q.rdb, nil, args...).Result()
 	if err != nil {
@@ -352,9 +375,19 @@ type Claimed struct {
 // workerID. It returns (nil, reason, nil) when nothing was assigned; reason says
 // why (empty queue, worker overloaded, stale heartbeat, ...).
 func (q *Queue) Claim(ctx context.Context, workerID string) (*Claimed, string, error) {
+	return q.claim(ctx, workerID, "")
+}
+
+// ClaimJob is Claim restricted to one specific pending job, used by the scheduler once it has decided
+// which worker should run which job. The same atomic safety checks apply.
+func (q *Queue) ClaimJob(ctx context.Context, workerID, jobID string) (*Claimed, string, error) {
+	return q.claim(ctx, workerID, jobID)
+}
+
+func (q *Queue) claim(ctx context.Context, workerID, specific string) (*Claimed, string, error) {
 	res, err := claimScript.Run(ctx, q.rdb, nil, workerID, newToken(),
 		q.cfg.DeadAfter.Milliseconds(), q.cfg.DefaultTimeout.Milliseconds(), q.cfg.LeaseGrace.Milliseconds(), q.cfg.ClaimScan,
-		q.cfg.LimitMemPct, q.cfg.DefaultJobMemMB, boolArg(q.cfg.RequireUsage)).Result()
+		q.cfg.LimitMemPct, q.cfg.DefaultJobMemMB, boolArg(q.cfg.RequireUsage), specific, q.cfg.UserLimit).Result()
 	if err != nil {
 		return nil, "", fmt.Errorf("claim for %s: %w", workerID, err)
 	}
@@ -440,9 +473,17 @@ type WorkerReport struct {
 	Draining   bool
 	MaxJobs    int
 	Version    string
-	Isolation  string   // "hardened-runc" or "gvisor"
-	AllowsNet  bool     // the contributor's policy permits network jobs
-	Running    []string // jobs the worker believes it is running
+	Isolation  string // "hardened-runc" or "gvisor"
+	AllowsNet  bool   // the contributor's policy permits network jobs
+
+	// Scheduling facts.
+	OS, Arch        string
+	Labels          []string
+	Preference      int // 0-100; 0 is treated as the default 50
+	DiskFreeMB      int64
+	Load1           float64
+	CachedArtifacts []string
+	Running         []string // jobs the worker believes it is running
 
 	// Usage is the worker's latest resource sample; nil if it sent none.
 	Usage *Usage
@@ -470,7 +511,7 @@ func (q *Queue) Heartbeat(ctx context.Context, r WorkerReport) ([]string, error)
 	}
 	args := []any{r.ID, r.CPU, r.MemMB, r.GPU, boolArg(r.Overloaded), boolArg(r.Draining), r.MaxJobs, r.Version, q.cfg.OrphanGrace.Milliseconds(),
 		hasUsage, u.MemTotalMB, u.MemUsedMB, u.JobsMemMB, u.MemPct, u.CPUPct, u.DiskPct,
-		q.cfg.LimitMemPct, q.cfg.LimitCPUPct, q.cfg.LimitDiskPct, q.cfg.ReleasePct, q.cfg.ReleaseAfter.Milliseconds(), u.JSON, r.Isolation, boolArg(r.AllowsNet)}
+		q.cfg.LimitMemPct, q.cfg.LimitCPUPct, q.cfg.LimitDiskPct, q.cfg.ReleasePct, q.cfg.ReleaseAfter.Milliseconds(), u.JSON, r.Isolation, boolArg(r.AllowsNet), capsJSON(r)}
 	for _, id := range r.Running {
 		args = append(args, id)
 	}
@@ -479,6 +520,27 @@ func (q *Queue) Heartbeat(ctx context.Context, r WorkerReport) ([]string, error)
 		return nil, fmt.Errorf("heartbeat %s: %w", r.ID, err)
 	}
 	return asStrings(res)
+}
+
+func capsJSON(r WorkerReport) string {
+	pref := r.Preference
+	if pref <= 0 || pref > 100 {
+		pref = 50
+	}
+	cached := r.CachedArtifacts
+	if len(cached) > 200 {
+		cached = cached[:200]
+	}
+	labels := r.Labels
+	if labels == nil {
+		labels = []string{}
+	}
+	if cached == nil {
+		cached = []string{}
+	}
+	b, _ := json.Marshal(map[string]any{"os": r.OS, "arch": r.Arch, "labels": labels, "preference": pref,
+		"disk_free_mb": r.DiskFreeMB, "load1": r.Load1, "cached": cached})
+	return string(b)
 }
 
 // WorkerKnown reports whether the worker has ever heartbeated (and not been forgotten).
@@ -593,6 +655,8 @@ type Job struct {
 	// Commits is how many results were ever committed for this job. The Lua scripts
 	// guarantee it is 0 until the job finishes and exactly 1 afterwards.
 	Commits int
+	// Exclude is the worker this job must not run on (its verification sibling's worker).
+	Exclude string
 	// Verification is "" for ordinary jobs; for verified jobs "pending", "match", "mismatch",
 	// "timeout" or "unavailable".
 	Verification string
@@ -610,21 +674,7 @@ func (q *Queue) Get(ctx context.Context, jobID string) (*Job, error) {
 	if len(m) == 0 {
 		return nil, nil
 	}
-	j := &Job{
-		ID: m["id"], State: m["state"], Seq: atoi64(m["seq"]), Attempt: int(atoi64(m["attempt"])),
-		MaxAttempts: int(atoi64(m["max_attempts"])), Worker: m["worker"], LastFailure: m["last_failure"],
-		LastFailureMs: atoi64(m["last_failure_ms"]), CreatedMs: atoi64(m["created_ms"]),
-		AssignedMs: atoi64(m["assigned_ms"]), StartedMs: atoi64(m["started_ms"]),
-		FinishedMs: atoi64(m["finished_ms"]), NotBeforeMs: atoi64(m["not_before"]), Commits: int(atoi64(m["commits"])),
-	}
-	_ = json.Unmarshal([]byte(m["spec"]), &j.Spec)
-	if m["verify"] == "1" {
-		j.Verification = m["verified"]
-		if j.Verification == "" {
-			j.Verification = "pending"
-		}
-	}
-	return j, nil
+	return jobFromMap(m), nil
 }
 
 // GetResult returns the committed result, or (nil, nil) if none.

@@ -27,6 +27,11 @@ message SubmitJobRequest {
   // Honoured only by workers whose contributor allows network jobs and lists the host; the
   // worker's filtering proxy still refuses private, loopback and metadata addresses.
   repeated string network_hosts = 13;
+  // Placement requirements (all optional; 0 / empty = no requirement).
+  int32 min_disk_mb = 14;
+  string os = 15;              // "linux", "darwin", "windows"
+  string arch = 16;            // "amd64", "arm64"
+  repeated string labels = 17; // "key=value": the worker must carry every one
 }
 
 message SubmitJobResponse {
@@ -89,6 +94,11 @@ message WorkerInfo {
   ResourceUsage usage = 10;
   string isolation = 11;
   bool allows_network = 12;
+  string os = 13;
+  string arch = 14;
+  repeated string labels = 15;
+  double reliability = 16;      // 0-1, decayed success rate of recent jobs
+  int32 preference = 17;
 }
 
 message ListWorkersRequest {}
@@ -97,7 +107,38 @@ message ListWorkersResponse {
   repeated WorkerInfo workers = 1;
 }
 
+// One worker's evaluation for a job: why it was rejected, or how it scored.
+message WorkerEvaluation {
+  WorkerID worker_id = 1;
+  bool eligible = 2;
+  repeated string reasons = 3;         // why it cannot run the job (empty if eligible)
+  double score = 4;                    // total weighted score (eligible workers only)
+  map<string, double> parts = 5;       // weighted contribution of each scoring component
+  bool chosen = 6;
+  bool busy = 7;                       // eligible but has no free slot right now
+}
+
+message ExplainJobRequest {
+  JobID job_id = 1;
+}
+
+message ExplainJobResponse {
+  JobID job_id = 1;
+  Status status = 2;
+  string summary = 3;
+  // True if this is the record made when the job was assigned; false if it is a live evaluation
+  // of the current cluster for a job that is still waiting.
+  bool recorded = 4;
+  int64 evaluated_at_unix = 5;
+  string assigned_worker_id = 6;
+  repeated WorkerEvaluation evaluations = 7;
+  map<string, double> weights = 8;
+}
+
 service ClientService {
+  // Shows why each worker was chosen or rejected for a job.
+  rpc ExplainJob(ExplainJobRequest) returns (ExplainJobResponse);
+
   // Cancels a job in any non-terminal state.
   rpc CancelJob(CancelJobRequest) returns (CancelJobResponse);
 

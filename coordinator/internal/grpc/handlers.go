@@ -59,6 +59,7 @@ func (s *Server) RegisterWorker(ctx context.Context, req *pb.RegisterWorkerReque
 	if _, err := s.queue.Heartbeat(ctx, queue.WorkerReport{
 		ID: workerID, CPU: int(res.GetCpuCores()), MemMB: int(res.GetMemoryMb()), GPU: int(res.GetGpuCount()),
 		MaxJobs: int(req.GetMaxJobs()), Version: req.GetWorkerVersion(), Isolation: req.GetIsolation(), AllowsNet: req.GetAllowsNetwork(),
+		OS: req.GetOs(), Arch: req.GetArch(), Labels: cleanLabels(req.GetLabels()), Preference: clampPref(req.GetPreference()),
 	}); err != nil {
 		return nil, internal("register worker", err)
 	}
@@ -91,6 +92,8 @@ func (s *Server) Heartbeat(ctx context.Context, req *pb.HeartbeatRequest) (*pb.H
 		ID: workerID, CPU: int(res.GetCpuCores()), MemMB: int(res.GetMemoryMb()), GPU: int(res.GetGpuCount()),
 		Overloaded: req.GetOverloaded(), Draining: req.GetDraining(), MaxJobs: int(req.GetMaxJobs()), Running: running,
 		Usage: usageFromPB(req.GetUsage()), Isolation: req.GetIsolation(), AllowsNet: req.GetAllowsNetwork(),
+		OS: req.GetOs(), Arch: req.GetArch(), Labels: cleanLabels(req.GetLabels()), Preference: clampPref(req.GetPreference()),
+		DiskFreeMB: req.GetUsage().GetWorkDiskFreeMb(), Load1: req.GetUsage().GetLoad1(), CachedArtifacts: cleanHashes(req.GetCachedArtifacts()),
 	})
 	if err != nil {
 		return nil, internal("heartbeat", err)
@@ -106,7 +109,7 @@ func (s *Server) RequestJob(ctx context.Context, req *pb.RequestJobRequest) (*pb
 	if workerID == "" {
 		return nil, status.Error(codes.InvalidArgument, "worker_id is required")
 	}
-	claimed, reason, err := s.queue.Claim(ctx, workerID)
+	claimed, reason, err := s.placer.claimFor(ctx, workerID)
 	if err != nil {
 		return nil, internal("claim job", err)
 	}
@@ -234,6 +237,7 @@ func (s *Server) SubmitJob(ctx context.Context, req *pb.SubmitJobRequest) (*pb.S
 		ArtifactURL: req.GetArtifactUrl(), ArtifactSHA256: req.GetArtifactSha256(),
 		User: req.GetUser(), Verify: req.GetVerify(), CreatedAtUnix: time.Now().Unix(),
 		RequiredIsolation: req.GetRequiredIsolation(), NetworkHosts: req.GetNetworkHosts(),
+		MinDiskMB: req.GetMinDiskMb(), OS: req.GetOs(), Arch: req.GetArch(), Labels: req.GetLabels(),
 	}
 	enqueue := s.queue.Enqueue
 	if req.GetVerify() {
@@ -324,7 +328,16 @@ func (s *Server) ListWorkers(ctx context.Context, _ *pb.ListWorkersRequest) (*pb
 		return nil, internal("list workers", err)
 	}
 	resp := &pb.ListWorkersResponse{}
+	// Scheduling facts (platform, labels, reliability) come from the scheduler's own view of the cluster.
+	// If that read fails the list is still useful without them.
+	facts := map[string]queue.WorkerState{}
+	if states, err := s.queue.WorkerStates(ctx); err == nil {
+		for _, st := range states {
+			facts[st.ID] = st
+		}
+	}
 	for _, w := range workers {
+		st := facts[w.ID]
 		var usage *pb.ResourceUsage
 		if w.UsageJSON != "" {
 			usage = &pb.ResourceUsage{}
@@ -344,6 +357,7 @@ func (s *Server) ListWorkers(ctx context.Context, _ *pb.ListWorkersRequest) (*pb
 			Alive:             w.Alive,
 			RegisteredAtUnix:  w.RegisteredMs / 1000,
 			LastHeartbeatUnix: w.LastHeartbeatMs / 1000,
+			Os:                st.OS, Arch: st.Arch, Labels: st.Labels, Reliability: st.Reliability, Preference: int32(st.Preference),
 		}
 		for _, id := range w.Running {
 			info.RunningJobs = append(info.RunningJobs, &pb.JobID{Value: id})

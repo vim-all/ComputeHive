@@ -49,6 +49,17 @@ make down                                       # stop (data volumes are kept)
 Redis is published on an ephemeral loopback port (`docker compose port redis 6379`)
 so it never clashes with a Redis you already run.
 
+## Documentation
+
+| Document | What it covers |
+|---|---|
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System design: components, job lifecycle, Redis data model, atomicity, failure recovery, interfaces |
+| [docs/SCHEDULING.md](docs/SCHEDULING.md) | How a job picks its worker: filters, scoring, patience, locality, `explain` |
+| [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) | Assets, attackers, mitigations with the test that proves each, residual risks |
+| [docs/decisions.md](docs/decisions.md) | Every important decision: options, choice, tradeoff, evidence |
+| [docs/AUDIT.md](docs/AUDIT.md) | What was wrong at the start and what changed |
+| [docs/GVISOR.md](docs/GVISOR.md) | Optional gVisor isolation (implemented, not verified here) |
+
 ## Monorepo layout
 
 ```text
@@ -181,6 +192,22 @@ cd client && pnpm install && pnpm tauri dev
 
 See [`client/README.md`](client/README.md). The desktop client is not exercised by CI.
 
+## Scheduling (best fit)
+
+A worker is handed a job only if it is the best idle fit for it (or the job has waited past a patience window). The coordinator rejects
+workers that are stale, overloaded, lack the CPU/RAM/GPU/disk/OS/arch/labels/isolation/network permission, have no memory headroom, are
+unreliable, or whose user is at their limit, then ranks the rest by free RAM, free CPU, load, reliability, artifact locality, fit, uptime and
+the contributor's preference. The atomic Lua claim re-checks every safety rule, so the scheduler can only improve placement, never break a rule.
+
+```bash
+computehive submit examples/hello --cpu 2 --mem 1024 --os linux --arch amd64 --label fast-disk
+computehive explain <job-id>      # every worker, its verdict, and the score breakdown
+```
+
+Defaults can live in the job directory (`computehive.yaml`, flat `key: value`, or `LABEL computehive.<key>=...` in the Dockerfile); flags win.
+An unchanged directory is not rebuilt on re-submit, so repeat jobs reuse the same artifact and prefer the worker that already has it
+(`--rebuild` to force). Details and limitations: [docs/SCHEDULING.md](docs/SCHEDULING.md).
+
 ## Reliability guarantees (and how they are tested)
 
 | Guarantee | Mechanism | Test |
@@ -226,3 +253,5 @@ Prove it on your machine: `make pressure` (a worker with a 1% RAM limit must sho
 - Scheduling is first-come-first-served pull with capability filtering (no best-fit scoring yet).
 - Single-node Redis only (the Lua scripts address keys dynamically; Redis Cluster would need hash tags).
 - Metrics and the Grafana dashboard are not wired yet (Prometheus scrape target is down by design).
+- Scheduling weights are hand-set, not tuned, and a worker with a longer track record tends to keep winning ties (see docs/SCHEDULING.md).
+- Re-submitting an unchanged directory reuses the saved image; a changed base image or external dependency is not noticed until `--rebuild`.
