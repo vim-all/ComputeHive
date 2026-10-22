@@ -33,16 +33,18 @@ type WorkerHeartbeat struct {
 	Draining    bool     `json:"draining,omitempty"`
 	MaxJobs     int      `json:"max_jobs,omitempty"`
 
-	// Usage is the latest resource sample; nil until the monitor has produced one.
 	// Scheduling facts: platform, tags, how keen the owner is to take work (0-100; 0 = default), and
 	// which artifacts this machine already holds.
-	OS              string           `json:"os,omitempty"`
-	Arch            string           `json:"arch,omitempty"`
-	Labels          []string         `json:"labels,omitempty"`
-	Preference      int              `json:"preference,omitempty"`
-	CachedArtifacts []string         `json:"cached_artifacts,omitempty"`
-	Isolation       string           `json:"isolation,omitempty"`
-	AllowsNetwork   bool             `json:"allows_network,omitempty"`
+	OS              string   `json:"os,omitempty"`
+	Arch            string   `json:"arch,omitempty"`
+	Labels          []string `json:"labels,omitempty"`
+	Preference      int      `json:"preference,omitempty"`
+	CachedArtifacts []string `json:"cached_artifacts,omitempty"`
+	// LogTails is the live output of the running job(s): job id -> the last few KB (untrusted text).
+	LogTails      map[string]string `json:"log_tails,omitempty"`
+	Isolation     string            `json:"isolation,omitempty"`
+	AllowsNetwork bool              `json:"allows_network,omitempty"`
+	// Usage is the latest resource sample; nil until the monitor has produced one.
 	Usage           *monitor.Metrics `json:"usage,omitempty"`
 	OverloadReasons []string         `json:"overload_reasons,omitempty"`
 }

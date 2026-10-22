@@ -10,11 +10,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 )
 
-const workerUsage = `usage: computehive worker join --coordinator <host:port> --ca ca.crt --token <enrollment token> [--tls-cert C --tls-key K] [--http-url URL] [--worker-bin PATH]
+const workerUsage = `usage: computehive worker join --coordinator <host:port> (--ca ca.crt | --ca-sha256 <fingerprint>) --token <enrollment token> [--tls-cert C --tls-key K] [--http-url URL] [--worker-bin PATH]
 
 Checks prerequisites (Docker, coordinator reachability, worker binary) and then
 runs a worker in the foreground. Stop it with Ctrl-C; it finishes or requeues its
@@ -40,6 +42,8 @@ func cmdWorker(ctx context.Context, _ globals, args []string, out, errOut io.Wri
 	workerID := fs.String("worker-id", "", "stable worker id (default: this host's name)")
 	httpURL := fs.String("http-url", "", "coordinator HTTP base URL (default http://<coordinator host>:8080)")
 	bin := fs.String("worker-bin", "", "path to the worker binary (default: computehive-worker next to this binary, then PATH)")
+	caSHA := fs.String("ca-sha256", "", "fetch the cluster CA from the coordinator and trust it only if its SHA-256 fingerprint equals this (printed by `computehive admin enroll`); use instead of --ca")
+	httpPort := fs.Int("http-port", 8080, "the coordinator's HTTPS port, where the CA is fetched from (with --ca-sha256)")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -69,6 +73,37 @@ func cmdWorker(ctx context.Context, _ globals, args []string, out, errOut io.Wri
 		return err
 	}
 	fmt.Fprintf(out, "  ok  worker binary %s\n", workerPath)
+
+	// One-line join: fetch the cluster CA and trust it only if it matches the fingerprint the operator gave us.
+	host, _, _ := net.SplitHostPort(*coordinator)
+	if *ca == "" && *caSHA != "" {
+		pemBytes, err := fetchCA(ctx, "https://"+net.JoinHostPort(host, strconv.Itoa(*httpPort))+"/ca.crt", *caSHA)
+		if err != nil {
+			return err
+		}
+		if *stateDir == "" {
+			id := *workerID
+			if id == "" {
+				id, _ = os.Hostname()
+			}
+			home, herr := os.UserHomeDir()
+			if herr != nil {
+				return herr
+			}
+			*stateDir = filepath.Join(home, ".local", "state", "computehive", id)
+		}
+		if err := os.MkdirAll(*stateDir, 0o700); err != nil {
+			return err
+		}
+		*ca = filepath.Join(*stateDir, "ca.crt")
+		if err := os.WriteFile(*ca, pemBytes, 0o644); err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "  ok  fetched the cluster CA and verified its fingerprint (sha256 %s...)\n", strings.ToLower(strings.ReplaceAll(*caSHA, ":", ""))[:12])
+	}
+	if *httpURL == "" && *ca != "" {
+		*httpURL = "https://" + net.JoinHostPort(host, strconv.Itoa(*httpPort)) // artifacts and outputs use TLS too
+	}
 
 	if *ca == "" {
 		fmt.Fprintln(out, "  WARN no --ca given: the connection to the coordinator is NOT encrypted (development only)")

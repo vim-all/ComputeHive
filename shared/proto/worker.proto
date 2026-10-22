@@ -266,6 +266,9 @@ message HeartbeatRequest {
   repeated string labels = 13;         // "key=value" tags set by the contributor, e.g. "zone=eu"
   int32 preference = 14;               // contributor's willingness to take work, 0-100 (default 50)
   repeated string cached_artifacts = 15; // SHA-256s of job artifacts already on this machine
+  // Live output of the jobs this worker is running: job id -> the last few KB of stdout+stderr. The coordinator
+  // keeps it only for jobs the worker actually holds, truncated, and serves it from GetJobStatus.
+  map<string, string> log_tails = 16;
 }
 
 message HeartbeatResponse {

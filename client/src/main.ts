@@ -1,1094 +1,733 @@
-import { invoke } from "@tauri-apps/api/core";
-import { open } from "@tauri-apps/plugin-dialog";
-import { openPath, openUrl } from "@tauri-apps/plugin-opener";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { openPath } from "@tauri-apps/plugin-opener";
 
-type Mode = "user" | "contributor";
-type BuildStatus = "idle" | "ready" | "working" | "done" | "error";
-type ProcessLogTone = "info" | "working" | "success" | "error";
+import {
+  call,
+  inTauri,
+  type ClusterOverview,
+  type ContributorSharingStatus,
+  type ControlStatus,
+  type DockerImageResult,
+  type DownloadedFile,
+  type ExplainView,
+  type JobProgress,
+  type RunOptions,
+  type RunRequestJobResult,
+  type RunRequestResult,
+  type WorkerPolicy,
+  type WorkerView,
+} from "./api";
+import { $, clamp, clean, clockTime, fact, formatAge, formatBytes, formatTime, h, meter, pill, replaceChildren } from "./ui";
 
-interface DockerImageResult {
-  projectName: string;
-  projectRoot: string;
-  dockerfilePath: string;
-  imageArchivePath: string;
-  imageTag: string;
-  imageSizeBytes: number;
-  detectedStack: string;
-  dockerSetupSource: string;
-  generatedFiles: string[];
-  summary: string;
-  notes: string[];
+type Tab = "run" | "cluster" | "contributor";
+type Tone = "info" | "success" | "error";
+
+// ---------------------------------------------------------------------------------------------------
+// shared helpers
+
+const errMsg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+
+/** Re-runs fn every `ms` after the previous run finished (no overlap), skipping beats while the window is hidden. */
+function every(ms: number, fn: () => Promise<void>): { stop(): void; now(): void } {
+  let timer: number | undefined;
+  let stopped = false;
+  const tick = async () => {
+    if (stopped) return;
+    if (!document.hidden) {
+      try {
+        await fn();
+      } catch {
+        /* each poller reports its own errors */
+      }
+    }
+    if (!stopped) timer = window.setTimeout(tick, ms);
+  };
+  timer = window.setTimeout(tick, 0);
+  return {
+    stop() {
+      stopped = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    },
+    now() {
+      if (timer !== undefined) window.clearTimeout(timer);
+      timer = window.setTimeout(tick, 0);
+    },
+  };
 }
 
-interface RunRequestResult {
-  image: DockerImageResult;
-  gzipArchivePath: string;
-  gzipSizeBytes: number;
-  artifactSha256: string;
-  artifactObjectKey: string;
-  artifactUri: string;
-  artifactApiUrl: string;
-  artifactPublicUrl: string;
-  artifactRecordKey: string;
-  artifactEtag?: string | null;
-  redisJobId: string;
-  redisJobKey: string;
-  redisStatusKey: string;
-  redisQueueKey: string;
-  summary: string;
-  notes: string[];
+const activity = $<HTMLOListElement>("#process-log");
+function log(tone: Tone, message: string): void {
+  const first = activity.firstElementChild;
+  if (first && first.classList.contains("muted")) first.remove();
+  activity.prepend(h("li", { class: tone === "info" ? "" : `is-${tone}` }, h("time", {}, clockTime()), h("span", {}, message)));
+  while (activity.children.length > 100) activity.lastElementChild?.remove();
 }
 
-interface RunRequestJobResult {
-  jobId: string;
-  workerId: string;
-  status: string;
-  resultStatus: string;
-  partial: boolean;
-  exitCode: number;
-  stdoutExcerpt: string;
-  stderrExcerpt: string;
-  outputUri: string;
-  outputApiUrl: string;
-  outputPublicUrl: string;
-  outputSizeBytes: number;
-  outputArtifacts: RunRequestOutputArtifact[];
-  finishedAtUnix: number;
-  completed: boolean;
+async function pickFolder(): Promise<string | null> {
+  if (!inTauri) return "/home/you/projects/sample-app"; // preview mode has no native dialog
+  const picked = await openDialog({ directory: true, multiple: false });
+  return typeof picked === "string" ? picked : null;
 }
 
-interface RunRequestOutputArtifact {
-  relativePath: string;
-  objectKey: string;
-  uri: string;
-  apiUrl: string;
-  publicUrl: string;
-  sha256: string;
-  sizeBytes: number;
-  contentType: string;
-}
+// ---------------------------------------------------------------------------------------------------
+// tabs
 
-interface ContributorSharingStatus {
-  running: boolean;
-  pid: number | null;
-  details: string;
-  jobRunning: boolean;
-  currentJobId: string | null;
-  lastJobId: string | null;
-}
+const tabButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-tab]"));
+const tabPanels = Array.from(document.querySelectorAll<HTMLElement>("[data-panel]"));
+let currentTab: Tab = "run";
 
-interface ProcessLogEntry {
-  id: number;
-  tone: ProcessLogTone;
-  message: string;
-  timestamp: string;
-}
-
-interface InterfaceCopy {
-  eyebrow: string;
-  heading: string;
-  copy: string;
-}
-
-const interfaceCopy: Record<Mode, InterfaceCopy> = {
-  user: {
-    eyebrow: "Project flow",
-    heading: "Compute Hive",
-    copy:
-      "Choose a project directory. ComputeHive prepares Docker when needed, builds the image, compresses the artifact, uploads it, and writes the queue record.",
-  },
-  contributor: {
-    eyebrow: "Contributor flow",
-    heading: "Compute Hive",
-    copy:
-      "Start sharing to run the local worker on this machine. Stop anytime.",
-  },
-};
-
-const modeBurstTimers = new WeakMap<HTMLButtonElement, number>();
-const processLogTimers = new Set<number>();
-let nextProcessLogId = 1;
-let renderedProcessLogCount = 0;
-let jobResultPollTimer: number | null = null;
-
-function getElement<T extends Element>(selector: string): T {
-  const element = document.querySelector<T>(selector);
-  if (!element) {
-    throw new Error(`Missing element for selector: ${selector}`);
+function showTab(tab: Tab, updateHash = true): void {
+  currentTab = tab;
+  for (const b of tabButtons) {
+    const on = b.dataset.tab === tab;
+    b.setAttribute("aria-selected", String(on));
+    b.tabIndex = on ? 0 : -1;
   }
-  return element;
+  for (const p of tabPanels) p.hidden = p.dataset.panel !== tab;
+  if (updateHash && location.hash !== `#${tab}`) history.replaceState(null, "", `#${tab}`);
+  if (tab === "cluster") overviewPoll.now();
+  if (tab === "contributor") contributorPoll.now();
+  window.scrollTo({ top: 0 });
 }
 
-const modeEyebrow = getElement<HTMLElement>("#mode-eyebrow");
-const modeHeading = getElement<HTMLElement>("#mode-heading");
-const modeCopy = getElement<HTMLElement>("#mode-copy");
-const modeButtons = Array.from(
-  document.querySelectorAll<HTMLButtonElement>("[data-mode]"),
-);
-const workflowPanels = Array.from(
-  document.querySelectorAll<HTMLElement>("[data-panel]"),
-);
-const selectedPath = getElement<HTMLElement>("#selected-path");
-const pickFolderButton = getElement<HTMLButtonElement>("#pick-folder");
-const requestRunButton = getElement<HTMLButtonElement>("#request-run");
-const revealFolderButton =
-  getElement<HTMLButtonElement>("#reveal-folder");
-const clearSelectionButton =
-  getElement<HTMLButtonElement>("#clear-selection");
-const processLog = getElement<HTMLElement>("#process-log");
-const processLogStatus =
-  getElement<HTMLElement>("#process-log-status");
-const bundleStatus = getElement<HTMLElement>("#bundle-status");
-const bundleSummaryTitle =
-  getElement<HTMLElement>("#bundle-summary-title");
-const bundleSummary = getElement<HTMLElement>("#bundle-summary");
+for (const b of tabButtons) {
+  b.addEventListener("click", () => showTab(b.dataset.tab as Tab));
+  b.addEventListener("keydown", (e) => {
+    const order: Tab[] = ["run", "cluster", "contributor"];
+    const i = order.indexOf(currentTab);
+    const next = e.key === "ArrowRight" ? order[(i + 1) % 3] : e.key === "ArrowLeft" ? order[(i + 2) % 3] : null;
+    if (next) {
+      e.preventDefault();
+      showTab(next);
+      tabButtons.find((t) => t.dataset.tab === next)?.focus();
+    }
+  });
+}
+window.addEventListener("hashchange", () => {
+  const t = location.hash.slice(1);
+  if (t === "run" || t === "cluster" || t === "contributor") showTab(t, false);
+});
 
-const runResultStatus =
-  getElement<HTMLElement>("#run-result-status");
-const runResultOutput =
-  getElement<HTMLElement>("#run-result-output");
-const runResultArtifacts =
-  getElement<HTMLElement>("#run-result-artifacts");
+if (!inTauri) {
+  const banner = $<HTMLElement>("#banner");
+  banner.hidden = false;
+  banner.textContent = "Preview mode: this page is not running inside the desktop app, so it shows sample data and cannot reach a real cluster.";
+}
 
-const detectedStack = getElement<HTMLElement>("#detected-stack");
-const imageTag = getElement<HTMLElement>("#image-tag");
-const imageSize = getElement<HTMLElement>("#image-size");
-const dockerSetupSource =
-  getElement<HTMLElement>("#docker-setup-source");
-const buildNotes = getElement<HTMLUListElement>("#build-notes");
-const addCommandButton =
-  getElement<HTMLButtonElement>("#add-command");
-const commandList =
-  getElement<HTMLElement>("#command-list");
-const contributorSetupStatus =
-  getElement<HTMLElement>("#contributor-setup-status");
-const contributeButton =
-  getElement<HTMLButtonElement>("#contribute-button");
-const profileWorkerStatus =
-  getElement<HTMLElement>("#profile-worker-status");
-const profileWorkerResources =
-  getElement<HTMLElement>("#profile-worker-resources");
-const profileWorkerLoad =
-  getElement<HTMLElement>("#profile-worker-load");
-const profileWorkerCapabilities =
-  getElement<HTMLElement>("#profile-worker-capabilities");
-const profileWorkerHeartbeat =
-  getElement<HTMLElement>("#profile-worker-heartbeat");
-const profileWorkerStats =
-  getElement<HTMLElement>("#profile-worker-stats");
+// ---------------------------------------------------------------------------------------------------
+// cluster overview (shared by the header chip and the Cluster tab)
 
-const state: {
-  mode: Mode;
-  selectedPath: string;
-  buildStatus: BuildStatus;
-  buildResult: DockerImageResult | null;
-  runResult: RunRequestResult | null;
-  jobResult: RunRequestJobResult | null;
-  resultTerminalLogged: boolean;
-  error: string;
-  cmdlist: string[];
-  contributorSharing: ContributorSharingStatus | null;
-  contributorSetupLoading: boolean;
-  contributorSetupMessage: string;
-  contributorSetupError: string;
-  logEntries: ProcessLogEntry[];
-  logStage: string;
-} = {
-  mode: "user",
-  selectedPath: "",
-  buildStatus: "idle",
-  buildResult: null,
-  runResult: null,
-  jobResult: null,
-  resultTerminalLogged: false,
-  error: "",
-  cmdlist: [""],
-  contributorSharing: null,
-  contributorSetupLoading: false,
-  contributorSetupMessage: "",
-  contributorSetupError: "",
-  logEntries: [],
-  logStage: "Idle",
-};
+const chip = $<HTMLElement>("#cluster-chip");
+let overview: ClusterOverview | null = null;
 
-function formatBytes(bytes: number): string {
-  if (bytes === 0) {
-    return "0 B";
+const overviewPoll = every(3000, async () => {
+  overview = await call<ClusterOverview>("cluster_overview");
+  renderChip();
+  if (currentTab === "cluster") renderCluster();
+});
+
+function renderChip(): void {
+  if (!overview) return;
+  const alive = overview.workers.filter((w) => w.state !== "dead").length;
+  if (overview.reachable) {
+    chip.className = "chip chip-ok";
+    chip.textContent = `● ${alive} worker${alive === 1 ? "" : "s"} online`;
+    chip.title = `Connected to ${overview.coordinatorAddr}${overview.tls ? " (TLS)" : " (no TLS)"}`;
+  } else {
+    chip.className = "chip chip-bad";
+    chip.textContent = "● Cluster unreachable";
+    chip.title = overview.error ?? "";
   }
+}
 
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  const index = Math.min(
-    Math.floor(Math.log(bytes) / Math.log(1024)),
-    units.length - 1,
+function renderCluster(): void {
+  const o = overview;
+  if (!o) return;
+  const alive = o.workers.filter((w) => w.state !== "dead");
+  const overloaded = o.workers.filter((w) => w.state === "overloaded").length;
+  const running = o.jobs.filter((j) => j.status === "running" || j.status === "assigned").length;
+  const queued = o.jobs.filter((j) => j.status === "queued" || j.status === "requeued").length;
+  const stat = (label: string, value: number, tone = "") => h("div", { class: `stat ${tone}`.trim() }, h("b", {}, String(value)), h("span", {}, label));
+  replaceChildren(
+    $("#cluster-summary"),
+    stat("Workers online", alive.length, alive.length > 0 ? "is-ok" : "is-bad"),
+    stat("Overloaded", overloaded, overloaded > 0 ? "is-bad" : ""),
+    stat("Running jobs", running),
+    stat("Queued jobs", queued),
   );
-  const value = bytes / 1024 ** index;
-  const digits = value >= 100 ? 0 : value >= 10 ? 1 : 2;
-  return `${value.toFixed(digits)} ${units[index]}`;
-}
 
-function formatUnixTime(unixSeconds: number): string {
-  if (!unixSeconds) {
-    return "Unknown time";
+  const problem = $("#cluster-problem");
+  problem.hidden = !o.error;
+  problem.textContent = o.error ?? "";
+
+  const grid = $("#worker-grid");
+  if (o.workers.length === 0) {
+    replaceChildren(grid, h("article", { class: "card" }, h("p", { class: "muted" }, o.reachable ? "No workers have joined this cluster yet. Use the Contributor tab to add this machine." : "No data: the cluster is not reachable.")));
+  } else {
+    replaceChildren(grid, ...o.workers.map(workerCard));
   }
 
-  return new Intl.DateTimeFormat(undefined, {
-    dateStyle: "medium",
-    timeStyle: "short",
-  }).format(new Date(unixSeconds * 1000));
+  renderJobsTable(o);
+  $("#cluster-meta").textContent = `Coordinator ${o.coordinatorAddr} · ${o.tls ? "TLS on" : "TLS OFF (development only)"} · credentials from ${o.configSource}`;
 }
 
-function triggerModeChipBurst(button: HTMLButtonElement): void {
-  const activeTimer = modeBurstTimers.get(button);
-  if (activeTimer) {
-    window.clearTimeout(activeTimer);
-  }
-
-  button.classList.remove("is-bursting");
-  void button.offsetWidth;
-  button.classList.add("is-bursting");
-
-  const timer = window.setTimeout(() => {
-    button.classList.remove("is-bursting");
-    modeBurstTimers.delete(button);
-  }, 720);
-
-  modeBurstTimers.set(button, timer);
+function workerCard(w: WorkerView): HTMLElement {
+  const dead = w.state === "dead";
+  return h(
+    "article",
+    { class: "card worker-card" },
+    h("header", {}, h("h3", {}, w.id), pill(w.state)),
+    h("p", { class: "muted small" }, `${w.os || "?"}/${w.arch || "?"} · ${w.cpu} CPU · ${formatBytes(w.memoryMb * 1024 * 1024)}${w.gpu ? ` · ${w.gpu} GPU` : ""} · ${w.isolation || "runc"}`),
+    dead
+      ? h("p", { class: "muted" }, `No heartbeat for ${w.heartbeatAgeSecs}s`)
+      : h("div", { class: "meters" }, meter("RAM", w.ramPercent), meter("CPU", w.cpuPercent), meter("Disk", w.diskPercent)),
+    w.overloadReasons.length > 0 ? h("p", { class: "error" }, `Overloaded: ${w.overloadReasons.join(", ")}. It takes no new jobs until it recovers.`) : null,
+    h("p", { class: "small" }, `${w.runningJobs} running · reliability ${Math.round(w.reliability * 100)}%`),
+    w.labels.length > 0 ? h("div", { class: "labels" }, ...w.labels.map((l) => h("span", {}, l))) : null,
+  );
 }
 
-function renderLink(
-  element: HTMLAnchorElement,
-  url: string,
-  placeholder: string,
-): void {
-  if (url) {
-    element.href = url;
-    element.textContent = url;
-    element.classList.remove("is-placeholder", "muted");
+function renderJobsTable(o: ClusterOverview): void {
+  const table = $<HTMLTableElement>("#jobs-table");
+  if (o.jobs.length === 0) {
+    replaceChildren(table, h("tbody", {}, h("tr", {}, h("td", { class: "muted" }, "No jobs yet."))));
     return;
   }
-
-  element.removeAttribute("href");
-  element.textContent = placeholder;
-  element.classList.add("is-placeholder", "muted");
+  const head = h("thead", {}, h("tr", {}, ...["Job", "Status", "Attempt", "Worker", "Age", "Image"].map((t) => h("th", {}, t))));
+  const rows = o.jobs.map((j) => {
+    const open = h("button", { class: "link", type: "button", title: "Follow this job" }, j.id);
+    open.addEventListener("click", () => followJob(j.id));
+    return h(
+      "tr",
+      {},
+      h("td", {}, open),
+      h("td", {}, pill(j.status), j.lastFailure ? h("div", { class: "muted small" }, j.lastFailure) : null),
+      h("td", { class: "num" }, `${j.attempt}/${j.maxAttempts}`),
+      h("td", {}, j.worker || "–"),
+      h("td", { class: "num" }, formatAge(j.createdUnix)),
+      h("td", { class: "wrap" }, j.image),
+    );
+  });
+  replaceChildren(table, head, h("tbody", {}, ...rows));
 }
 
-function renderResultArtifacts(
-  container: HTMLElement,
-  artifacts: RunRequestOutputArtifact[],
-  placeholder: string,
-): void {
-  container.innerHTML = "";
+// ---------------------------------------------------------------------------------------------------
+// run view
 
-  if (artifacts.length === 0) {
-    container.textContent = placeholder;
-    container.classList.add("muted");
-    return;
-  }
+const run = {
+  path: "",
+  commands: [""] as string[],
+  busy: false,
+  jobId: "",
+  terminal: false,
+  explainFor: "",
+  result: null as RunRequestJobResult | null,
+  poll: null as { stop(): void } | null,
+};
 
-  container.classList.remove("muted");
-  const fragment = document.createDocumentFragment();
+const pickBtn = $<HTMLButtonElement>("#pick-folder");
+const revealBtn = $<HTMLButtonElement>("#reveal-folder");
+const clearBtn = $<HTMLButtonElement>("#clear-selection");
+const runBtn = $<HTMLButtonElement>("#request-run");
+const selectedPath = $<HTMLElement>("#selected-path");
+const runError = $<HTMLElement>("#run-error");
 
-  artifacts.forEach((artifact) => {
-    const item = document.createElement("div");
-    item.className = "detail-artifact-item";
-    const href = artifact.publicUrl || artifact.apiUrl || artifact.uri;
-    if (href) {
-      const link = document.createElement("a");
-      link.className = "detail-artifact-link";
-      link.href = artifact.objectKey ? "#" : href;
-      link.textContent =
-        artifact.relativePath || artifact.objectKey || artifact.sha256;
-      link.addEventListener("click", (event) => {
-        event.preventDefault();
-        void openResultArtifact(artifact);
+function setPath(path: string): void {
+  run.path = path;
+  selectedPath.textContent = path || "No folder selected yet";
+  selectedPath.classList.toggle("is-empty", !path);
+  revealBtn.disabled = !path;
+  syncRunButton();
+}
+
+function syncRunButton(): void {
+  runBtn.disabled = run.busy || run.path === "";
+  runBtn.textContent = run.busy ? "Working…" : "Run on the cluster";
+}
+
+function showRunError(message: string): void {
+  runError.hidden = message === "";
+  runError.textContent = message;
+}
+
+function renderCommands(): void {
+  const list = $("#command-list");
+  replaceChildren(
+    list,
+    ...run.commands.map((value, i) => {
+      const input = h("input", { type: "text", placeholder: i === 0 ? "e.g. python main.py (optional)" : "another command", "aria-label": `Command line ${i + 1}`, autocomplete: "off", spellcheck: false });
+      input.value = value;
+      input.addEventListener("input", () => (run.commands[i] = input.value));
+      const remove = h("button", { class: "btn btn-icon", type: "button", "aria-label": `Remove command line ${i + 1}` }, "×");
+      remove.addEventListener("click", () => {
+        run.commands.splice(i, 1);
+        if (run.commands.length === 0) run.commands.push("");
+        renderCommands();
       });
-      item.append(link);
-    } else {
-      const label = document.createElement("strong");
-      label.textContent =
-        artifact.relativePath || artifact.objectKey || artifact.sha256;
-      item.append(label);
-    }
-
-    const meta = document.createElement("p");
-    meta.className = "detail-artifact-meta";
-    const metaParts = [
-      artifact.sizeBytes > 0 ? formatBytes(artifact.sizeBytes) : "",
-      artifact.contentType || "",
-      artifact.sha256 ? `sha256 ${artifact.sha256}` : "",
-    ].filter((part) => part.length > 0);
-    meta.textContent = metaParts.join(" · ");
-    item.append(meta);
-
-    fragment.append(item);
-  });
-
-  container.append(fragment);
+      return h("div", { class: "command-row" }, input, run.commands.length > 1 ? remove : null);
+    }),
+  );
 }
 
-async function openResultArtifact(
-  artifact: RunRequestOutputArtifact,
-): Promise<void> {
+function readOptions(): RunOptions {
+  const num = (id: string): number | undefined => {
+    const raw = $<HTMLInputElement>(id).value.trim();
+    if (raw === "") return undefined;
+    const n = Number(raw);
+    if (!Number.isFinite(n) || !Number.isInteger(n)) throw new Error(`"${raw}" is not a whole number`);
+    return n;
+  };
+  const labels = $<HTMLInputElement>("#opt-labels").value.split(/[,\s]+/).filter(Boolean);
+  for (const l of labels) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._=-]{0,63}$/.test(l)) throw new Error(`label "${l}" may only contain letters, digits and . _ = -`);
+  }
+  return {
+    cpuCores: num("#opt-cpu"),
+    memoryMb: num("#opt-mem"),
+    gpuCount: num("#opt-gpu"),
+    timeoutSeconds: num("#opt-timeout"),
+    minDiskMb: num("#opt-disk"),
+    verify: $<HTMLInputElement>("#opt-verify").checked,
+    os: $<HTMLSelectElement>("#opt-os").value || undefined,
+    arch: $<HTMLSelectElement>("#opt-arch").value || undefined,
+    labels,
+  };
+}
+
+function setSteps(active: "prepare" | "queued" | "running" | "done" | "failed" | "idle"): void {
+  const order = ["prepare", "queued", "running", "done"];
+  const at = active === "failed" ? -1 : order.indexOf(active);
+  for (const li of Array.from($("#run-steps").children) as HTMLElement[]) {
+    const i = order.indexOf(li.dataset.step ?? "");
+    li.className = active === "idle" ? "" : active === "failed" ? (i === 0 ? "is-failed" : "") : i < at ? "is-done" : i === at ? (active === "done" ? "is-done" : "is-active") : "";
+  }
+}
+
+function renderImageFacts(img: DockerImageResult): void {
+  $("#image-facts").hidden = false;
+  $("#detected-stack").textContent = img.detectedStack;
+  $("#image-tag").textContent = img.imageTag;
+  $("#image-size").textContent = formatBytes(img.imageSizeBytes);
+  $("#docker-setup-source").textContent = img.dockerSetupSource;
+  $("#build-details").hidden = img.notes.length === 0;
+  replaceChildren($("#build-notes"), ...img.notes.map((n) => h("li", {}, n)));
+}
+
+async function requestRun(): Promise<void> {
+  showRunError("");
+  let options: RunOptions;
   try {
-    const targetUrl = artifact.objectKey
-      ? await invoke<string>("get_signed_result_artifact_url", {
-        objectKey: artifact.objectKey,
-      })
-      : artifact.publicUrl || artifact.apiUrl || artifact.uri;
-
-    if (!targetUrl) {
-      throw new Error("No downloadable URL is available for this artifact.");
-    }
-
-    await openUrl(targetUrl);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    addProcessLog("error", `Could not open returned file: ${message}`);
-  }
-}
-
-function renderCommandList(): void {
-  commandList.replaceChildren();
-
-  state.cmdlist.forEach((command, index) => {
-    const row = document.createElement("div");
-    row.className = "command-row";
-
-    const removeButton = document.createElement("button");
-    removeButton.className = "command-remove";
-    removeButton.type = "button";
-    removeButton.setAttribute("aria-label", `Delete command ${index + 1}`);
-    removeButton.textContent = "×";
-    removeButton.addEventListener("click", () => {
-      state.cmdlist.splice(index, 1);
-      if (state.cmdlist.length === 0) {
-        state.cmdlist.push("");
-      }
-      renderCommandList();
-    });
-
-    const input = document.createElement("input");
-    input.className = "command-input";
-    input.type = "text";
-    input.placeholder = `Command ${index + 1}`;
-    input.value = command;
-    input.setAttribute("aria-label", `Command ${index + 1}`);
-    input.addEventListener("input", (event) => {
-      const target = event.currentTarget as HTMLInputElement;
-      state.cmdlist[index] = target.value;
-    });
-
-    row.append(removeButton, input);
-    commandList.append(row);
-  });
-}
-
-function statusLabel(status: BuildStatus): string {
-  switch (status) {
-    case "idle":
-      return "Idle";
-    case "ready":
-      return "Ready";
-    case "working":
-      return "Processing";
-    case "done":
-      return "Queued";
-    case "error":
-      return "Attention";
-  }
-}
-
-function statusHeadline(status: BuildStatus): string {
-  switch (status) {
-    case "idle":
-      return "Waiting for a folder";
-    case "ready":
-      return "Ready to request a run";
-    case "working":
-      return "Building the Docker image and queueing the run";
-    case "done":
-      return "Run request queued successfully";
-    case "error":
-      return "Run request needs attention";
-  }
-}
-
-function statusSummary(): string {
-  if (state.error) {
-    return "There is an error. Check the terminal for more details.";
-  }
-
-  if (state.runResult) {
-    return state.runResult.summary;
-  }
-
-  if (state.buildResult) {
-    return state.buildResult.summary;
-  }
-
-  if (state.buildStatus === "ready") {
-    return "The folder is selected. Request for run will build the image, compress it, upload it, and queue the run.";
-  }
-
-  if (state.buildStatus === "working") {
-    return "ComputeHive is preparing the Docker image, packaging the artifact, and queueing the run.";
-  }
-
-  return "Pick a project directory to prepare the Docker image and queue the run.";
-}
-
-function renderBuildNotes(notes: string[]): void {
-  buildNotes.replaceChildren();
-
-  if (notes.length === 0) {
-    const item = document.createElement("li");
-    item.textContent =
-      "ComputeHive generates Docker setup automatically when it is missing.";
-    buildNotes.append(item);
+    options = readOptions();
+  } catch (e) {
+    showRunError(errMsg(e));
     return;
   }
-
-  notes.forEach((note) => {
-    const item = document.createElement("li");
-    item.textContent = note;
-    buildNotes.append(item);
-  });
-}
-
-function processLogToneForStatus(status: BuildStatus): string {
-  switch (status) {
-    case "working":
-      return "working";
-    case "done":
-      return "done";
-    case "error":
-      return "error";
-    default:
-      return "idle";
-  }
-}
-
-function processLogTimestamp(): string {
-  return new Intl.DateTimeFormat(undefined, {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  }).format(new Date());
-}
-
-function createProcessLogLine(entry: ProcessLogEntry): HTMLElement {
-  const line = document.createElement("div");
-  line.className = `terminal-line terminal-line-${entry.tone}`;
-
-  const time = document.createElement("span");
-  time.className = "terminal-time";
-  time.textContent = entry.timestamp;
-
-  const prompt = document.createElement("span");
-  prompt.className = "terminal-prompt";
-  prompt.textContent = entry.tone === "error" ? "!" : entry.tone === "success" ? "+" : ">";
-
-  const message = document.createElement("p");
-  message.className = "terminal-message";
-  message.textContent = entry.message;
-
-  line.append(time, prompt, message);
-  return line;
-}
-
-function renderProcessLog(forceReset = false): void {
-  processLogStatus.textContent = state.logStage;
-  processLogStatus.className =
-    `terminal-status terminal-status-${processLogToneForStatus(state.buildStatus)}`;
-
-  if (forceReset || state.logEntries.length < renderedProcessLogCount) {
-    processLog.replaceChildren();
-    renderedProcessLogCount = 0;
-  }
-
-  if (state.logEntries.length === 0) {
-    const placeholder = document.createElement("p");
-    placeholder.className = "terminal-placeholder";
-    placeholder.textContent =
-      state.selectedPath.length > 0
-        ? "Request for run will build the Docker image, compress it, upload it, and queue the job."
-        : "Select a project folder to let ComputeHive build the Docker image and request the run.";
-    processLog.replaceChildren(placeholder);
-    renderedProcessLogCount = 0;
-    return;
-  }
-
-  if (renderedProcessLogCount === 0) {
-    processLog.replaceChildren();
-  }
-
-  while (renderedProcessLogCount < state.logEntries.length) {
-    processLog.append(
-      createProcessLogLine(state.logEntries[renderedProcessLogCount]),
-    );
-    renderedProcessLogCount += 1;
-  }
-
-  processLog.scrollTop = processLog.scrollHeight;
-}
-
-function addProcessLog(
-  tone: ProcessLogTone,
-  message: string,
-): void {
-  state.logEntries.push({
-    id: nextProcessLogId,
-    tone,
-    message,
-    timestamp: processLogTimestamp(),
-  });
-  nextProcessLogId += 1;
-  renderProcessLog();
-}
-
-function clearProcessLogTimers(): void {
-  processLogTimers.forEach((timer) => window.clearTimeout(timer));
-  processLogTimers.clear();
-}
-
-function scheduleProcessLog(
-  delayMs: number,
-  tone: ProcessLogTone,
-  message: string,
-): void {
-  const timer = window.setTimeout(() => {
-    processLogTimers.delete(timer);
-    addProcessLog(tone, message);
-  }, delayMs);
-
-  processLogTimers.add(timer);
-}
-
-function resetProcessLog(stage: string): void {
-  clearProcessLogTimers();
-  state.logStage = stage;
-  state.logEntries = [];
-  renderProcessLog(true);
-}
-
-function stageRequestLog(): void {
-  resetProcessLog("Preparing");
-  addProcessLog("info", `Target folder: ${state.selectedPath}`);
-  addProcessLog("working", "Inspecting the selected project root.");
-  scheduleProcessLog(
-    180,
-    "working",
-    "Checking whether a Dockerfile already exists.",
-  );
-  scheduleProcessLog(
-    380,
-    "working",
-    "Checking whether a .dockerignore file already exists.",
-  );
-  addProcessLog(
-    "working",
-    "Resolving the project stack and build strategy.",
-  );
-  scheduleProcessLog(
-    720,
-    "working",
-    "Generating missing Docker setup files when required.",
-  );
-  scheduleProcessLog(
-    1240,
-    "working",
-    "Building the Docker image.",
-  );
-  scheduleProcessLog(
-    1820,
-    "working",
-    "Exporting the Docker image archive into the project root.",
-  );
-  scheduleProcessLog(
-    2420,
-    "working",
-    "Compressing the archive to tar.gz.",
-  );
-  scheduleProcessLog(
-    3020,
-    "working",
-    "Calculating the SHA-256 artifact hash.",
-  );
-  scheduleProcessLog(
-    3620,
-    "working",
-    "Uploading the artifact to object storage.",
-  );
-  scheduleProcessLog(
-    4220,
-    "working",
-    "Submitting the job.",
-  );
-}
-
-function appendResultLogs(result: RunRequestResult): void {
-  clearProcessLogTimers();
-  state.logStage = "Queued";
-  addProcessLog("success", `Docker image ready: ${result.image.imageTag}`);
-  addProcessLog(
-    "success",
-    `Compressed artifact stored at ${result.gzipArchivePath}.`,
-  );
-  addProcessLog(
-    "success",
-    `Artifact SHA-256 recorded as ${result.artifactSha256}.`,
-  );
-  addProcessLog(
-    "success",
-    `Coordinator accepted job ${result.redisJobId} with object key ${result.artifactObjectKey}.`,
-  );
-
-  const seen = new Set<string>();
-  result.notes.forEach((note) => {
-    if (seen.has(note)) {
-      return;
-    }
-    seen.add(note);
-    addProcessLog(note.includes("No container") ? "info" : "success", note);
-  });
-}
-
-function stopJobResultPolling(): void {
-  if (jobResultPollTimer !== null) {
-    window.clearInterval(jobResultPollTimer);
-    jobResultPollTimer = null;
-  }
-}
-
-async function refreshRunRequestResult(jobId: string): Promise<void> {
+  run.busy = true;
+  syncRunButton();
+  setSteps("prepare");
+  resetJobView();
+  log("info", `Building ${run.path} and uploading it to the cluster…`);
   try {
-    const result = await invoke<RunRequestJobResult | null>(
-      "get_run_request_result",
-      { jobId },
-    );
-
-    if (!result) {
-      return;
-    }
-
-    state.jobResult = result;
-
-    if (result.completed && !state.resultTerminalLogged) {
-      state.resultTerminalLogged = true;
-
-      if (result.resultStatus === "STATUS_SUCCEEDED") {
-        state.logStage = "Completed";
-        addProcessLog("success", `Job ${result.jobId} finished successfully.`);
-      } else if (result.resultStatus === "STATUS_FAILED") {
-        state.logStage = "Failed";
-        addProcessLog(
-          "error",
-          `Job ${result.jobId} failed with exit code ${result.exitCode}.`,
-        );
-      } else {
-        addProcessLog(
-          "info",
-          `Job ${result.jobId} status changed to ${result.status || "unknown"}.`,
-        );
-      }
-
-      const excerpt = result.stdoutExcerpt.trim() || result.stderrExcerpt.trim();
-      if (excerpt) {
-        addProcessLog(
-          result.resultStatus === "STATUS_FAILED" ? "error" : "success",
-          `Worker output: ${excerpt}`,
-        );
-      }
-      if ((result.outputArtifacts?.length ?? 0) > 0) {
-        addProcessLog(
-          "success",
-          `Worker uploaded ${result.outputArtifacts.length} returned file(s) for download.`,
-        );
-      }
-    }
-
-    if (result.completed) {
-      stopJobResultPolling();
-    }
-
-    renderUserState();
-  } catch {
-    // Keep polling; transient errors should not break the flow.
-  }
-}
-
-function startJobResultPolling(jobId: string): void {
-  stopJobResultPolling();
-  void refreshRunRequestResult(jobId);
-  jobResultPollTimer = window.setInterval(() => {
-    void refreshRunRequestResult(jobId);
-  }, 3000);
-}
-
-function renderContributorSetup(): void {
-  contributeButton.disabled = state.contributorSetupLoading;
-  contributeButton.textContent =
-    state.contributorSharing?.running ? "Stop sharing" : "Start sharing";
-
-  if (state.contributorSetupError) {
-    contributorSetupStatus.textContent = state.contributorSetupError;
-    contributorSetupStatus.classList.add("contributor-status-error");
-    contributorSetupStatus.classList.remove("contributor-status-success");
-  } else if (state.contributorSetupMessage) {
-    contributorSetupStatus.textContent = state.contributorSetupMessage;
-    contributorSetupStatus.classList.add("contributor-status-success");
-    contributorSetupStatus.classList.remove("contributor-status-error");
-  } else {
-    contributorSetupStatus.textContent =
-      "Worker is ready to start.";
-    contributorSetupStatus.classList.remove(
-      "contributor-status-success",
-      "contributor-status-error",
-    );
-  }
-
-  if (state.contributorSharing?.details) {
-    contributorSetupStatus.textContent = state.contributorSharing.details;
-    contributorSetupStatus.classList.add("contributor-status-success");
-    contributorSetupStatus.classList.remove("contributor-status-error");
-  }
-
-  const sharing = state.contributorSharing;
-  profileWorkerStatus.textContent = sharing?.running ? "Sharing" : "Stopped";
-  profileWorkerResources.textContent = sharing?.pid
-    ? `Worker PID: ${sharing.pid}`
-    : "Worker PID: not running";
-  profileWorkerLoad.textContent = sharing?.jobRunning
-    ? "Job state: running"
-    : "Job state: idle";
-  profileWorkerCapabilities.textContent = sharing?.currentJobId
-    ? `Current job: ${sharing.currentJobId}`
-    : "Current job: none";
-  profileWorkerHeartbeat.textContent = sharing?.lastJobId
-    ? `Last job: ${sharing.lastJobId}`
-    : "Last job: none";
-  profileWorkerStats.textContent = sharing?.details ?? "No sharing activity yet.";
-}
-
-function renderMode(): void {
-  const copy = interfaceCopy[state.mode];
-  modeEyebrow.textContent = copy.eyebrow;
-  modeHeading.textContent = copy.heading;
-  modeCopy.textContent = copy.copy;
-
-  modeButtons.forEach((button) => {
-    const active = button.dataset.mode === state.mode;
-    button.classList.toggle("is-active", active);
-    button.setAttribute("aria-selected", String(active));
-  });
-
-  workflowPanels.forEach((panel) => {
-    const active = panel.dataset.panel === state.mode;
-    panel.classList.toggle("is-active", active);
-    panel.hidden = !active;
-  });
-
-  renderContributorSetup();
-}
-
-function renderUserState(): void {
-  selectedPath.textContent = state.selectedPath || "No folder selected yet";
-  selectedPath.classList.toggle("is-empty", state.selectedPath.length === 0);
-
-  const canAct =
-    state.selectedPath.length > 0 && state.buildStatus !== "working";
-  requestRunButton.disabled = !canAct;
-  revealFolderButton.disabled = state.selectedPath.length === 0;
-  pickFolderButton.disabled = state.buildStatus === "working";
-  clearSelectionButton.disabled = state.buildStatus === "working";
-
-  requestRunButton.textContent =
-    state.buildStatus === "working"
-      ? "Requesting run..."
-      : "Request for run";
-
-  bundleStatus.className = `status-pill status-${state.buildStatus}`;
-  bundleStatus.textContent = statusLabel(state.buildStatus);
-  bundleSummaryTitle.textContent = statusHeadline(state.buildStatus);
-  bundleSummary.textContent = statusSummary();
-  renderProcessLog();
-
-  const imageDetails = state.buildResult ?? state.runResult?.image ?? null;
-  if (imageDetails) {
-    detectedStack.textContent = imageDetails.detectedStack;
-    imageTag.textContent = imageDetails.imageTag;
-    imageSize.textContent = formatBytes(imageDetails.imageSizeBytes);
-    dockerSetupSource.textContent = imageDetails.dockerSetupSource;
-  } else {
-    detectedStack.textContent = "Not detected yet";
-    imageTag.textContent = "Not built yet";
-    imageSize.textContent = "0 B";
-    dockerSetupSource.textContent = "Auto-generate if needed";
-  }
-
-  if (state.runResult) {
-    if (state.jobResult) {
-      const finishedText = state.jobResult.finishedAtUnix
-        ? ` · finished ${formatUnixTime(state.jobResult.finishedAtUnix)}`
-        : "";
-      runResultStatus.textContent =
-        `${state.jobResult.resultStatus || state.jobResult.status || "queued"} · exit ${state.jobResult.exitCode}${finishedText}`;
-
-      const outputText =
-        state.jobResult.stdoutExcerpt || state.jobResult.stderrExcerpt;
-      runResultOutput.textContent =
-        outputText || "No stdout/stderr excerpt is available yet.";
-      runResultOutput.classList.toggle("muted", outputText.length === 0);
-      renderResultArtifacts(
-        runResultArtifacts,
-        state.jobResult.outputArtifacts ?? [],
-        "No returned files were uploaded for this job.",
-      );
-    } else {
-      runResultStatus.textContent =
-        "Queued. Waiting for worker to start and submit output.";
-      runResultOutput.textContent =
-        "Waiting for job execution output.";
-      runResultOutput.classList.add("muted");
-      renderResultArtifacts(
-        runResultArtifacts,
-        [],
-        "Returned files will appear here after the job completes.",
-      );
-    }
-
-    renderBuildNotes(state.runResult.notes);
-    return;
-  }
-
-  runResultStatus.textContent =
-    "Worker output will appear here after the job is completed.";
-  runResultOutput.textContent =
-    "Waiting for job execution output.";
-  runResultOutput.classList.add("muted");
-  renderResultArtifacts(
-    runResultArtifacts,
-    [],
-    "Returned files will appear here after the job completes.",
-  );
-
-  if (imageDetails) {
-    renderBuildNotes(imageDetails.notes);
-    return;
-  }
-
-  renderBuildNotes([
-    "The app creates Docker setup files automatically when they are missing.",
-    "Request for run first builds the Docker image inside the selected project root.",
-    "The app uploads only the tar.gz image artifact after compression.",
-    "No container is created by this action in the current build.",
-  ]);
-}
-
-function openSelectedFolder(): void {
-  if (!state.selectedPath) {
-    return;
-  }
-
-  addProcessLog("working", "Opening the selected project folder in the system file browser.");
-  openPath(state.selectedPath)
-    .then(() => {
-      addProcessLog("success", "Selected project folder opened.");
-    })
-    .catch((error) => {
-      const message = error instanceof Error ? error.message : String(error);
-      addProcessLog("error", `Could not open the selected folder: ${message}`);
-    });
-}
-
-function pickProjectFolder(): void {
-  state.error = "";
-  resetProcessLog("Picker");
-  addProcessLog("working", "Opening the native folder picker.");
-  renderUserState();
-
-  open({
-    directory: true,
-    multiple: false,
-    title: "Select the project folder to Dockerize and queue",
-  })
-    .then((folder) => {
-      if (typeof folder !== "string") {
-        state.logStage = "Idle";
-        addProcessLog("info", "Folder selection was canceled.");
-        renderUserState();
-        return;
-      }
-
-      state.selectedPath = folder;
-      state.buildStatus = "ready";
-      state.buildResult = null;
-      state.runResult = null;
-      state.error = "";
-      resetProcessLog("Ready");
-      addProcessLog("info", `Project folder selected: ${folder}`);
-      addProcessLog(
-        "info",
-        "Request for run will handle Docker setup, image export, compression, upload, and coordinator submission in one pass.",
-      );
-      renderUserState();
-    })
-    .catch((error) => {
-      state.buildStatus = state.selectedPath ? "ready" : "idle";
-      state.error = error instanceof Error ? error.message : String(error);
-      state.logStage = "Picker Error";
-      addProcessLog("error", `Folder picker failed: ${state.error}`);
-      renderUserState();
-    });
-}
-
-async function requestProjectRun(): Promise<void> {
-  if (!state.selectedPath) {
-    return;
-  }
-
-  const command = state.cmdlist
-    .map((entry) => entry.trim())
-    .filter((entry) => entry.length > 0);
-  if (command.length === 0) {
-    state.error = "Add at least one command line before requesting a run.";
-    state.buildStatus = "error";
-    state.logStage = "Validation";
-    addProcessLog("error", state.error);
-    renderUserState();
-    return;
-  }
-
-  state.buildStatus = "working";
-  state.buildResult = null;
-  state.runResult = null;
-  state.jobResult = null;
-  state.resultTerminalLogged = false;
-  state.error = "";
-  stopJobResultPolling();
-  stageRequestLog();
-  renderUserState();
-
-  try {
-    const result = await invoke<RunRequestResult>("request_project_run", {
-      projectPath: state.selectedPath,
-      command,
-    });
-
-    state.buildResult = result.image;
-    state.runResult = result;
-    state.buildStatus = "done";
-    appendResultLogs(result);
-    startJobResultPolling(result.redisJobId);
-  } catch (error) {
-    clearProcessLogTimers();
-    state.error = error instanceof Error ? error.message : String(error);
-    state.buildStatus = "error";
-    state.logStage = "Failed";
-    addProcessLog("error", state.error);
-  }
-
-  renderUserState();
-}
-
-async function refreshContributorSharingStatus(): Promise<void> {
-  try {
-    const sharing = await invoke<ContributorSharingStatus>(
-      "get_contributor_sharing_status",
-    );
-    state.contributorSharing = sharing;
-  } catch (error) {
-    state.contributorSharing = {
-      running: false,
-      pid: null,
-      details: error instanceof Error ? error.message : String(error),
-      jobRunning: false,
-      currentJobId: null,
-      lastJobId: null,
-    };
-  }
-
-  renderContributorSetup();
-}
-
-function loadContributorView(): void {
-  void refreshContributorSharingStatus();
-}
-
-async function toggleContributorSharing(): Promise<void> {
-  state.contributorSetupLoading = true;
-  state.contributorSetupError = "";
-  renderContributorSetup();
-
-  try {
-    const command = state.contributorSharing?.running
-      ? "stop_contributor_sharing"
-      : "start_contributor_sharing";
-    const sharing = await invoke<ContributorSharingStatus>(command);
-    state.contributorSharing = sharing;
-    state.contributorSetupMessage = sharing.details;
-  } catch (error) {
-    state.contributorSetupError =
-      error instanceof Error ? error.message : String(error);
+    const res = await call<RunRequestResult>("request_project_run", { projectPath: run.path, command: run.commands, options });
+    renderImageFacts(res.image);
+    log("success", res.summary);
+    followJob(res.jobId);
+  } catch (e) {
+    setSteps("failed");
+    showRunError(errMsg(e));
+    log("error", errMsg(e));
   } finally {
-    state.contributorSetupLoading = false;
-    renderContributorSetup();
+    run.busy = false;
+    syncRunButton();
   }
 }
 
-function clearSelection(): void {
-  stopJobResultPolling();
-  clearProcessLogTimers();
-  state.selectedPath = "";
-  state.buildStatus = "idle";
-  state.buildResult = null;
-  state.runResult = null;
-  state.jobResult = null;
-  state.resultTerminalLogged = false;
-  state.error = "";
-  state.logStage = "Idle";
-  state.logEntries = [];
-  renderUserState();
+function resetJobView(): void {
+  run.poll?.stop();
+  run.poll = null;
+  run.jobId = "";
+  run.terminal = false;
+  run.explainFor = "";
+  run.result = null;
+  $("#job-card").hidden = true;
+  $("#job-result").hidden = true;
+  $("#outputs-box").hidden = true;
+  $("#download-status").textContent = "";
+  $("#job-log").textContent = "(no output yet)";
 }
 
-modeButtons.forEach((button) => {
-  button.addEventListener("click", () => {
-    triggerModeChipBurst(button);
-    const nextMode = button.dataset.mode;
-    if (nextMode === "user" || nextMode === "contributor") {
-      state.mode = nextMode;
-      renderMode();
-      if (nextMode === "contributor") {
-        loadContributorView();
-      }
+/** Shows a job (from a new run, or picked from the Cluster tab) and follows it until it finishes. */
+function followJob(jobId: string): void {
+  resetJobView();
+  showTab("run");
+  run.jobId = jobId;
+  $("#job-card").hidden = false;
+  $("#job-id").textContent = jobId;
+  const status = $("#job-status");
+  status.className = "pill pill-queued";
+  status.textContent = "queued";
+  $("#job-meta").textContent = "Waiting for a worker…";
+  $("#cancel-job").hidden = false;
+  setSteps("queued");
+  run.poll = every(1000, () => pollJob(jobId));
+  $("#job-card").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+async function pollJob(jobId: string): Promise<void> {
+  if (jobId !== run.jobId) return;
+  let p: JobProgress;
+  try {
+    p = await call<JobProgress>("get_job_progress", { jobId });
+  } catch (e) {
+    $("#job-meta").textContent = `Cannot read the job status: ${errMsg(e)}`;
+    return;
+  }
+  if (jobId !== run.jobId) return;
+
+  const status = $("#job-status");
+  status.className = `pill pill-${p.status}`;
+  status.textContent = p.status;
+  const where = p.worker ? `on ${p.worker}` : "waiting for a worker";
+  $("#job-meta").textContent = `${where} · attempt ${Math.max(p.attempt, 1)} of ${p.maxAttempts || 3}${p.lastFailure ? ` · last failure: ${p.lastFailure}` : ""}${p.verification ? ` · verification: ${p.verification}` : ""}`;
+
+  const logBox = $<HTMLElement>("#job-log");
+  const nearBottom = logBox.scrollHeight - logBox.scrollTop - logBox.clientHeight < 40;
+  const text = clean(p.logTail);
+  if (text !== "" && logBox.textContent !== text) {
+    logBox.textContent = text;
+    if (nearBottom) logBox.scrollTop = logBox.scrollHeight;
+  }
+
+  if (p.status === "running" || p.status === "assigned") setSteps("running");
+  if (p.worker && p.worker !== run.explainFor) {
+    run.explainFor = p.worker;
+    void loadExplain(jobId);
+  }
+  if (p.terminal) {
+    run.poll?.stop();
+    run.terminal = true;
+    $("#cancel-job").hidden = true;
+    setSteps(p.status === "succeeded" ? "done" : "failed");
+    await loadResult(jobId);
+    void loadExplain(jobId);
+    log(p.status === "succeeded" ? "success" : "error", `Job ${jobId.slice(0, 8)} ${p.status}.`);
+  }
+}
+
+async function loadExplain(jobId: string): Promise<void> {
+  try {
+    const e = await call<ExplainView>("explain_job", { jobId });
+    if (jobId !== run.jobId) return;
+    $("#explain-summary").textContent = e.summary + (e.recorded ? "" : " (live view of the cluster right now)");
+    const parts = Object.keys(e.weights).sort();
+    const head = h("thead", {}, h("tr", {}, h("th", {}, "Worker"), h("th", {}, "Verdict"), h("th", { class: "num" }, "Score"), ...parts.map((k) => h("th", { class: "num", title: `weight ${e.weights[k]}` }, k.replace("_", " ")))));
+    const rows = e.evaluations.map((v) =>
+      h(
+        "tr",
+        { class: v.chosen ? "is-chosen" : "" },
+        h("td", {}, v.worker + (v.chosen ? " ✓" : "")),
+        h("td", {}, v.eligible ? (v.busy ? "eligible, busy" : "eligible") : v.reasons.join("; ") || "rejected"),
+        h("td", { class: "num" }, v.eligible ? v.score.toFixed(3) : "–"),
+        ...parts.map((k) => h("td", { class: "num" }, v.eligible && v.parts[k] !== undefined ? v.parts[k].toFixed(3) : "")),
+      ),
+    );
+    replaceChildren($("#explain-table"), head, h("tbody", {}, ...rows));
+  } catch (e) {
+    $("#explain-summary").textContent = `Could not load the explanation: ${errMsg(e)}`;
+  }
+}
+
+async function loadResult(jobId: string): Promise<void> {
+  try {
+    const r = await call<RunRequestJobResult | null>("get_run_request_result", { jobId });
+    if (jobId !== run.jobId || !r) return;
+    run.result = r;
+    $("#job-result").hidden = false;
+    replaceChildren(
+      $("#result-facts"),
+      fact("Status", pill(r.resultStatus || r.status)),
+      fact("Exit code", String(r.exitCode)),
+      r.failureReason ? fact("Failure reason", r.failureReason) : null,
+      fact("Finished", formatTime(r.finishedAtUnix)),
+    );
+    const streams: HTMLElement[] = [];
+    const out = clean(r.stdoutExcerpt);
+    const err = clean(r.stderrExcerpt);
+    if (out) streams.push(h("p", { class: "stream-label" }, "stdout"), h("pre", { class: "stream" }, out));
+    if (err) streams.push(h("p", { class: "stream-label" }, "stderr"), h("pre", { class: "stream is-err" }, err));
+    replaceChildren($("#result-streams"), ...streams);
+    $("#outputs-box").hidden = r.outputArtifacts.length === 0;
+    replaceChildren(
+      $("#job-outputs"),
+      ...r.outputArtifacts.map((a) => h("li", {}, h("span", {}, a.relativePath), h("span", { class: "muted" }, `${formatBytes(a.sizeBytes)}${a.sha256 ? ` · sha256 ${a.sha256.slice(0, 12)}…` : ""}`))),
+    );
+  } catch (e) {
+    log("error", `Could not load the result: ${errMsg(e)}`);
+  }
+}
+
+async function downloadOutputs(): Promise<void> {
+  const status = $("#download-status");
+  try {
+    const dest = inTauri ? await openDialog({ directory: true, multiple: false, title: "Save the results into…" }) : "/home/you/results";
+    if (typeof dest !== "string") return;
+    status.textContent = "Downloading and verifying…";
+    const files = await call<DownloadedFile[]>("download_job_outputs", { jobId: run.jobId, destDir: dest });
+    status.textContent = `Saved ${files.length} file${files.length === 1 ? "" : "s"} to ${dest} (each checked against its SHA-256).`;
+    log("success", status.textContent);
+  } catch (e) {
+    status.textContent = errMsg(e);
+    log("error", errMsg(e));
+  }
+}
+
+pickBtn.addEventListener("click", async () => {
+  try {
+    const picked = await pickFolder();
+    if (picked) {
+      setPath(picked);
+      showRunError("");
+      log("info", `Selected ${picked}`);
     }
-  });
+  } catch (e) {
+    showRunError(errMsg(e));
+  }
+});
+clearBtn.addEventListener("click", () => {
+  setPath("");
+  run.commands = [""];
+  renderCommands();
+  showRunError("");
+  setSteps("idle");
+  $("#image-facts").hidden = true;
+  $("#build-details").hidden = true;
+  resetJobView();
+});
+revealBtn.addEventListener("click", () => {
+  if (run.path && inTauri) void openPath(run.path).catch((e) => showRunError(errMsg(e)));
+});
+runBtn.addEventListener("click", () => void requestRun());
+$("#add-command").addEventListener("click", () => {
+  run.commands.push("");
+  renderCommands();
+  ($("#command-list").lastElementChild?.querySelector("input") as HTMLInputElement | null)?.focus();
+});
+$("#cancel-job").addEventListener("click", async () => {
+  try {
+    await call<string>("cancel_job", { jobId: run.jobId });
+    log("info", `Cancel requested for ${run.jobId.slice(0, 8)}.`);
+  } catch (e) {
+    showRunError(errMsg(e));
+  }
+});
+$("#download-outputs").addEventListener("click", () => void downloadOutputs());
+$("#explain-box").addEventListener("toggle", () => {
+  if (($("#explain-box") as HTMLDetailsElement).open && run.jobId) void loadExplain(run.jobId);
 });
 
-pickFolderButton.addEventListener("click", () => {
-  pickProjectFolder();
+// ---------------------------------------------------------------------------------------------------
+// contributor view
+
+const contrib = { running: false, dirty: false, policy: null as WorkerPolicy | null, maxMem: 16384 };
+const cState = $<HTMLElement>("#contrib-state");
+const cButton = $<HTMLButtonElement>("#contribute-button");
+const cMessage = $<HTMLElement>("#contrib-message");
+const cError = $<HTMLElement>("#contrib-error");
+const form = $<HTMLFormElement>("#policy-form");
+const formControls = Array.from(form.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLButtonElement>("input, textarea, button"));
+const pauseBtn = $<HTMLButtonElement>("#contrib-pause");
+const pauseNowBtn = $<HTMLButtonElement>("#contrib-pause-now");
+const resumeBtn = $<HTMLButtonElement>("#contrib-resume");
+
+function setControlsEnabled(on: boolean): void {
+  for (const c of formControls) c.disabled = !on;
+  for (const b of [pauseBtn, pauseNowBtn, resumeBtn]) b.disabled = !on;
+  $("#controls-note").hidden = on;
+}
+
+function syncOutputs(): void {
+  const cpus = Number($<HTMLInputElement>("#pol-cpus").value);
+  $("#out-cpus").textContent = cpus === 0 ? "all" : String(cpus);
+  const mem = Number($<HTMLInputElement>("#pol-mem").value);
+  $("#out-mem").textContent = mem === 0 ? "all" : formatBytes(mem * 1024 * 1024);
+  $("#out-idle").textContent = `${$<HTMLInputElement>("#pol-idle-cpu").value}%`;
+}
+
+function fillPolicyForm(p: WorkerPolicy, metrics: ControlStatus["metrics"]): void {
+  const cpuSlider = $<HTMLInputElement>("#pol-cpus");
+  cpuSlider.max = String(Math.max(navigator.hardwareConcurrency || 4, Math.ceil(p.max_cpus)));
+  cpuSlider.value = String(Math.round(p.max_cpus));
+  contrib.maxMem = Math.max(1024, Math.floor((metrics?.MemTotalMB ?? 16384) / 256) * 256, p.max_memory_mb);
+  const memSlider = $<HTMLInputElement>("#pol-mem");
+  memSlider.max = String(contrib.maxMem);
+  memSlider.value = String(p.max_memory_mb);
+  $<HTMLInputElement>("#pol-disk").value = String(p.max_job_disk_mb);
+  $<HTMLInputElement>("#pol-idle").checked = p.idle_only;
+  $<HTMLInputElement>("#pol-idle-cpu").value = String(p.idle_cpu_percent || 25);
+  $<HTMLInputElement>("#pol-schedule").value = p.schedule ?? "";
+  $<HTMLInputElement>("#pol-net").checked = p.allow_network;
+  $<HTMLTextAreaElement>("#pol-hosts").value = (p.allowed_hosts ?? []).join("\n");
+  syncOutputs();
+}
+
+function renderContributorLive(c: ControlStatus | null): void {
+  const meters = $("#contrib-metrics");
+  const facts = $("#contrib-facts");
+  if (!c) {
+    replaceChildren(meters, h("p", { class: "muted" }, "Start sharing to see this machine's load."));
+    replaceChildren(facts);
+    return;
+  }
+  const m = c.metrics ?? {};
+  replaceChildren(
+    meters,
+    meter("RAM", m.MemPercent ?? 0),
+    meter("CPU", m.CPUPercent ?? 0),
+    meter("Disk", Math.max(m.WorkDiskUsedPercent ?? 0, m.DockerDiskUsedPercent ?? 0)),
+  );
+  replaceChildren(
+    facts,
+    fact("State", pill(c.state)),
+    fact("Worker", c.worker_id),
+    fact("Isolation", c.isolation || "–"),
+    fact("Uptime", c.uptime || "–"),
+    c.current_job ? fact("Running job", c.current_job.slice(0, 8)) : null,
+    c.not_taking ? fact("Not taking jobs because", c.not_taking) : null,
+  );
+}
+
+async function refreshContributor(): Promise<void> {
+  let sharing: ContributorSharingStatus;
+  try {
+    sharing = await call<ContributorSharingStatus>("get_contributor_sharing_status");
+  } catch (e) {
+    cError.hidden = false;
+    cError.textContent = errMsg(e);
+    return;
+  }
+  contrib.running = sharing.running;
+  cButton.textContent = sharing.running ? "Stop sharing" : "Start sharing";
+  cButton.classList.toggle("btn-danger", sharing.running);
+  cButton.classList.toggle("btn-primary", !sharing.running);
+
+  if (!sharing.running) {
+    cState.className = "pill pill-stopped";
+    cState.textContent = "stopped";
+    renderContributorLive(null);
+    setControlsEnabled(false);
+    $("#controls-note").textContent = "Start sharing to change these.";
+    return;
+  }
+  try {
+    const c = await call<ControlStatus>("contributor_control_status");
+    cState.className = `pill pill-${c.state}`;
+    cState.textContent = c.state;
+    renderContributorLive(c);
+    contrib.policy = c.policy;
+    const editing = form.contains(document.activeElement);
+    if (!contrib.dirty && !editing) fillPolicyForm(c.policy, c.metrics);
+    setControlsEnabled(true);
+    pauseBtn.hidden = c.policy.paused;
+    pauseNowBtn.hidden = c.policy.paused;
+    resumeBtn.hidden = !c.policy.paused;
+    cError.hidden = true;
+  } catch (e) {
+    cState.className = "pill pill-queued";
+    cState.textContent = "starting";
+    renderContributorLive(null);
+    setControlsEnabled(false);
+    $("#controls-note").hidden = false;
+    $("#controls-note").textContent = `The worker is starting… (${errMsg(e)})`;
+  }
+}
+
+const contributorPoll = every(2000, async () => {
+  if (currentTab === "contributor") await refreshContributor();
 });
 
-requestRunButton.addEventListener("click", () => {
-  void requestProjectRun();
+cButton.addEventListener("click", async () => {
+  cError.hidden = true;
+  cButton.disabled = true;
+  try {
+    if (contrib.running) {
+      await call<ContributorSharingStatus>("stop_contributor_sharing");
+      cMessage.textContent = "Sharing stopped. Any running job was handed back to the cluster.";
+      contrib.dirty = false;
+    } else {
+      cMessage.textContent = "Starting the worker…";
+      const token = $<HTMLInputElement>("#enroll-token").value.trim();
+      const res = await call<ContributorSharingStatus>("start_contributor_sharing", { enrollmentToken: token || null });
+      cMessage.textContent = res.details;
+      $<HTMLInputElement>("#enroll-token").value = "";
+    }
+    log("info", cMessage.textContent ?? "");
+  } catch (e) {
+    cError.hidden = false;
+    cError.textContent = errMsg(e);
+    cMessage.textContent = "";
+    log("error", errMsg(e));
+  } finally {
+    cButton.disabled = false;
+    await refreshContributor();
+  }
 });
 
-revealFolderButton.addEventListener("click", () => {
-  openSelectedFolder();
+for (const id of ["#pol-cpus", "#pol-mem", "#pol-idle-cpu"]) $(id).addEventListener("input", syncOutputs);
+form.addEventListener("input", () => (contrib.dirty = true));
+form.addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const status = $("#pol-status");
+  if (!contrib.policy) {
+    status.textContent = "The worker is not ready yet.";
+    return;
+  }
+  if (!form.reportValidity()) return;
+  const next: WorkerPolicy = {
+    ...contrib.policy, // keep everything this form does not edit (image allow/deny, gVisor...)
+    max_cpus: Number($<HTMLInputElement>("#pol-cpus").value),
+    max_memory_mb: clamp(Number($<HTMLInputElement>("#pol-mem").value), 0, contrib.maxMem),
+    max_job_disk_mb: Math.max(16, Number($<HTMLInputElement>("#pol-disk").value) || 256),
+    idle_only: $<HTMLInputElement>("#pol-idle").checked,
+    idle_cpu_percent: Number($<HTMLInputElement>("#pol-idle-cpu").value),
+    schedule: $<HTMLInputElement>("#pol-schedule").value.trim(),
+    allow_network: $<HTMLInputElement>("#pol-net").checked,
+    allowed_hosts: $<HTMLTextAreaElement>("#pol-hosts").value.split(/\r?\n/).map((s) => s.trim()).filter(Boolean),
+  };
+  try {
+    await call("contributor_set_policy", { policy: next });
+    contrib.dirty = false;
+    status.textContent = "Applied.";
+    log("success", "Contributor limits updated.");
+    await refreshContributor();
+  } catch (e) {
+    status.textContent = errMsg(e);
+  }
 });
 
-contributeButton.addEventListener("click", () => {
-  void toggleContributorSharing();
-});
+async function control(action: "pause" | "pauseNow" | "resume"): Promise<void> {
+  try {
+    if (action === "resume") await call("contributor_resume");
+    else await call("contributor_pause", { now: action === "pauseNow" });
+    log("info", action === "resume" ? "Sharing resumed." : action === "pauseNow" ? "Paused; the running job was handed back." : "Paused; the running job will finish.");
+  } catch (e) {
+    cError.hidden = false;
+    cError.textContent = errMsg(e);
+  }
+  await refreshContributor();
+}
+pauseBtn.addEventListener("click", () => void control("pause"));
+pauseNowBtn.addEventListener("click", () => void control("pauseNow"));
+resumeBtn.addEventListener("click", () => void control("resume"));
 
-clearSelectionButton.addEventListener("click", clearSelection);
+// ---------------------------------------------------------------------------------------------------
+// start
 
-renderMode();
-renderUserState();
-renderContributorSetup();
-renderCommandList();
-
-addCommandButton.addEventListener("click", () => {
-  state.cmdlist.push("");
-  renderCommandList();
-});
+renderCommands();
+setControlsEnabled(false);
+renderContributorLive(null);
+setSteps("idle");
+syncOutputs();
+{
+  const t = location.hash.slice(1);
+  showTab(t === "cluster" || t === "contributor" ? t : "run", false);
+}

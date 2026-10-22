@@ -22,7 +22,7 @@ func jobFromMap(m map[string]string) *Job {
 		LastFailureMs: atoi64(m["last_failure_ms"]), CreatedMs: atoi64(m["created_ms"]),
 		AssignedMs: atoi64(m["assigned_ms"]), StartedMs: atoi64(m["started_ms"]),
 		FinishedMs: atoi64(m["finished_ms"]), NotBeforeMs: atoi64(m["not_before"]), Commits: int(atoi64(m["commits"])),
-		Exclude: m["exclude"],
+		Exclude: m["exclude"], LastWorker: m["last_worker"],
 	}
 	_ = json.Unmarshal([]byte(m["spec"]), &j.Spec)
 	if m["verify"] == "1" {
@@ -221,6 +221,79 @@ func (q *Queue) OldestPendingAge(ctx context.Context) (time.Duration, error) {
 		return 0, err
 	}
 	return time.Duration(max(now-created, 0)) * time.Millisecond, nil
+}
+
+// MaxLogTail bounds the live output kept per job.
+const MaxLogTail = 4096
+
+// SetLogTail stores the latest output of a running job, but only if worker currently holds the job:
+// a worker cannot write onto a job it was never given. The check and the write are one atomic script.
+// It reports whether the tail was stored.
+func (q *Queue) SetLogTail(ctx context.Context, worker, jobID, tail string) (bool, error) {
+	if len(tail) > MaxLogTail {
+		tail = tail[len(tail)-MaxLogTail:]
+	}
+	tail = strings.ToValidUTF8(tail, "")
+	const script = `
+local jk = 'ch:job:' .. ARGV[1]
+local st = redis.call('HGET', jk, 'state')
+if st ~= 'ASSIGNED' and st ~= 'RUNNING' then return 0 end
+if redis.call('HGET', jk, 'worker') ~= ARGV[2] then return 0 end
+redis.call('SET', 'ch:jtail:' .. ARGV[1], ARGV[3], 'EX', 86400)
+return 1`
+	n, err := q.rdb.Eval(ctx, script, nil, jobID, worker, tail).Int()
+	return n == 1, err
+}
+
+// LogTail returns the most recent output recorded for a job ("" if none).
+func (q *Queue) LogTail(ctx context.Context, jobID string) (string, error) {
+	v, err := q.rdb.Get(ctx, "ch:jtail:"+jobID).Result()
+	if err == redis.Nil {
+		return "", nil
+	}
+	return v, err
+}
+
+// ListJobs returns recent jobs, newest first. state filters when non-empty. Verification shadow replicas
+// (the hidden second copy of a verify=true job, whose id is the primary's plus "~v") are not listed:
+// the user submitted one job.
+func (q *Queue) ListJobs(ctx context.Context, limit int, state string) ([]*Job, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	limit = min(limit, 200)
+	scan := limit * 2 // headroom for the hidden shadow replicas
+	if state != "" {
+		scan = 1000 // a filter needs to look further back to find enough matches
+	}
+	ids, err := q.rdb.ZRevRange(ctx, "ch:jobs", 0, int64(scan-1)).Result()
+	if err != nil {
+		return nil, fmt.Errorf("list jobs: %w", err)
+	}
+	pipe := q.rdb.Pipeline()
+	cmds := make([]*redis.MapStringStringCmd, len(ids))
+	for i, id := range ids {
+		cmds[i] = pipe.HGetAll(ctx, "ch:job:"+id)
+	}
+	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
+		return nil, fmt.Errorf("read jobs: %w", err)
+	}
+	out := make([]*Job, 0, limit)
+	for i, c := range cmds {
+		m, _ := c.Result()
+		if len(m) == 0 || strings.HasSuffix(ids[i], "~v") {
+			continue
+		}
+		j := jobFromMap(m)
+		if state != "" && j.State != state {
+			continue
+		}
+		out = append(out, j)
+		if len(out) == limit {
+			break
+		}
+	}
+	return out, nil
 }
 
 // Now is Redis's clock in milliseconds, the same clock every script and snapshot uses.

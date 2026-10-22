@@ -86,6 +86,22 @@ The CLI builds the job directory into an image, saves it, uploads the tarball (b
 also controls the local worker (`worker pause|resume|kill|policy|history`) and the cluster (`admin enroll|revoke`, `workers`,
 `explain`). The desktop client offers the same flow in a UI.
 
+### Desktop app (`client/`, Tauri: Rust backend + TypeScript frontend)
+
+Three tabs over the same secured API as the CLI: **Run** (build, upload, submit, follow live output, see why a worker was chosen, download verified results),
+**Cluster** (workers against the 90% limit, recent jobs) and **Contributor** (start/stop a local worker, pause, donation limits). The Rust backend (`cluster.rs`) does config
+discovery, the TLS+token gRPC channel, artifact upload to the coordinator's store, SHA-256-verified output download, and an HTTP client for the local worker's private control
+socket. It never touches Redis or an object store. See [client/README.md](../client/README.md).
+
+```mermaid
+flowchart LR
+    UI["TypeScript UI<br/>Run / Cluster / Contributor"] -- "Tauri commands" --> RS["Rust backend<br/>cluster.rs + lib.rs"]
+    RS -- "gRPC + TLS + API token" --> CO["Coordinator"]
+    RS -- "PUT /artifacts, GET /outputs (HTTPS)" --> CO
+    RS -- "Unix socket 0600" --> LW["local worker<br/>(contributor mode)"]
+    LW -- "pull jobs" --> CO
+```
+
 ### Shared (`shared/proto/`)
 
 Three proto files (`worker`, `client`, `admin`). Rule: **additive changes only** (new fields and RPCs, never renumbering or removal),
@@ -162,7 +178,7 @@ All keys are prefixed `ch:`. Time always comes from Redis `TIME`, never from a w
 |---|---|---|
 | `ch:seq` | counter | FIFO sequence generator |
 | `ch:pending` | ZSET | job ids scored by sequence (the queue) |
-| `ch:job:<id>` | hash | state, attempt, lease token, worker, spec JSON, requirements, timestamps, `commits`, placement `decision` |
+| `ch:job:<id>` | hash | state, attempt, lease token, worker, `last_worker`, spec JSON, requirements, timestamps, `commits`, placement `decision` |
 | `ch:jobs` | set | all job ids |
 | `ch:leases` | ZSET | job id scored by lease expiry |
 | `ch:result:<id>` | string | the committed result (written once) |
@@ -175,6 +191,7 @@ All keys are prefixed `ch:`. Time always comes from Redis `TIME`, never from a w
 | `ch:wstat:<id>` | hash | decayed success/failure counts (reliability) |
 | `ch:urun:<user>` | counter | running jobs per user (per-user limit) |
 | `ch:verifying` | ZSET | replicas waiting for their sibling |
+| `ch:jtail:<id>` | string | the last 4 KB of a running job's output (live logs), expires after 24 h |
 | `ch:enroll:<sha256>`, `ch:cred:<id>`, `ch:revoked` | | enrollment tokens, hashed worker credentials, revocations |
 
 Redis runs with AOF persistence, so a Redis crash loses at most the last fsync interval of writes (tested with SIGKILL).
@@ -246,6 +263,8 @@ Detailed in [THREAT_MODEL.md](THREAT_MODEL.md). Summary:
 - **Transport and identity:** TLS 1.3, optional mTLS; expiring limited-use enrollment tokens that mint a per-worker credential
   (stored hashed, revocable); an API token for submitters; per-source and per-identity rate limits applied before authentication.
 - **Result integrity:** optional redundant execution (`--verify`) compares output digests from two different workers.
+- **Untrusted output:** job output is stripped of terminal control sequences before reaching a terminal, and shown only as text in the app.
+- **Joining:** a new worker fetches the cluster CA and trusts it only if its SHA-256 matches a fingerprint given out of band.
 
 ## 12. Artifacts and outputs
 
@@ -262,11 +281,12 @@ Detailed in [THREAT_MODEL.md](THREAT_MODEL.md). Summary:
 | Interface | Used by | Auth |
 |---|---|---|
 | gRPC `WorkerService`: `RegisterWorker`, `Heartbeat`, `RequestJob`, `SubmitResult` | workers | per-worker credential (enrollment token on first call) |
-| gRPC `ClientService`: `SubmitJob`, `GetJobStatus`, `GetJobResult`, `CancelJob`, `ListWorkers`, `ExplainJob` | CLI, desktop client | API token |
+| gRPC `ClientService`: `SubmitJob`, `GetJobStatus` (with live output), `GetJobResult`, `CancelJob`, `ListWorkers`, `ListJobs`, `ExplainJob` | CLI, desktop client | API token |
 | gRPC `AdminService`: `CreateEnrollmentToken`, `RevokeWorker` | operator | API token |
 | HTTP `PUT/GET /artifacts/<sha256>` | CLI (write), workers (read) | API token / worker credential |
 | HTTP `PUT/GET /outputs/<job>/<attempt>/<path>` | workers (write, lease holder only), CLI (read) | worker credential / API token |
 | HTTP `/healthz`, `/readyz` | orchestrators, probes | none (`/readyz` is 503 while draining) |
+| HTTP `GET /ca.crt` | a new worker joining (checked against a fingerprint it was given) | none; public material, rate-limited |
 | HTTP `GET /metrics` | Prometheus | API token |
 | Worker Unix socket (0600) | the contributor's CLI | file permissions |
 

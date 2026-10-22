@@ -99,6 +99,16 @@ func (s *Server) Heartbeat(ctx context.Context, req *pb.HeartbeatRequest) (*pb.H
 	if err != nil {
 		return nil, internal("heartbeat", err)
 	}
+	stored := 0
+	for jobID, tail := range req.GetLogTails() {
+		if stored++; stored > maxLogTailsPerHeartbeat {
+			break
+		}
+		// Accepted only for a job this worker holds (checked atomically in Redis); a failure is not worth failing the heartbeat.
+		if _, err := s.queue.SetLogTail(ctx, workerID, jobID, tail); err != nil {
+			s.log.Debug("could not store log tail", "worker_id", workerID, "job_id", jobID, "error", err)
+		}
+	}
 	for _, id := range cancel {
 		s.log.Warn("worker told to abort job it no longer owns", "worker_id", workerID, "job_id", id)
 	}
@@ -273,11 +283,51 @@ func (s *Server) GetJobStatus(ctx context.Context, req *pb.GetJobStatusRequest) 
 	if j == nil {
 		return nil, status.Error(codes.NotFound, "job not found")
 	}
+	tail, err := s.queue.LogTail(ctx, jobID)
+	if err != nil {
+		return nil, internal("read log tail", err)
+	}
 	return &pb.GetJobStatusResponse{
-		Status: stateToPB(j.State), AssignedWorkerId: j.Worker, UpdatedAtUnix: time.Now().Unix(),
+		Status: stateToPB(j.State), AssignedWorkerId: firstNonEmpty(j.Worker, j.LastWorker), UpdatedAtUnix: time.Now().Unix(),
 		Attempt: int32(j.Attempt), MaxAttempts: int32(j.MaxAttempts), LastFailure: j.LastFailure, QueueSeq: j.Seq,
-		Verification: j.Verification,
+		Verification: j.Verification, LogTail: tail,
 	}, nil
+}
+
+// maxLogTailsPerHeartbeat bounds how much a single heartbeat can make the coordinator write.
+const maxLogTailsPerHeartbeat = 8
+
+// pbToState is the inverse of stateToPB, for filters ("" means no filter).
+func pbToState(s pb.Status) string {
+	for _, st := range queue.AllStates {
+		if stateToPB(st) == s && s != pb.Status_STATUS_UNSPECIFIED {
+			return st
+		}
+	}
+	return ""
+}
+
+func (s *Server) ListJobs(ctx context.Context, req *pb.ListJobsRequest) (*pb.ListJobsResponse, error) {
+	if req.GetLimit() < 0 || req.GetLimit() > 200 {
+		return nil, status.Error(codes.InvalidArgument, "limit must be 0-200 (0 = default 50)")
+	}
+	state := pbToState(req.GetStatus())
+	if req.GetStatus() != pb.Status_STATUS_UNSPECIFIED && state == "" {
+		return nil, status.Error(codes.InvalidArgument, "unknown status filter")
+	}
+	jobs, err := s.queue.ListJobs(ctx, int(req.GetLimit()), state)
+	if err != nil {
+		return nil, internal("list jobs", err)
+	}
+	resp := &pb.ListJobsResponse{}
+	for _, j := range jobs {
+		resp.Jobs = append(resp.Jobs, &pb.JobSummary{
+			JobId: &pb.JobID{Value: j.ID}, Status: stateToPB(j.State), AssignedWorkerId: firstNonEmpty(j.Worker, j.LastWorker),
+			Attempt: int32(j.Attempt), MaxAttempts: int32(j.MaxAttempts), CreatedAtUnix: j.CreatedMs / 1000,
+			ContainerImage: j.Spec.ContainerImage, User: j.Spec.User, QueueSeq: j.Seq, LastFailure: j.LastFailure,
+		})
+	}
+	return resp, nil
 }
 
 func (s *Server) GetJobResult(ctx context.Context, req *pb.GetJobResultRequest) (*pb.GetJobResultResponse, error) {
@@ -437,4 +487,15 @@ func stateToPB(state string) pb.Status {
 	default:
 		return pb.Status_STATUS_UNSPECIFIED
 	}
+}
+
+// firstNonEmpty returns the first non-empty string: a finished job has no current worker, but the one that
+// last ran it is still worth showing.
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }

@@ -8,3 +8,6 @@ bin/
 data/
 *.out
 .computehive/
+
+# Browser-automation scratch output
+.playwright-mcp/

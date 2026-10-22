@@ -56,6 +56,31 @@ message GetJobStatusResponse {
   int64 queue_seq = 9;
   // For jobs submitted with verify=true: "pending", "match", "mismatch", "timeout" or "unavailable".
   string verification = 10;
+  // The most recent output of a running job (last few KB of stdout+stderr), refreshed with every worker heartbeat.
+  // Untrusted job output: clients must not pass it to a terminal unsanitised.
+  string log_tail = 11;
+}
+
+message ListJobsRequest {
+  int32 limit = 1;   // newest first; default 50, at most 200
+  Status status = 2; // optional filter (STATUS_UNSPECIFIED = all)
+}
+
+message JobSummary {
+  JobID job_id = 1;
+  Status status = 2;
+  string assigned_worker_id = 3;
+  int32 attempt = 4;
+  int32 max_attempts = 5;
+  int64 created_at_unix = 6;
+  string container_image = 7;
+  string user = 8;
+  int64 queue_seq = 9;
+  string last_failure = 10;
+}
+
+message ListJobsResponse {
+  repeated JobSummary jobs = 1;
 }
 
 message CancelJobRequest {
@@ -138,6 +163,9 @@ message ExplainJobResponse {
 service ClientService {
   // Shows why each worker was chosen or rejected for a job.
   rpc ExplainJob(ExplainJobRequest) returns (ExplainJobResponse);
+
+  // Recent jobs, newest first (what a UI or `computehive jobs` shows).
+  rpc ListJobs(ListJobsRequest) returns (ListJobsResponse);
 
   // Cancels a job in any non-terminal state.
   rpc CancelJob(CancelJobRequest) returns (CancelJobResponse);

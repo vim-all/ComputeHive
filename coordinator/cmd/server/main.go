@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -106,6 +107,10 @@ func main() {
 		os.Exit(1)
 	}
 	handler = httpapi.WithMetrics(handler, m.Handler(), authSvc)
+	if caPath := publicCAPath(cfg); caPath != "" {
+		handler = httpapi.WithPublicFile(handler, "/ca.crt", caPath, "application/x-pem-file", authSvc)
+		log.Info("serving the public CA certificate for worker enrolment", "path", "/ca.crt", "file", caPath)
+	}
 	httpServer := &http.Server{Addr: cfg.HTTPListenAddr(), Handler: handler, ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		log.Info("coordinator HTTP server listening", "addr", cfg.HTTPListenAddr(), "artifact_dir", cfg.ArtifactDir, "tls", cfg.TLSCertFile != "")
@@ -177,4 +182,20 @@ func runCerts(args []string) int {
 		fmt.Printf("  client certificates: %s/client-<id>.crt + .key (worker: COORDINATOR_TLS_CERT / COORDINATOR_TLS_KEY); the CA key stays on the coordinator\n", *out)
 	}
 	return 0
+}
+
+// publicCAPath is the CA certificate to publish at /ca.crt: TLS_CA_FILE if set, else ca.crt beside the server
+// certificate when it exists. Empty when TLS is off (there is no CA to publish).
+func publicCAPath(cfg config.Config) string {
+	if cfg.TLSCAFile != "" {
+		return cfg.TLSCAFile
+	}
+	if cfg.TLSCertFile == "" {
+		return ""
+	}
+	cand := filepath.Join(filepath.Dir(cfg.TLSCertFile), "ca.crt")
+	if _, err := os.Stat(cand); err == nil {
+		return cand
+	}
+	return ""
 }

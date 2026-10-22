@@ -34,4 +34,4 @@ docker compose up -d --build --wait redis coordinator
 chmod 600 "$DIR/enroll.token"
 
 echo "starting the workers and the metrics stack ..."
-docker compose up -d --build --wait worker-1 worker-2 prometheus grafana
+docker compose up -d --build --wait worker-1 worker-2 worker-3 prometheus grafana

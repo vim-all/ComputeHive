@@ -1,0 +1,162 @@
+/**
+ * Sample backend used ONLY when the page is opened in a plain browser (no desktop app behind it), so the real UI can
+ * be viewed and tested with realistic data. The app shows a "preview" banner whenever this is active. It is never
+ * used inside the desktop app.
+ */
+
+type Args = Record<string, unknown>;
+
+const jobs = new Map<string, { startedAt: number; canceled: boolean }>();
+let sharing = false;
+let sharingSince = 0;
+let paused = false;
+const policy = {
+  paused: false,
+  max_cpus: 0,
+  max_memory_mb: 0,
+  max_job_disk_mb: 256,
+  idle_only: false,
+  idle_cpu_percent: 25,
+  schedule: "",
+  allow_network: false,
+  allowed_hosts: [] as string[],
+  image_allow: [] as string[],
+  image_deny: [] as string[],
+  require_gvisor: false,
+};
+
+const wiggle = (base: number, span: number) => Math.max(1, Math.min(99, base + Math.sin(Date.now() / 2300 + base) * span));
+
+function overview() {
+  const w = (id: string, state: string, ram: number, cpu: number, disk: number, run: number, extra: object = {}) => ({
+    id, state, cpu: 16, memoryMb: 15686, gpu: 0, ramPercent: wiggle(ram, 3), cpuPercent: wiggle(cpu, 8), diskPercent: disk,
+    runningJobs: run, os: "linux", arch: "amd64", labels: [], reliability: 0.74, isolation: "hardened-runc",
+    overloadReasons: [], heartbeatAgeSecs: 1, ...extra,
+  });
+  const now = Math.floor(Date.now() / 1000);
+  const job = (n: string, status: string, worker: string, age: number, attempt = 1) => ({
+    id: `7b39d29f-9630-4f70-9343-0d4ab8f3a${n}`, status, worker, attempt, maxAttempts: 3, createdUnix: now - age,
+    image: "computehive-job:sample-app", user: "", lastFailure: "", terminal: ["succeeded", "failed", "canceled", "dead"].includes(status),
+  });
+  return {
+    configured: true, coordinatorAddr: "127.0.0.1:50051", httpUrl: "https://127.0.0.1:8080", tls: true, hasToken: true,
+    configSource: "sample data (preview mode)", reachable: true, error: null,
+    workers: [
+      w("worker-1", "ready", 71, 9, 63, 0, { reliability: 0.88 }),
+      w("worker-2", "running", 74, 31, 63, 1),
+      w("worker-3", "overloaded", 93, 62, 71, 0, { overloadReasons: ["ram>=90%"], reliability: 0.52 }),
+      w("laptop-maria", "paused", 48, 4, 40, 0, { os: "darwin", arch: "arm64", labels: ["fast-disk", "zone=eu"], reliability: 0.95 }),
+      w("worker-5", "dead", 0, 0, 0, 0, { heartbeatAgeSecs: 214, ramPercent: 0, cpuPercent: 0, diskPercent: 0 }),
+    ],
+    jobs: [
+      job("001", "running", "worker-2", 14),
+      job("002", "queued", "", 9),
+      job("003", "succeeded", "worker-1", 95),
+      job("004", "failed", "worker-1", 180),
+      job("005", "succeeded", "laptop-maria", 400, 2),
+    ],
+  };
+}
+
+function phase(id: string) {
+  const j = jobs.get(id);
+  if (!j) return { status: "unknown", n: 0 };
+  if (j.canceled) return { status: "canceled", n: 0 };
+  const t = (Date.now() - j.startedAt) / 1000;
+  if (t < 2.5) return { status: "queued", n: 0 };
+  if (t < 12) return { status: "running", n: Math.floor(t - 2) };
+  return { status: "succeeded", n: 10 };
+}
+
+const explain = () => ({
+  summary: "worker-1 scored highest (0.600); its strongest component was reliability",
+  recorded: true,
+  assignedWorker: "worker-1",
+  weights: { free_ram: 0.22, reliability: 0.2, free_cpu: 0.14, load: 0.14, locality: 0.1, fit: 0.1, uptime: 0.05, preference: 0.05 },
+  evaluations: [
+    { worker: "worker-1", eligible: true, chosen: true, busy: false, score: 0.6, reasons: [], parts: { free_ram: 0.066, reliability: 0.15, free_cpu: 0.124, load: 0.117, locality: 0.1, fit: 0.002, uptime: 0.002, preference: 0.025 } },
+    { worker: "worker-2", eligible: true, chosen: false, busy: true, score: 0.436, reasons: [], parts: { free_ram: 0.066, reliability: 0.1, free_cpu: 0.124, load: 0.117, locality: 0, fit: 0.002, uptime: 0.002, preference: 0.025 } },
+    { worker: "worker-3", eligible: false, chosen: false, busy: false, score: 0, reasons: ["overloaded (ram>=90%): the 90% rule"], parts: {} },
+    { worker: "worker-5", eligible: false, chosen: false, busy: false, score: 0, reasons: ["heartbeat stale (214.0s old)"], parts: {} },
+  ],
+});
+
+const delay = <T>(v: T, ms = 120) => new Promise<T>((r) => setTimeout(() => r(v), ms));
+
+export async function mockInvoke<T>(cmd: string, args: Args): Promise<T> {
+  const id = String(args.jobId ?? "");
+  switch (cmd) {
+    case "cluster_overview":
+      return delay(overview() as T);
+    case "request_project_run": {
+      const jobId = `7b39d29f-9630-4f70-9343-${Date.now().toString(16).padStart(12, "0").slice(-12)}`;
+      jobs.set(jobId, { startedAt: Date.now() + 1500, canceled: false });
+      return delay(
+        {
+          image: {
+            projectName: "sample-app", projectRoot: "/home/you/projects/sample-app", dockerfilePath: "/home/you/projects/sample-app/Dockerfile",
+            imageArchivePath: "/tmp/sample-app.tar", imageTag: "computehive-job:sample-app", imageSizeBytes: 3667456, detectedStack: "Node.js (Vite)",
+            dockerSetupSource: "Generated by ComputeHive", generatedFiles: ["Dockerfile"], summary: "built",
+            notes: ["No Dockerfile found: generated one for a Node.js project.", "Built the image computehive-job:sample-app.", "Saved the image (3.5 MB) and uploaded it to the cluster's artifact store."],
+          },
+          tarSizeBytes: 3667456, artifactSha256: "26853de9b796ea5c81f5aaf238d6a4ba540d261a6387b84e99cfb47fa9c0b8fa", jobId, summary: `Built the image, uploaded it, and queued job ${jobId}.`, notes: [],
+        } as T,
+        1500,
+      );
+    }
+    case "get_job_progress": {
+      const p = phase(id);
+      const lines = Array.from({ length: p.n }, (_, i) => `working... step ${i + 1} of 10`).join("\n");
+      return delay({
+        jobId: id, status: p.status, terminal: ["succeeded", "canceled", "failed"].includes(p.status), worker: p.status === "queued" ? "" : "worker-1",
+        attempt: p.status === "queued" ? 0 : 1, maxAttempts: 3, lastFailure: "", verification: "", logTail: lines,
+      } as T);
+    }
+    case "get_run_request_result": {
+      const p = phase(id);
+      if (p.status !== "succeeded") return delay(null as T);
+      return delay({
+        jobId: id, status: "succeeded", resultStatus: "succeeded", failureReason: "", exitCode: 0,
+        stdoutExcerpt: Array.from({ length: 10 }, (_, i) => `working... step ${i + 1} of 10`).join("\n") + "\nfinished\n", stderrExcerpt: "",
+        outputArtifacts: [{ relativePath: "results/summary.csv", sha256: "ab12".repeat(16), sizeBytes: 2048, contentType: "text/csv" }, { relativePath: "report.txt", sha256: "cd34".repeat(16), sizeBytes: 311, contentType: "text/plain" }],
+        finishedAtUnix: Math.floor(Date.now() / 1000), completed: true,
+      } as T);
+    }
+    case "explain_job":
+      return delay(explain() as T);
+    case "cancel_job": {
+      const j = jobs.get(id);
+      if (j) j.canceled = true;
+      return delay("ok" as T);
+    }
+    case "download_job_outputs":
+      return delay([{ relativePath: "results/summary.csv", savedTo: `${String(args.destDir)}/results/summary.csv`, sizeBytes: 2048, sha256Verified: true }, { relativePath: "report.txt", savedTo: `${String(args.destDir)}/report.txt`, sizeBytes: 311, sha256Verified: true }] as T, 400);
+    case "start_contributor_sharing":
+      sharing = true;
+      sharingSince = Date.now();
+      return delay({ running: true, pid: 4242, details: "Sharing started. The worker is joining the cluster.", jobRunning: false, currentJobId: null, lastJobId: null } as T);
+    case "stop_contributor_sharing":
+      sharing = false;
+      return delay({ running: false, pid: null, details: "Sharing stopped.", jobRunning: false, currentJobId: null, lastJobId: null } as T);
+    case "get_contributor_sharing_status":
+      return delay({ running: sharing, pid: sharing ? 4242 : null, details: sharing ? "Worker process is running." : "Worker process is not running.", jobRunning: false, currentJobId: null, lastJobId: null } as T);
+    case "contributor_control_status":
+      if (!sharing) throw new Error("the local worker is not running (start sharing first), or its control socket is not available");
+      return delay({
+        worker_id: "desktop-sample", version: "dev", isolation: "hardened-runc", state: paused ? "paused" : "waiting", not_taking: paused ? "paused by you" : "",
+        uptime: `${Math.floor((Date.now() - sharingSince) / 1000)}s`, policy: { ...policy, paused },
+        metrics: { MemTotalMB: 15686, MemUsedMB: 11500, MemPercent: wiggle(73, 2), CPUPercent: wiggle(12, 6), WorkDiskUsedPercent: 63, DockerDiskUsedPercent: 63 },
+      } as T);
+    case "contributor_set_policy":
+      Object.assign(policy, args.policy as object);
+      return delay({ ...policy } as T);
+    case "contributor_pause":
+      paused = true;
+      return delay({ ok: true } as T);
+    case "contributor_resume":
+      paused = false;
+      return delay({ ok: true } as T);
+    default:
+      throw new Error(`preview mode: command ${cmd} is not simulated`);
+  }
+}

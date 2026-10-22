@@ -657,6 +657,7 @@ type Job struct {
 	Attempt       int
 	MaxAttempts   int
 	Worker        string
+	LastWorker    string // the worker the job was most recently assigned to; kept after the job finishes
 	LastFailure   string
 	LastFailureMs int64
 	CreatedMs     int64

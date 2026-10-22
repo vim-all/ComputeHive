@@ -20,6 +20,7 @@ const _ = grpc.SupportPackageIsVersion9
 
 const (
 	ClientService_ExplainJob_FullMethodName   = "/compute.v1.ClientService/ExplainJob"
+	ClientService_ListJobs_FullMethodName     = "/compute.v1.ClientService/ListJobs"
 	ClientService_CancelJob_FullMethodName    = "/compute.v1.ClientService/CancelJob"
 	ClientService_ListWorkers_FullMethodName  = "/compute.v1.ClientService/ListWorkers"
 	ClientService_SubmitJob_FullMethodName    = "/compute.v1.ClientService/SubmitJob"
@@ -33,6 +34,8 @@ const (
 type ClientServiceClient interface {
 	// Shows why each worker was chosen or rejected for a job.
 	ExplainJob(ctx context.Context, in *ExplainJobRequest, opts ...grpc.CallOption) (*ExplainJobResponse, error)
+	// Recent jobs, newest first (what a UI or `computehive jobs` shows).
+	ListJobs(ctx context.Context, in *ListJobsRequest, opts ...grpc.CallOption) (*ListJobsResponse, error)
 	// Cancels a job in any non-terminal state.
 	CancelJob(ctx context.Context, in *CancelJobRequest, opts ...grpc.CallOption) (*CancelJobResponse, error)
 	// Lists registered workers with liveness and assigned jobs.
@@ -57,6 +60,16 @@ func (c *clientServiceClient) ExplainJob(ctx context.Context, in *ExplainJobRequ
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ExplainJobResponse)
 	err := c.cc.Invoke(ctx, ClientService_ExplainJob_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *clientServiceClient) ListJobs(ctx context.Context, in *ListJobsRequest, opts ...grpc.CallOption) (*ListJobsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListJobsResponse)
+	err := c.cc.Invoke(ctx, ClientService_ListJobs_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -119,6 +132,8 @@ func (c *clientServiceClient) GetJobResult(ctx context.Context, in *GetJobResult
 type ClientServiceServer interface {
 	// Shows why each worker was chosen or rejected for a job.
 	ExplainJob(context.Context, *ExplainJobRequest) (*ExplainJobResponse, error)
+	// Recent jobs, newest first (what a UI or `computehive jobs` shows).
+	ListJobs(context.Context, *ListJobsRequest) (*ListJobsResponse, error)
 	// Cancels a job in any non-terminal state.
 	CancelJob(context.Context, *CancelJobRequest) (*CancelJobResponse, error)
 	// Lists registered workers with liveness and assigned jobs.
@@ -141,6 +156,9 @@ type UnimplementedClientServiceServer struct{}
 
 func (UnimplementedClientServiceServer) ExplainJob(context.Context, *ExplainJobRequest) (*ExplainJobResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ExplainJob not implemented")
+}
+func (UnimplementedClientServiceServer) ListJobs(context.Context, *ListJobsRequest) (*ListJobsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListJobs not implemented")
 }
 func (UnimplementedClientServiceServer) CancelJob(context.Context, *CancelJobRequest) (*CancelJobResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CancelJob not implemented")
@@ -192,6 +210,24 @@ func _ClientService_ExplainJob_Handler(srv interface{}, ctx context.Context, dec
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ClientServiceServer).ExplainJob(ctx, req.(*ExplainJobRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ClientService_ListJobs_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListJobsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ClientServiceServer).ListJobs(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ClientService_ListJobs_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ClientServiceServer).ListJobs(ctx, req.(*ListJobsRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -296,6 +332,10 @@ var ClientService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ExplainJob",
 			Handler:    _ClientService_ExplainJob_Handler,
+		},
+		{
+			MethodName: "ListJobs",
+			Handler:    _ClientService_ListJobs_Handler,
 		},
 		{
 			MethodName: "CancelJob",

@@ -116,3 +116,10 @@ Docker 29.8 (runc only), Go 1.27, cargo 1.94, 16 cores / 15 GB RAM. Not verifiab
 | A29 | SIGTERM killed a worker's running job immediately, wasting work that was seconds from finishing | **Phase 6 (done)**: graceful drain (`DRAIN_TIMEOUT`), measured: job finished on attempt 1 |
 | A30 | Worker logs were plain text, coordinator logs JSON, with no way to follow one request or job across them | **Phase 6 (done)**: JSON everywhere, `x-request-id` correlation, `job_id`/`worker_id` on lines |
 | A31 | Pinning the Grafana datasource UID made Grafana fail to start on an existing stack (found live) | **Phase 6 (done)**: provisioning deletes the old datasource by name first |
+| A32 | The desktop client required `REDIS_URL` and S3/R2 credentials, spoke plaintext gRPC without a token, read job state straight from Redis, and tagged images outside the namespace the worker accepts: it could not work against the hardened cluster at all | **Phase 7 (done)**: backend adapted to the secured API (TLS, token, coordinator artifact store); frontend rebuilt; 5 live tests pass |
+| A33 | A TLS crypto-provider panic would have crashed the desktop app on its first connection (tonic and reqwest link different rustls backends) | **Phase 7 (done)**: provider installed explicitly; found by the live tests |
+| A34 | `submit --wait` exited 0 for a failed job | **Phase 7 (done)**: non-zero unless the job succeeded |
+| A35 | Job output was printed raw to the terminal (escape-sequence injection) | **Phase 7 (done)**: sanitised in the CLI and the app; verified live |
+| A36 | The desktop window could not be shrunk below 1080x720 and the layout had unmeasured scroll/overflow behaviour | **Phase 7 (done)**: 340x460 minimum, layout rules, 21-combination audit |
+| A37 | No way to list jobs, follow a running job's output, or see which worker ran a finished job without reading Redis | **Phase 7 (done)**: `ListJobs`, live output tail, `last_worker` |
+| A38 | Adding a machine meant copying a CA file by hand and trusting it blindly | **Phase 7 (done)**: fingerprint-verified one-line join (`scripts/join.sh`) |

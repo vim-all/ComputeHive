@@ -20,14 +20,16 @@ fn compile_proto_bindings() {
     let proto_dir = manifest_dir.join("../../shared/proto");
     let client_proto = proto_dir.join("client.proto");
     let worker_proto = proto_dir.join("worker.proto");
+    let admin_proto = proto_dir.join("admin.proto");
 
     println!("cargo:rerun-if-changed={}", client_proto.display());
     println!("cargo:rerun-if-changed={}", worker_proto.display());
+    println!("cargo:rerun-if-changed={}", admin_proto.display());
 
     tonic_build::configure()
         .build_client(true)
         .build_server(false)
-        .compile_protos(&[client_proto, worker_proto], &[proto_dir])
+        .compile_protos(&[client_proto, worker_proto, admin_proto], &[proto_dir])
         .expect("failed to compile coordinator client protos");
 }
 

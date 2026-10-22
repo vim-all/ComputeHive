@@ -1,93 +1,80 @@
-# ComputeHive Desktop Client
+# ComputeHive Desktop
 
-This app is the ComputeHive desktop interface built with:
+The desktop interface to a ComputeHive cluster: run a project, watch the cluster, and share your own machine.
 
-- frontend: Vite + TypeScript
-- desktop shell/backend: Tauri 2 + Rust
+- frontend: Vite + TypeScript (no UI framework), in `src/`
+- backend: Tauri 2 + Rust, in `src-tauri/`
 
-It supports two user flows:
+It talks to the **same secured API as the `computehive` CLI**: gRPC over TLS with the API token, and the coordinator's own
+artifact/output store over HTTPS. It never touches Redis or an object store, so it needs no credentials of its own.
 
-- user mode: package a project as a Docker artifact and submit a run request
-- contributor mode: start/stop a local worker process from the desktop UI
+## What it does
 
-## Prerequisites
+| Tab | What you can do |
+|---|---|
+| **Run** | Pick a project folder (a Dockerfile is generated if there is none), set a command, CPU/RAM/GPU/time limit, optional placement (OS, architecture, labels, free disk) and result verification. The app builds the image, uploads it, submits the job and follows it: status, the worker it ran on, **live output**, **why that worker was chosen**, the result, and **downloading output files** (each verified against its SHA-256). |
+| **Cluster** | Every worker with its state, platform, RAM/CPU/disk against the 90% safety limit, reliability and labels; overload reasons; recent jobs (click one to follow it). |
+| **Contributor** | Start or stop sharing this machine. While sharing: pause (or "pause now", which hands the running job back), CPU and memory to donate, disk per job, idle-only with a threshold, a schedule, and the network allow-list. Limits are enforced by the local worker, so the cluster cannot override them. |
 
-- Node.js 20+
-- pnpm
-- Rust toolchain (`rustup`)
-- Tauri system dependencies for Linux
-- Docker daemon + Docker CLI in `PATH`
-- running coordinator and Redis
-
-## Install and Run
+## Run it
 
 ```bash
+make up                         # from the repository root: starts the cluster and writes .computehive/
 cd client
-pnpm install
-pnpm tauri dev
+npm install
+npm run tauri dev               # the desktop app
+# or, to look at the UI alone in a browser with sample data:
+npm run dev                     # http://localhost:1420  (a banner says it is preview mode)
 ```
 
-Useful scripts:
+Prerequisites: Node 20+, Rust (stable), and the Tauri system libraries for your OS
+(<https://tauri.app/start/prerequisites/>); Docker for building images and, in contributor mode, running jobs.
+
+## How it finds the cluster
+
+In order: environment variables (`COMPUTEHIVE_COORDINATOR` / `COORDINATOR_ADDR`, `COMPUTEHIVE_TOKEN`, `COMPUTEHIVE_CA`,
+`COMPUTEHIVE_HTTP`, `COMPUTEHIVE_TLS_SERVER_NAME`), then a `.computehive/` directory (holding `api.token` and `ca.crt`) in the working
+directory, next to the executable, in the source checkout, or `~/.config/computehive/`. If a token or CA is missing the app says what to do
+instead of failing silently; `make up` creates both.
+
+For a remote cluster, copy `ca.crt` and `api.token` into `~/.config/computehive/` and set `COMPUTEHIVE_COORDINATOR=host:50051`.
+
+## Contributor mode
+
+"Start sharing" runs the worker binary on this machine (`bin/computehive-worker` from `make build`, else `worker/worker`, else `go run`).
+If this machine has not joined the cluster yet, a single-use enrollment token is used: the one you paste under *First time on this
+cluster?*, or one the app creates with the API token. The worker keeps its own revocable credential and state in
+`~/.local/state/computehive-desktop/` (override with `COMPUTEHIVE_STATE_DIR`); its control socket there (mode 0600) is what the controls use.
+
+## Layout and responsiveness
+
+The page scrolls (nothing has a fixed height); cards reflow with `auto-fit` grids; tables and logs scroll inside their own wrappers; every
+grid child can shrink; the header is sticky and wraps on narrow windows. The window can be resized down to 340 x 460. This was audited in a
+real browser at 7 sizes (340 to 1920 px) on all three tabs, checking horizontal overflow, elements past the edge, clipped content,
+reachability of the end of each page and tap-target size, with a finished job and the contributor panel populated.
+
+## Tests
 
 ```bash
-pnpm dev       # frontend only (Vite)
-pnpm build     # frontend production build
-pnpm tauri dev # full desktop app in dev mode
-pnpm tauri build
+cd src-tauri
+cargo test                                  # unit tests: path safety, address parsing, the control-socket HTTP parser, labels
+cargo test -- --ignored --test-threads=1    # live tests against a running cluster (make up) and Docker
+cd .. && npm run build                      # type-checks (tsc) and builds the frontend
 ```
 
-Vite dev port is fixed to `1420` (see `vite.config.ts`).
+The live tests build and run `examples/hello` through the app's own commands (TLS, token, upload, submit, follow, result, explain), check
+that a wrong token is rejected with a useful message, and drive the contributor path (start a worker, enrol, change limits over the
+socket, pause, resume, stop). They are what caught a TLS crypto-provider panic that would have crashed the packaged app on its first
+connection.
 
-## Required Configuration
-
-The Tauri backend loads environment values from:
-
-- repo root `.env` (preferred)
-- current working directory `.env`
-
-Required env vars:
-
-- `S3_BUCKET`
-- `S3_ACCESS_KEY_ID`
-- `S3_SECRET_ACCESS_KEY`
-- `REDIS_URL`
-
-Optional env vars:
-
-- `S3_SESSION_TOKEN`
-- `S3_PUBLIC_BUCKET_URL`
-- `COORDINATOR_ADDR` (default: `127.0.0.1:50051`)
-- `COMPUTEHIVE_WORKER_DIR` (contributor mode)
-- `COMPUTEHIVE_WORKER_BIN` (contributor mode)
-
-## What Happens on Run Request
-
-When you select a project and request a run, the desktop app:
-
-1. Detects or generates Docker setup for the selected folder.
-2. Builds a Docker image.
-3. Exports the image archive.
-4. Compresses the archive to `.tar.gz`.
-5. Computes SHA256 checksum.
-6. Uploads the artifact to object storage.
-7. Calls coordinator `SubmitJob` over gRPC.
-8. Polls coordinator for job completion and displays result/output metadata.
-
-## Contributor Sharing Mode
-
-Contributor mode starts a worker process from the desktop app.
-
-Resolution order:
-
-1. `COMPUTEHIVE_WORKER_BIN` if set and exists
-2. worker binary at `<worker-dir>/worker`
-3. fallback: `go run ./cmd/worker` inside the worker directory
-
-Worker directory defaults to `../../worker` relative to `client/src-tauri/`.
+Not automated: driving the native Tauri window itself.
 
 ## Troubleshooting
 
-- Docker errors: ensure Docker daemon is running and `docker` is on `PATH`.
-- Worker not found in contributor mode: set `COMPUTEHIVE_WORKER_DIR` or `COMPUTEHIVE_WORKER_BIN`.
-- Coordinator connection issues: verify `COORDINATOR_ADDR` and coordinator process.
-- Upload issues: verify object storage credentials and bucket URL values.
+| Symptom | Fix |
+|---|---|
+| "No API token found" | Run `make up` from the repository, or set `COMPUTEHIVE_TOKEN`. |
+| "Cluster unreachable" chip | Is the cluster running? `docker compose ps`. For a remote cluster check `COMPUTEHIVE_COORDINATOR` and that `ca.crt` matches it. |
+| Run fails at "build" | Docker is not running or not reachable by this user. |
+| Contributor: "has not joined the cluster yet" | Paste an enrollment token from `computehive admin enroll`, or provide the API token. |
+| Contributor controls say the worker "is starting" | It is enrolling and opening its socket; this takes a few seconds. |

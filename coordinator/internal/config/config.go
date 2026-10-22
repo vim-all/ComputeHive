@@ -60,9 +60,12 @@ type Config struct {
 	TLSCertFile     string
 	TLSKeyFile      string
 	TLSClientCAFile string // set to require client certificates (mTLS)
-	RateWorkerRPS   float64
-	RateClientRPS   float64
-	RateAnonRPS     float64
+	// TLSCAFile is the public CA certificate served at GET /ca.crt so a new worker can fetch it and check it
+	// against the fingerprint printed by `computehive admin enroll`. Default: ca.crt next to the server certificate.
+	TLSCAFile     string
+	RateWorkerRPS float64
+	RateClientRPS float64
+	RateAnonRPS   float64
 }
 
 // Load reads configuration from flags (args), then environment, then .env files, then defaults.
@@ -184,6 +187,7 @@ func Load(args []string) (Config, error) {
 		TLSCertFile:     getenv("TLS_CERT_FILE"),
 		TLSKeyFile:      getenv("TLS_KEY_FILE"),
 		TLSClientCAFile: getenv("TLS_CLIENT_CA_FILE"),
+		TLSCAFile:       getenv("TLS_CA_FILE"),
 		RateWorkerRPS:   envFloat(getenv, "RATE_WORKER_RPS", 50),
 		RateClientRPS:   envFloat(getenv, "RATE_CLIENT_RPS", 50),
 		RateAnonRPS:     envFloat(getenv, "RATE_ANON_RPS", 20),
@@ -226,6 +230,7 @@ func Load(args []string) (Config, error) {
 	fs.BoolVar(&cfg.AllowInsecure, "allow-insecure", cfg.AllowInsecure, "DEVELOPMENT ONLY: allow credentials over plaintext (no TLS)")
 	fs.StringVar(&cfg.TLSCertFile, "tls-cert", cfg.TLSCertFile, "TLS certificate file")
 	fs.StringVar(&cfg.TLSKeyFile, "tls-key", cfg.TLSKeyFile, "TLS private key file")
+	fs.StringVar(&cfg.TLSCAFile, "tls-ca", cfg.TLSCAFile, "public CA certificate to serve at /ca.crt (default: ca.crt next to the server certificate)")
 	fs.StringVar(&cfg.TLSClientCAFile, "tls-client-ca", cfg.TLSClientCAFile, "require client certificates signed by this CA (mutual TLS)")
 	fs.Float64Var(&cfg.RateWorkerRPS, "rate-worker-rps", cfg.RateWorkerRPS, "requests per second allowed per worker")
 	fs.Float64Var(&cfg.RateClientRPS, "rate-client-rps", cfg.RateClientRPS, "requests per second allowed per API token")

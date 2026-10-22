@@ -448,3 +448,67 @@ Verified: metrics content against a real Redis (exact values), the authenticated
 worker drain (finish, no more work, timeout hand-back, idle exit; run 3x under `-race`), `make lint` and `make test` (chaos 145 s), alert rules with `promtool`, live: Prometheus scraping
 over TLS with the token, 12 rules loaded, `WorkerLost` fired by a real kill, Grafana datasource and dashboard provisioned and rendered, SIGTERM drain of a worker and of the coordinator.
 Not verified: behaviour with more than two workers; alert delivery (no Alertmanager); metrics persistence across Prometheus restarts.
+
+---
+
+## Phase 7: end-to-end user experience
+
+### D-58: The desktop client talks to the same secured API as the CLI; its backend layer was adapted, its frontend rebuilt
+- **Finding:** the existing client was built for the prototype: it required `REDIS_URL` and read job state directly from Redis, used plaintext
+  gRPC with no token, signed uploads to S3/R2 itself (about 450 lines of SigV4 code), and tagged images `computehive-<name>:latest`.
+  Against the hardened cluster every one of those fails: Redis is no longer exposed, the coordinator requires TLS and a token, the store is
+  the coordinator's own, and the worker refuses any image tar whose tags are outside the `computehive-job:` namespace.
+- **Decision:** keep Tauri, Rust, Vite and TypeScript and the project-detection and Dockerfile-generation code; put the cluster access in one new module
+  (`cluster.rs`: config discovery, TLS+token gRPC, artifact upload, verified downloads, the local control socket) and delete roughly 1,000 lines of S3,
+  Redis and gzip code. The frontend (3 tabs: Run, Cluster, Contributor) was rebuilt because every view's data model changed; no framework was added.
+- **Why not keep S3:** it would need cloud credentials on every submitter's machine, bypass the lease check on outputs, and diverge from the CLI.
+
+### D-59: Add `ListJobs`, live output and a persisted worker, all additive
+- The client read job lists from Redis because there was no RPC. `ListJobs` (newest first, filterable, hides the shadow replica of a `--verify` job) fills that gap
+  for the app and `computehive jobs`.
+- **Live output:** the worker samples the running container's recent output (`docker logs --tail`) into its heartbeat; the coordinator stores up to 4 KB per job and
+  serves it from `GetJobStatus`. It is accepted only for a job the reporting worker currently holds (checked atomically in Redis), at most 8 per heartbeat, with a 24 h expiry.
+- **Tradeoff:** it lags about two seconds and shows only the tail; a real log stream would need a new streaming channel and storage. Chosen because it reuses an existing
+  authenticated connection and has no new failure mode.
+- Finished jobs now keep `last_worker`, so "which worker ran this" survives completion (`make demo` shows it per job).
+
+### D-60: Job output is untrusted text, in the terminal and in the app
+- A job controls its own stdout; raw escape sequences can rewrite the screen, set the window title or touch the clipboard on some terminals. The CLI strips terminal control
+  sequences with a small state machine (CSI, OSC/DCS/APC strings with their terminators, two-character escapes, C1 and other control characters), and the app both strips
+  them and renders only through text nodes, never `innerHTML`.
+- The first sanitiser ended an escape at the first letter, so an OSC title leaked its payload; the test that included an OSC sequence caught it, and it was rewritten as a proper state machine.
+- Verified live: a job that printed a title-setting and a clear-screen sequence produced zero raw ESC bytes in the CLI output.
+
+### D-61: One-line worker join without blind trust
+- `admin enroll` prints a complete command containing the CA's SHA-256 fingerprint; `scripts/join.sh` runs `computehive worker join --ca-sha256`, which downloads the CA from
+  the coordinator (`GET /ca.crt`, public, rate-limited) **without** verifying the TLS peer (it has no CA yet) and refuses unless the certificate's fingerprint matches, it is a
+  CA, and it is small and well-formed. Everything after that is verified against the fetched CA. Tested with an impostor serving a valid but different CA.
+- **Tradeoff:** it is only as strong as the channel that carries the fingerprint. The command says so. Distribution of binaries is not solved (the script builds from the clone; there are no release artifacts).
+
+### D-62: `--wait` is a contract about the exit code
+- `submit --wait` and `result --wait` previously exited 0 for a job that *failed*, so `submit --wait && deploy` would have deployed. They now exit non-zero unless the job succeeded; a plain
+  `result <id>` (just viewing) still exits 0. Found while running the new `examples/failing`.
+
+### D-63: Live tests against the real cluster, kept as ignored tests
+- Unit tests could not have caught two bugs that would have broken the packaged app: rustls refuses to choose a crypto provider when tonic (ring) and reqwest (aws-lc-rs) are both linked,
+  panicking on the first TLS connection (and, inside the blocking upload thread, surfacing as a vague "body error"); and the image-tag namespace above. Both were found only by driving the real
+  cluster over TLS. These tests stay in the tree as `#[ignore]` (`cargo test -- --ignored`) so the check is repeatable but does not break a build without a cluster.
+
+### D-64: A responsive layout is a rule, then measured
+- Rule: the page scrolls (no fixed heights), grids use `auto-fit`, tables and logs scroll in their own wrapper, children can shrink, the header wraps. The window minimum was 1080x720, which alone made
+  the app unusable in a small window; it is now 340x460.
+- Measured, not assumed: an automated browser audit at 7 sizes (340 to 1920 px) over all three tabs with a finished job and the contributor panel populated checks horizontal overflow, elements
+  past the edge, clipped content, reachability of the end of each page, and tap-target size. It first reported a false failure (my own measurement ran during a smooth scroll) and one real one
+  (19 px job links); both were resolved before the final 21/21 pass.
+- Not verified: the native Tauri window (only a browser and the Rust backend were driven).
+
+### D-65: A guided demo, measured live
+- `make demo` runs the story with real commands and prints measured values: the cluster, one job, a burst of six spread across three workers, live output, `kill -9` of the worker running a
+  30 s job (re-assigned to another worker, finished on attempt 2), and recovery. The first version labelled the interval "requeued after" while measuring when the retry was *assigned*
+  (it includes the retry backoff), so the label was corrected to say what is measured. The standard cluster now has three workers.
+
+### Phase 7 outcome
+Verified: the new examples on the live cluster (failing, memory within and over its limit with exit 137, cpu-heavy, hostile with all ten checks blocked); `make demo` end to end (82 s, exit 0);
+live log streaming with hostile escape sequences neutralised; `ListJobs` and log-tail security (a worker without the lease cannot write logs) against a real Redis; the CA-fingerprint join with a
+wrong and a correct fingerprint and a clean drain of the joined worker; the Rust backend's 5 live tests; the frontend type-check, build and a 21-combination responsive audit.
+Not verified: the native desktop window; macOS and Windows; behaviour with more than three workers.

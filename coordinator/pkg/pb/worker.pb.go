@@ -1955,8 +1955,11 @@ type HeartbeatRequest struct {
 	Labels          []string `protobuf:"bytes,13,rep,name=labels,proto3" json:"labels,omitempty"`                                          // "key=value" tags set by the contributor, e.g. "zone=eu"
 	Preference      int32    `protobuf:"varint,14,opt,name=preference,proto3" json:"preference,omitempty"`                                 // contributor's willingness to take work, 0-100 (default 50)
 	CachedArtifacts []string `protobuf:"bytes,15,rep,name=cached_artifacts,json=cachedArtifacts,proto3" json:"cached_artifacts,omitempty"` // SHA-256s of job artifacts already on this machine
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// Live output of the jobs this worker is running: job id -> the last few KB of stdout+stderr. The coordinator
+	// keeps it only for jobs the worker actually holds, truncated, and serves it from GetJobStatus.
+	LogTails      map[string]string `protobuf:"bytes,16,rep,name=log_tails,json=logTails,proto3" json:"log_tails,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *HeartbeatRequest) Reset() {
@@ -2090,6 +2093,13 @@ func (x *HeartbeatRequest) GetPreference() int32 {
 func (x *HeartbeatRequest) GetCachedArtifacts() []string {
 	if x != nil {
 		return x.CachedArtifacts
+	}
+	return nil
+}
+
+func (x *HeartbeatRequest) GetLogTails() map[string]string {
+	if x != nil {
+		return x.LogTails
 	}
 	return nil
 }
@@ -2555,7 +2565,7 @@ const file_worker_proto_rawDesc = "" +
 	"\x10jobs_mem_used_mb\x18\x10 \x01(\x03R\rjobsMemUsedMb\x12)\n" +
 	"\x10overload_reasons\x18\x11 \x03(\tR\x0foverloadReasons\x12&\n" +
 	"\x0fsampled_at_unix\x18\x12 \x01(\x03R\rsampledAtUnix\x12)\n" +
-	"\x11work_disk_free_mb\x18\x13 \x01(\x03R\x0eworkDiskFreeMb\"\xdc\x04\n" +
+	"\x11work_disk_free_mb\x18\x13 \x01(\x03R\x0eworkDiskFreeMb\"\xe2\x05\n" +
 	"\x10HeartbeatRequest\x121\n" +
 	"\tworker_id\x18\x01 \x01(\v2\x14.compute.v1.WorkerIDR\bworkerId\x12I\n" +
 	"\x13available_resources\x18\x02 \x01(\v2\x18.compute.v1.ResourceSpecR\x12availableResources\x124\n" +
@@ -2576,7 +2586,11 @@ const file_worker_proto_rawDesc = "" +
 	"\n" +
 	"preference\x18\x0e \x01(\x05R\n" +
 	"preference\x12)\n" +
-	"\x10cached_artifacts\x18\x0f \x03(\tR\x0fcachedArtifacts\"\x7f\n" +
+	"\x10cached_artifacts\x18\x0f \x03(\tR\x0fcachedArtifacts\x12G\n" +
+	"\tlog_tails\x18\x10 \x03(\v2*.compute.v1.HeartbeatRequest.LogTailsEntryR\blogTails\x1a;\n" +
+	"\rLogTailsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x7f\n" +
 	"\x11HeartbeatResponse\x12\x1a\n" +
 	"\baccepted\x18\x01 \x01(\bR\baccepted\x12(\n" +
 	"\x10server_time_unix\x18\x02 \x01(\x03R\x0eserverTimeUnix\x12$\n" +
@@ -2647,7 +2661,7 @@ func file_worker_proto_rawDescGZIP() []byte {
 }
 
 var file_worker_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
-var file_worker_proto_msgTypes = make([]protoimpl.MessageInfo, 28)
+var file_worker_proto_msgTypes = make([]protoimpl.MessageInfo, 29)
 var file_worker_proto_goTypes = []any{
 	(JobLifecycleStatus)(0),        // 0: compute.v1.JobLifecycleStatus
 	(WorkerLifecycleStatus)(0),     // 1: compute.v1.WorkerLifecycleStatus
@@ -2681,6 +2695,7 @@ var file_worker_proto_goTypes = []any{
 	(*SubmitResultRequest)(nil),    // 29: compute.v1.SubmitResultRequest
 	(*SubmitResultResponse)(nil),   // 30: compute.v1.SubmitResultResponse
 	nil,                            // 31: compute.v1.Job.EnvironmentEntry
+	nil,                            // 32: compute.v1.HeartbeatRequest.LogTailsEntry
 }
 var file_worker_proto_depIdxs = []int32{
 	0,  // 0: compute.v1.JobResultSchema.status:type_name -> compute.v1.JobLifecycleStatus
@@ -2711,26 +2726,27 @@ var file_worker_proto_depIdxs = []int32{
 	18, // 25: compute.v1.HeartbeatRequest.running_jobs:type_name -> compute.v1.JobID
 	12, // 26: compute.v1.HeartbeatRequest.current_load:type_name -> compute.v1.WorkerCurrentLoad
 	24, // 27: compute.v1.HeartbeatRequest.usage:type_name -> compute.v1.ResourceUsage
-	17, // 28: compute.v1.RequestJobRequest.worker_id:type_name -> compute.v1.WorkerID
-	20, // 29: compute.v1.RequestJobResponse.job:type_name -> compute.v1.Job
-	10, // 30: compute.v1.RequestJobResponse.job_schema:type_name -> compute.v1.JobSchema
-	16, // 31: compute.v1.RequestJobResponse.assignment:type_name -> compute.v1.AssignmentSchema
-	17, // 32: compute.v1.SubmitResultRequest.worker_id:type_name -> compute.v1.WorkerID
-	21, // 33: compute.v1.SubmitResultRequest.result:type_name -> compute.v1.Result
-	7,  // 34: compute.v1.SubmitResultRequest.result_schema:type_name -> compute.v1.JobResultSchema
-	22, // 35: compute.v1.WorkerService.RegisterWorker:input_type -> compute.v1.RegisterWorkerRequest
-	25, // 36: compute.v1.WorkerService.Heartbeat:input_type -> compute.v1.HeartbeatRequest
-	27, // 37: compute.v1.WorkerService.RequestJob:input_type -> compute.v1.RequestJobRequest
-	29, // 38: compute.v1.WorkerService.SubmitResult:input_type -> compute.v1.SubmitResultRequest
-	23, // 39: compute.v1.WorkerService.RegisterWorker:output_type -> compute.v1.RegisterWorkerResponse
-	26, // 40: compute.v1.WorkerService.Heartbeat:output_type -> compute.v1.HeartbeatResponse
-	28, // 41: compute.v1.WorkerService.RequestJob:output_type -> compute.v1.RequestJobResponse
-	30, // 42: compute.v1.WorkerService.SubmitResult:output_type -> compute.v1.SubmitResultResponse
-	39, // [39:43] is the sub-list for method output_type
-	35, // [35:39] is the sub-list for method input_type
-	35, // [35:35] is the sub-list for extension type_name
-	35, // [35:35] is the sub-list for extension extendee
-	0,  // [0:35] is the sub-list for field type_name
+	32, // 28: compute.v1.HeartbeatRequest.log_tails:type_name -> compute.v1.HeartbeatRequest.LogTailsEntry
+	17, // 29: compute.v1.RequestJobRequest.worker_id:type_name -> compute.v1.WorkerID
+	20, // 30: compute.v1.RequestJobResponse.job:type_name -> compute.v1.Job
+	10, // 31: compute.v1.RequestJobResponse.job_schema:type_name -> compute.v1.JobSchema
+	16, // 32: compute.v1.RequestJobResponse.assignment:type_name -> compute.v1.AssignmentSchema
+	17, // 33: compute.v1.SubmitResultRequest.worker_id:type_name -> compute.v1.WorkerID
+	21, // 34: compute.v1.SubmitResultRequest.result:type_name -> compute.v1.Result
+	7,  // 35: compute.v1.SubmitResultRequest.result_schema:type_name -> compute.v1.JobResultSchema
+	22, // 36: compute.v1.WorkerService.RegisterWorker:input_type -> compute.v1.RegisterWorkerRequest
+	25, // 37: compute.v1.WorkerService.Heartbeat:input_type -> compute.v1.HeartbeatRequest
+	27, // 38: compute.v1.WorkerService.RequestJob:input_type -> compute.v1.RequestJobRequest
+	29, // 39: compute.v1.WorkerService.SubmitResult:input_type -> compute.v1.SubmitResultRequest
+	23, // 40: compute.v1.WorkerService.RegisterWorker:output_type -> compute.v1.RegisterWorkerResponse
+	26, // 41: compute.v1.WorkerService.Heartbeat:output_type -> compute.v1.HeartbeatResponse
+	28, // 42: compute.v1.WorkerService.RequestJob:output_type -> compute.v1.RequestJobResponse
+	30, // 43: compute.v1.WorkerService.SubmitResult:output_type -> compute.v1.SubmitResultResponse
+	40, // [40:44] is the sub-list for method output_type
+	36, // [36:40] is the sub-list for method input_type
+	36, // [36:36] is the sub-list for extension type_name
+	36, // [36:36] is the sub-list for extension extendee
+	0,  // [0:36] is the sub-list for field type_name
 }
 
 func init() { file_worker_proto_init() }
@@ -2744,7 +2760,7 @@ func file_worker_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_worker_proto_rawDesc), len(file_worker_proto_rawDesc)),
 			NumEnums:      4,
-			NumMessages:   28,
+			NumMessages:   29,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

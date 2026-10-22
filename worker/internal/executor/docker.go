@@ -476,6 +476,26 @@ func (e *DockerExecutor) runDockerCommand(ctx context.Context, args ...string) (
 	return stdout.String(), stderr.String(), err
 }
 
+// maxLogTailBytes is how much recent output LogTail returns.
+const maxLogTailBytes = 4096
+
+// LogTail returns the most recent output (stdout then stderr) of the running job's container, for live
+// display. It is best effort and never blocks the heartbeat: a container that has not started yet, or that
+// has just exited, simply yields "". The text is untrusted job output; consumers sanitise it.
+func (e *DockerExecutor) LogTail(ctx context.Context, jobID string) string {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	out, errOut, err := e.runDockerCommand(ctx, "logs", "--tail", "60", containerName(e.workerID, jobID))
+	if err != nil {
+		return ""
+	}
+	tail := out + errOut
+	if len(tail) > maxLogTailBytes {
+		tail = tail[len(tail)-maxLogTailBytes:]
+	}
+	return strings.ToValidUTF8(tail, "")
+}
+
 // stopContainer gives the container StopGrace to exit after SIGTERM, then SIGKILLs it.
 func (e *DockerExecutor) stopContainer(name string) {
 	e.sbMu.RLock()

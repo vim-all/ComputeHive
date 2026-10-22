@@ -194,3 +194,27 @@ func WithMetrics(next, metricsHandler http.Handler, authz Authz) http.Handler {
 		metricsHandler.ServeHTTP(w, r)
 	})
 }
+
+// WithPublicFile serves one fixed file (read fresh on every request) at urlPath in front of next. It is for
+// public material only, such as the cluster's CA certificate: a new worker fetches it and verifies it against a
+// fingerprint it was given out of band, so no secret is exposed and no authentication is needed. Requests are
+// still rate-limited by source address.
+func WithPublicFile(next http.Handler, urlPath, filePath, contentType string, authz Authz) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != urlPath || r.Method != http.MethodGet {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if authz != nil && !authz.AllowAnon(r.RemoteAddr) {
+			http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
+			return
+		}
+		b, err := os.ReadFile(filePath)
+		if err != nil {
+			http.Error(w, "not available", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", contentType)
+		_, _ = w.Write(b)
+	})
+}

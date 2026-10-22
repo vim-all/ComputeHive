@@ -2,12 +2,16 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
+	"encoding/pem"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -175,7 +179,7 @@ func cmdAdmin(ctx context.Context, g globals, args []string, out, errOut io.Writ
 		}
 		fmt.Fprintln(errOut, "Enrollment token (shown once; it expires "+time.Unix(resp.GetExpiresAtUnix(), 0).UTC().Format(time.RFC3339)+", "+fmt.Sprint(resp.GetMaxUses())+" use(s)):")
 		fmt.Fprintln(out, resp.GetToken())
-		fmt.Fprintln(errOut, "Give it to the contributor:  computehive worker join --coordinator <host>:50051 --ca ca.crt --token "+resp.GetToken())
+		fmt.Fprint(errOut, joinInstructions(g, resp.GetToken()))
 		return nil
 	case "revoke":
 		if len(args) != 2 {
@@ -192,4 +196,49 @@ func cmdAdmin(ctx context.Context, g globals, args []string, out, errOut io.Writ
 		fmt.Fprint(errOut, adminUsage)
 		return fmt.Errorf("unknown admin subcommand %q", args[0])
 	}
+}
+
+// caFingerprint is the SHA-256 of the (first) certificate in a PEM file, as lowercase hex. A contributor
+// compares it with the CA they download, so the one-line join does not blindly trust whatever answers.
+func caFingerprint(pemPath string) (string, error) {
+	raw, err := os.ReadFile(pemPath)
+	if err != nil {
+		return "", err
+	}
+	for {
+		var block *pem.Block
+		block, raw = pem.Decode(raw)
+		if block == nil {
+			return "", errors.New("no certificate found in " + pemPath)
+		}
+		if block.Type == "CERTIFICATE" {
+			sum := sha256.Sum256(block.Bytes)
+			return hex.EncodeToString(sum[:]), nil
+		}
+	}
+}
+
+// joinInstructions is what `admin enroll` prints for the contributor: a command that fetches the cluster CA,
+// refuses to continue unless its fingerprint matches, then enrols with the single-use token.
+func joinInstructions(g globals, token string) string {
+	host := "<coordinator-host>"
+	if h, _, err := net.SplitHostPort(g.coordinator); err == nil && h != "" && h != "localhost" && h != "127.0.0.1" && h != "::1" {
+		host = h
+	}
+	fp := "<ca-sha256>"
+	if ca := g.caFile(); ca != "" {
+		if v, err := caFingerprint(ca); err == nil {
+			fp = v
+		}
+	}
+	var b strings.Builder
+	b.WriteString("\nTo add a machine, on that machine (it needs Docker):\n\n")
+	fmt.Fprintf(&b, "  git clone https://github.com/vim-all/ComputeHive && cd ComputeHive\n")
+	fmt.Fprintf(&b, "  scripts/join.sh --coordinator %s:50051 --token %s --ca-sha256 %s\n\n", host, token, fp)
+	b.WriteString("The script downloads the cluster CA from the coordinator and stops unless its SHA-256 equals the\n")
+	b.WriteString("fingerprint above, so share the fingerprint over a channel you trust. The token works once and expires.\n")
+	if host == "<coordinator-host>" {
+		b.WriteString("Replace <coordinator-host> with an address the other machine can reach.\n")
+	}
+	return b.String()
 }

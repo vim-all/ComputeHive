@@ -275,7 +275,7 @@ for _, id in ipairs(ids) do
       local timeout = tonumber(j[6]) * 1000
       if timeout <= 0 then timeout = default_timeout end
       redis.call('ZREM', 'ch:pending', id)
-      redis.call('HSET', jk, 'attempt', attempt, 'worker', w, 'token', token, 'assigned_ms', now)
+      redis.call('HSET', jk, 'attempt', attempt, 'worker', w, 'last_worker', w, 'token', token, 'assigned_ms', now)
       setstate(jk, 'ASSIGNED')
       redis.call('ZADD', 'ch:leases', now + timeout + grace, id)
       redis.call('SADD', wrun, id)

@@ -308,6 +308,14 @@ func (a *Agent) publishHeartbeat(ctx context.Context) {
 	}
 	if currentJob != "" {
 		heartbeat.RunningJobs = []string{currentJob}
+		// Live output for the job in progress, if the executor can provide it (the real Docker one can).
+		if lt, ok := a.executor.(interface {
+			LogTail(ctx context.Context, jobID string) string
+		}); ok {
+			if tail := lt.LogTail(heartbeatCtx, currentJob); tail != "" {
+				heartbeat.LogTails = map[string]string{currentJob: tail}
+			}
+		}
 	}
 	if st := a.health.Status(); st.Metrics.At.IsZero() {
 		heartbeat.Overloaded, heartbeat.OverloadReasons = true, st.Reasons // nothing sampled yet

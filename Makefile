@@ -22,7 +22,7 @@ proto: ## regenerate Go protobuf code from shared/proto
 		--go-grpc_out=coordinator --go-grpc_opt=module=coordinator \
 		shared/proto/worker.proto shared/proto/client.proto shared/proto/admin.proto
 
-up: build ## start redis, coordinator, 2 workers, prometheus, grafana (TLS + auth on; secrets in .computehive/)
+up: build ## start redis, coordinator, 3 workers, prometheus, grafana (TLS + auth on; secrets in .computehive/)
 	chmod +x scripts/*.sh && scripts/bootstrap.sh
 	@echo
 	@echo "cluster is up:  gRPC localhost:50051   HTTP localhost:8080   Grafana http://localhost:3000   Prometheus http://localhost:9090"
@@ -51,9 +51,8 @@ lint: vet ## vet + staticcheck
 test: ## unit tests with the race detector in every module
 	@for m in $(MODULES); do echo "== test $$m"; (cd $$m && go test -race -count=1 ./...) || exit 1; done
 
-demo: build ## run examples/hello on the running cluster and print its result
-	./$(BIN)/computehive workers
-	./$(BIN)/computehive submit examples/hello --wait
+demo: build ## guided real run on the cluster: jobs, live output, kill a worker mid-job, recovery (~90s)
+	chmod +x scripts/demo.sh && scripts/demo.sh
 
 chaos: build ## fault injection: in-process suite (Redis in Docker), then SIGKILL workers in the running cluster
 	cd coordinator && go test -race -count=1 -timeout 20m -v ./internal/chaos/

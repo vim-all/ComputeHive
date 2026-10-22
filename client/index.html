@@ -3,252 +3,233 @@
 
 <head>
   <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>ComputeHive</title>
   <link rel="stylesheet" href="/src/styles.css" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>ComputeHive Desktop</title>
   <script type="module" src="/src/main.ts" defer></script>
 </head>
 
 <body>
-  <div class="backdrop">
-    <div class="glow glow-one"></div>
-    <div class="glow glow-two"></div>
-    <div class="glow glow-three"></div>
-  </div>
-
-  <div class="app-shell">
-    <header class="masthead reveal">
-      <div class="brand-column">
-        <p class="eyebrow" id="mode-eyebrow">Project Image Flow</p>
-        <div class="title-orbit">
-          <h1 id="mode-heading">Compute Hive</h1>
-        </div>
-        <p class="lead" id="mode-copy">
-          Choose a project directory. ComputeHive prepares Docker when needed,
-          builds the image, compresses it, uploads the artifact, and queues
-          the run request.
-        </p>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo" aria-hidden="true"></span>
+        <h1>Compute Hive</h1>
       </div>
-
-      <div class="mode-switch" role="tablist" aria-label="Choose interface">
-        <button class="mode-chip is-active" type="button" data-mode="user" aria-selected="true">
-          Project User
-        </button>
-        <button class="mode-chip" type="button" data-mode="contributor" aria-selected="false">
-          Contributor
-        </button>
-      </div>
+      <nav class="tabs" role="tablist" aria-label="Sections">
+        <button class="tab" role="tab" type="button" data-tab="run" id="tab-run" aria-controls="panel-run" aria-selected="true">Run</button>
+        <button class="tab" role="tab" type="button" data-tab="cluster" id="tab-cluster" aria-controls="panel-cluster" aria-selected="false" tabindex="-1">Cluster</button>
+        <button class="tab" role="tab" type="button" data-tab="contributor" id="tab-contributor" aria-controls="panel-contributor" aria-selected="false" tabindex="-1">Contributor</button>
+      </nav>
+      <div id="cluster-chip" class="chip chip-idle" role="status" aria-live="polite">Connecting…</div>
     </header>
 
-    <main class="workspace">
-      <section class="panel workflow-panel is-active reveal" data-panel="user">
-        <div class="panel-header">
-          <div>
-            <p class="eyebrow">Image Builder</p>
-            <h2>Folder input, Docker setup, image creation, and run request</h2>
-          </div>
+    <div id="banner" class="banner" role="status" hidden></div>
 
-          <button id="clear-selection" class="ghost-button" type="button">
-            Clear
-          </button>
+    <main class="content">
+      <!-- ============================ RUN ============================ -->
+      <section class="tab-panel" id="panel-run" role="tabpanel" aria-labelledby="tab-run" data-panel="run">
+        <div class="grid">
+          <article class="card">
+            <header class="card-head">
+              <div>
+                <p class="eyebrow">1 · Project</p>
+                <h2>Choose what to run</h2>
+              </div>
+              <button id="clear-selection" class="btn btn-ghost" type="button">Clear</button>
+            </header>
+            <p class="muted">Pick a project folder. If it has no Dockerfile one is generated; the image is built locally and uploaded to the cluster.</p>
+            <div class="row">
+              <button id="pick-folder" class="btn btn-primary" type="button">Select project folder</button>
+              <button id="reveal-folder" class="btn btn-ghost" type="button" disabled>Open folder</button>
+            </div>
+            <p id="selected-path" class="path-pill is-empty">No folder selected yet</p>
+
+            <dl class="facts" id="image-facts" hidden>
+              <div><dt>Detected</dt><dd id="detected-stack">–</dd></div>
+              <div><dt>Image</dt><dd id="image-tag">–</dd></div>
+              <div><dt>Size</dt><dd id="image-size">–</dd></div>
+              <div><dt>Dockerfile</dt><dd id="docker-setup-source">–</dd></div>
+            </dl>
+            <details class="more" id="build-details" hidden>
+              <summary>Build notes</summary>
+              <ul id="build-notes" class="notes"></ul>
+            </details>
+          </article>
+
+          <article class="card">
+            <header class="card-head">
+              <div>
+                <p class="eyebrow">2 · Command</p>
+                <h2>What the job executes</h2>
+              </div>
+              <button id="add-command" class="btn btn-icon" type="button" aria-label="Add a command line">+</button>
+            </header>
+            <p class="muted">One shell line per row, run with <code>/bin/sh -lc</code> in the container. Leave it empty to run the image's own default command.</p>
+            <div id="command-list" class="command-list" aria-live="polite"></div>
+          </article>
+
+          <article class="card">
+            <header class="card-head">
+              <div>
+                <p class="eyebrow">3 · Resources</p>
+                <h2>What it needs</h2>
+              </div>
+            </header>
+            <div class="fields">
+              <label class="field"><span>CPU cores</span><input id="opt-cpu" type="number" min="1" max="1024" step="1" value="1" inputmode="numeric" /></label>
+              <label class="field"><span>Memory (MB)</span><input id="opt-mem" type="number" min="16" step="1" value="1024" inputmode="numeric" /></label>
+              <label class="field"><span>GPUs</span><input id="opt-gpu" type="number" min="0" max="64" step="1" value="0" inputmode="numeric" /></label>
+              <label class="field"><span>Time limit (seconds)</span><input id="opt-timeout" type="number" min="1" step="1" value="3600" inputmode="numeric" /></label>
+            </div>
+            <label class="check"><input id="opt-verify" type="checkbox" /><span>Verify the result on two different workers <small class="muted">(2× cost; the job must be deterministic)</small></span></label>
+            <details class="more">
+              <summary>Placement</summary>
+              <div class="fields">
+                <label class="field"><span>Free disk (MB)</span><input id="opt-disk" type="number" min="0" step="1" value="0" inputmode="numeric" /></label>
+                <label class="field"><span>Operating system</span>
+                  <select id="opt-os"><option value="">Any</option><option>linux</option><option>darwin</option><option>windows</option></select></label>
+                <label class="field"><span>Architecture</span>
+                  <select id="opt-arch"><option value="">Any</option><option>amd64</option><option>arm64</option></select></label>
+                <label class="field"><span>Required labels</span><input id="opt-labels" type="text" placeholder="fast-disk, rack-1" autocomplete="off" /></label>
+              </div>
+            </details>
+          </article>
         </div>
 
-        <div class="user-grid">
-          <div class="upload-region">
-            <div class="upload-dropzone" id="folder-dropzone">
-              <p class="upload-kicker">Project Directory</p>
-              <h3>Choose the project folder you want the app to Dockerize</h3>
-              <p class="support-copy">
-                ComputeHive inspects the selected project, fills in Docker
-                setup if it is missing, builds the image locally, compresses
-                the exported archive, and queues the run request.
-              </p>
-
-              <button id="pick-folder" class="primary-button" type="button">
-                Select project folder
-              </button>
-
-              <p id="selected-path" class="path-pill is-empty">
-                No folder selected yet
-              </p>
-            </div>
-
-            <div class="action-row">
-              <div class="button-group button-group-single">
-                <button id="request-run" class="primary-button" type="button" disabled>
-                  Request for run
-                </button>
-                <button id="reveal-folder" class="ghost-button" type="button" disabled>
-                  Open selected folder
-                </button>
-              </div>
-            </div>
-
-            <section class="terminal-shell" aria-label="Request log">
-              <div class="terminal-toolbar">
-                <div class="terminal-dots" aria-hidden="true">
-                  <span></span>
-                  <span></span>
-                  <span></span>
-                </div>
-                <strong class="terminal-title">Request log</strong>
-                <span id="process-log-status" class="terminal-status terminal-status-idle">
-                  Idle
-                </span>
-              </div>
-
-              <div id="process-log" class="terminal-output" aria-live="polite">
-                <p class="terminal-placeholder">
-                  Select a project folder to let ComputeHive build the Docker
-                  image and request the run.
-                </p>
-              </div>
-            </section>
+        <article class="card action-card">
+          <div class="row row-between">
+            <button id="request-run" class="btn btn-primary btn-lg" type="button" disabled>Run on the cluster</button>
+            <ol id="run-steps" class="steps" aria-label="Progress">
+              <li data-step="prepare">Build &amp; upload</li>
+              <li data-step="queued">Queued</li>
+              <li data-step="running">Running</li>
+              <li data-step="done">Done</li>
+            </ol>
           </div>
+          <p id="run-error" class="error" role="alert" hidden></p>
+        </article>
 
-          <div class="status-region">
-            <div class="status-card">
-              <div class="status-head">
-                <div>
-                  <p class="eyebrow">Request Status</p>
-                  <h3 id="bundle-summary-title">Waiting for a folder</h3>
-                </div>
-                <span id="bundle-status" class="status-pill status-idle">
-                  Idle
-                </span>
+        <article class="card" id="job-card" hidden>
+          <header class="card-head">
+            <div>
+              <p class="eyebrow">Job</p>
+              <h2><code id="job-id" class="wrap">–</code></h2>
+            </div>
+            <div class="row">
+              <span id="job-status" class="pill pill-idle">queued</span>
+              <button id="cancel-job" class="btn btn-ghost" type="button" hidden>Cancel</button>
+            </div>
+          </header>
+          <p class="muted" id="job-meta">Waiting for a worker…</p>
+
+          <details class="more" id="explain-box">
+            <summary>Why this worker?</summary>
+            <p id="explain-summary" class="muted">–</p>
+            <div class="table-wrap"><table id="explain-table" class="table"></table></div>
+          </details>
+
+          <h3>Live output</h3>
+          <pre id="job-log" class="log" tabindex="0" aria-live="off">(no output yet)</pre>
+
+          <div id="job-result" hidden>
+            <h3>Result</h3>
+            <dl class="facts" id="result-facts"></dl>
+            <div id="result-streams"></div>
+            <div id="outputs-box" hidden>
+              <h3>Output files</h3>
+              <ul id="job-outputs" class="outputs"></ul>
+              <div class="row">
+                <button id="download-outputs" class="btn btn-primary" type="button">Download results…</button>
               </div>
-
-              <p id="bundle-summary" class="support-copy bundle-summary-text">
-                Pick a project directory and let the app prepare Docker setup,
-                build the image, and queue the uploaded tar.gz artifact.
-              </p>
-
-              <div class="command-editor">
-                <div class="command-editor-head">
-                  <div>
-                    <span class="detail-label">Command list</span>
-                    <p class="support-copy bundle-summary-text">
-                      Add one shell command line per row. The worker executes
-                      the list via <code>/bin/sh -lc</code> inside the container.
-                    </p>
-                  </div>
-                  <button id="add-command" class="icon-button" type="button" aria-label="Add command">
-                    +
-                  </button>
-                </div>
-
-                <div id="command-list" class="command-list" aria-live="polite"></div>
-              </div>
-
-              <div class="metric-grid">
-                <div class="metric-block">
-                  <span class="metric-label">Detected stack</span>
-                  <strong id="detected-stack">Not detected yet</strong>
-                </div>
-                <div class="metric-block">
-                  <span class="metric-label">Image tag</span>
-                  <strong id="image-tag">Not built yet</strong>
-                </div>
-                <div class="metric-block">
-                  <span class="metric-label">Image file size</span>
-                  <strong id="image-size">0 B</strong>
-                </div>
-                <div class="metric-block">
-                  <span class="metric-label">Docker setup</span>
-                  <strong id="docker-setup-source">Auto-generate if needed</strong>
-                </div>
-              </div>
-
-              <div class="detail-stack">
-                <div class="detail-section">
-                  <span class="detail-label">Job result</span>
-                  <p id="run-result-status" class="detail-value muted">
-                    Worker output will appear here after the job is completed.
-                  </p>
-                </div>
-
-                <div class="detail-section">
-                  <span class="detail-label">Worker stdout excerpt</span>
-                  <pre id="run-result-output" class="detail-output muted">
-Waiting for job execution output.
-                    </pre>
-                </div>
-
-                <div class="detail-section">
-                  <span class="detail-label">Returned files</span>
-                  <div id="run-result-artifacts" class="detail-artifacts muted">
-                    Returned files will appear here after the job completes.
-                  </div>
-                </div>
-
-                <div class="detail-section">
-                  <span class="detail-label">Build notes</span>
-                  <ul id="build-notes" class="detail-list">
-                    <li>The app creates Docker setup files automatically when they are missing.</li>
-                    <li>Request for run first builds the Docker image in the selected project root.</li>
-                    <li>The app uploads only the tar.gz image artifact after compression.</li>
-                    <li>No container is created by this action.</li>
-                  </ul>
-                </div>
-              </div>
+              <p id="download-status" class="muted" role="status"></p>
             </div>
           </div>
-        </div>
+        </article>
+
+        <article class="card">
+          <header class="card-head"><div><p class="eyebrow">Activity</p><h2>What the app is doing</h2></div></header>
+          <ol id="process-log" class="activity" aria-live="polite"><li class="muted">Nothing yet.</li></ol>
+        </article>
       </section>
 
-      <section class="panel workflow-panel reveal" data-panel="contributor" hidden>
-        <div class="panel-header">
-          <div>
-            <p class="eyebrow">Contributor Dashboard</p>
-            <h2>Local worker sharing</h2>
-          </div>
-        </div>
+      <!-- =========================== CLUSTER =========================== -->
+      <section class="tab-panel" id="panel-cluster" role="tabpanel" aria-labelledby="tab-cluster" data-panel="cluster" hidden>
+        <div id="cluster-summary" class="stat-row"></div>
+        <div id="cluster-problem" class="error" role="alert" hidden></div>
+        <h2 class="section-title">Workers</h2>
+        <div id="worker-grid" class="grid grid-workers"></div>
+        <h2 class="section-title">Recent jobs</h2>
+        <article class="card">
+          <div class="table-wrap"><table id="jobs-table" class="table"></table></div>
+        </article>
+        <p id="cluster-meta" class="muted small"></p>
+      </section>
 
-        <div class="contributor-grid">
-          <aside class="contributor-aside">
-            <div class="future-notes contributor-profile">
-              <div class="panel-header contributor-dashboard-head">
-                <div>
-                  <p class="eyebrow">Worker Runtime</p>
-                  <h3>Share this machine</h3>
-                </div>
-
-                <button id="contribute-button" class="primary-button" type="button">
-                  Start sharing
-                </button>
+      <!-- ========================= CONTRIBUTOR ========================= -->
+      <section class="tab-panel" id="panel-contributor" role="tabpanel" aria-labelledby="tab-contributor" data-panel="contributor" hidden>
+        <div class="grid">
+          <article class="card">
+            <header class="card-head">
+              <div>
+                <p class="eyebrow">This machine</p>
+                <h2>Share your computer</h2>
               </div>
-
-              <p id="contributor-setup-status" class="support-copy contributor-setup-status">
-                Start sharing to run the local worker process.
-              </p>
-
-              <div class="note-row">
-                <span class="note-label">Status</span>
-                <p id="profile-worker-status">Stopped</p>
-              </div>
-              <div class="note-row">
-                <span class="note-label">Process</span>
-                <p id="profile-worker-resources">Worker PID: not running</p>
-              </div>
-              <div class="note-row">
-                <span class="note-label">Job state</span>
-                <p id="profile-worker-load">Job state: idle</p>
-              </div>
-              <div class="note-row">
-                <span class="note-label">Current job</span>
-                <p id="profile-worker-capabilities">Current job: none</p>
-              </div>
-              <div class="note-row">
-                <span class="note-label">Last job</span>
-                <p id="profile-worker-heartbeat">Last job: none</p>
-              </div>
-              <div class="note-row">
-                <span class="note-label">Details</span>
-                <p id="profile-worker-stats">No sharing activity yet.</p>
-              </div>
+              <span id="contrib-state" class="pill pill-idle">stopped</span>
+            </header>
+            <p class="muted">Runs a worker here. Jobs run in locked-down containers with no network by default, and you stay in control: pause, set limits, or stop at any time.</p>
+            <div class="row">
+              <button id="contribute-button" class="btn btn-primary" type="button">Start sharing</button>
             </div>
-          </aside>
+            <details class="more">
+              <summary>First time on this cluster?</summary>
+              <label class="field"><span>Enrollment token <small class="muted">(optional if the API token is available)</small></span>
+                <input id="enroll-token" type="password" autocomplete="off" spellcheck="false" placeholder="paste from `computehive admin enroll`" /></label>
+            </details>
+            <p id="contrib-message" class="muted" role="status"></p>
+            <p id="contrib-error" class="error" role="alert" hidden></p>
+          </article>
+
+          <article class="card" id="contrib-live-card">
+            <header class="card-head"><div><p class="eyebrow">Right now</p><h2>Your machine</h2></div></header>
+            <div id="contrib-metrics" class="meters"></div>
+            <dl class="facts" id="contrib-facts"></dl>
+          </article>
         </div>
+
+        <article class="card">
+          <header class="card-head">
+            <div><p class="eyebrow">Your rules</p><h2>Controls</h2></div>
+            <div class="row">
+              <button id="contrib-pause" class="btn btn-ghost" type="button">Pause</button>
+              <button id="contrib-pause-now" class="btn btn-ghost" type="button" title="Hand the running job back to the cluster immediately">Pause now</button>
+              <button id="contrib-resume" class="btn btn-ghost" type="button">Resume</button>
+            </div>
+          </header>
+          <p id="controls-note" class="muted">Start sharing to change these.</p>
+          <form id="policy-form" class="policy" autocomplete="off">
+            <div class="fields">
+              <label class="field"><span>CPU cores to donate <output id="out-cpus">all</output></span>
+                <input id="pol-cpus" type="range" min="0" max="16" step="1" value="0" /></label>
+              <label class="field"><span>Memory to donate <output id="out-mem">all</output></span>
+                <input id="pol-mem" type="range" min="0" max="16384" step="256" value="0" /></label>
+              <label class="field"><span>Disk per job (MB)</span>
+                <input id="pol-disk" type="number" min="16" step="1" value="256" inputmode="numeric" /></label>
+              <label class="field"><span>Idle threshold <output id="out-idle">25%</output></span>
+                <input id="pol-idle-cpu" type="range" min="5" max="90" step="5" value="25" /></label>
+            </div>
+            <label class="check"><input id="pol-idle" type="checkbox" /><span>Only work while my computer is idle</span></label>
+            <label class="field"><span>Only work during these hours <small class="muted">HH:MM-HH:MM, local time, may span midnight; empty = always</small></span>
+              <input id="pol-schedule" type="text" placeholder="22:00-07:00" pattern="([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d|" autocomplete="off" /></label>
+            <label class="check"><input id="pol-net" type="checkbox" /><span>Allow jobs to reach the internet <small class="muted">(only the hosts listed below; off by default)</small></span></label>
+            <label class="field"><span>Allowed hosts <small class="muted">one per line, e.g. pypi.org or *.example.com</small></span>
+              <textarea id="pol-hosts" rows="3" spellcheck="false" placeholder="pypi.org"></textarea></label>
+            <div class="row">
+              <button id="pol-apply" class="btn btn-primary" type="submit">Apply</button>
+              <span id="pol-status" class="muted" role="status"></span>
+            </div>
+          </form>
+        </article>
       </section>
     </main>
   </div>

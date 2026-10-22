@@ -100,6 +100,19 @@ services:
       <<: *worker-env
       WORKER_ID: worker-2
 
+  worker-3:
+    <<: *worker
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Same path inside and outside: job output dirs are bind-mounted by the host daemon.
+      - ${COMPUTEHIVE_WORK_DIR:-/tmp/computehive-work}:${COMPUTEHIVE_WORK_DIR:-/tmp/computehive-work}
+      - ./.computehive/ca.crt:/run/computehive/ca.crt:ro
+      - ./.computehive/enroll.token:/run/computehive/enroll.token:ro
+      - worker-3-state:/state
+    environment:
+      <<: *worker-env
+      WORKER_ID: worker-3
+
   # Demo of the resource-safety rule (scripts/pressure-cluster.sh): a worker whose RAM limit is
   # 1%, i.e. permanently overloaded. It must never be assigned a job. Not started by default.
   worker-hot:
@@ -151,4 +164,5 @@ volumes:
   redis-data:
   worker-1-state:
   worker-2-state:
+  worker-3-state:
   worker-hot-state:

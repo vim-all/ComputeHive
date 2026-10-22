@@ -1,122 +1,167 @@
 # ComputeHive
 
-ComputeHive is a self-hosted distributed task runner. You give it a directory with a
-`Dockerfile`; it builds the image, ships it to a worker, runs it in a container with
-`--network none`, and hands you the result.
+ComputeHive is a self-hosted distributed task runner. Give it a directory; it builds a container image, picks the best
+available machine, runs the job in a locked-down sandbox, and hands you the result. Machines can be your own servers or
+volunteers' laptops, and the system is built so that **a worker dying never loses a job**, **a job never runs its result
+twice**, and **a contributor's machine is never pushed past 90% of its RAM, CPU or disk**.
 
-> **Status: under active hardening.** The end-to-end flow below works and is tested.
-> Scheduler guarantees (exactly-once assignment, requeue timing, zero loss), resource
-> limits, sandboxing and auth are being built phase by phase; see
-> [`docs/AUDIT.md`](docs/AUDIT.md) for what is and isn't backed by code today.
+```bash
+make up                                  # coordinator + Redis + 3 workers + Prometheus + Grafana, TLS and auth on
+./bin/computehive submit examples/hello --wait
+```
 
-## Quickstart (about 5 minutes)
+> **Status.** Everything described here is implemented and has a test or a reproducible script behind it; what is *not*
+> verified is listed plainly under [Known limitations](#known-limitations). The history of what was wrong and what changed
+> is in [docs/AUDIT.md](docs/AUDIT.md), and the reasoning behind each choice in [docs/decisions.md](docs/decisions.md).
 
-Prerequisites: Docker (with Compose v2), Go 1.25+, `make`.
+## What it guarantees, and how that is tested
+
+| Guarantee | Mechanism | Evidence |
+|---|---|---|
+| A job is assigned to exactly one worker | one atomic Lua script moves it from pending to leased | `TestConcurrentClaimNeverDoubleAssigns` |
+| FIFO order, preserved on retry | pending set scored by the job's original sequence | `TestRequeueKeepsFIFOPositionAndCountsAttempt` |
+| A dead worker's jobs are requeued in under 15 s | 2 s heartbeats, dead after 6 s, reaper every 1 s | `TestWorkerKilledMidJobIsRequeuedUnder15s...`, `scripts/chaos-cluster.sh` |
+| A late result from a presumed-dead worker cannot corrupt anything | per-attempt lease tokens; stale and duplicate results are discarded | `TestPartitionedWorkerNeverCommitsOverRequeuedJob` |
+| No job lost, none committed twice | all state in Redis (AOF), a stateless coordinator, a server-side `commits` audit counter | `TestThousandJobsWithRandomWorkerKills`, `TestCoordinatorCrashAndRestartLosesNothing`, `TestRedisRestartKeepsState` |
+| A worker never takes work above 90% RAM/CPU/disk | enforced on the worker **and** independently in the coordinator | `make pressure`, `TestWorkerStopsRequestingJobsAtThresholdAndResumesAfterHysteresis` |
+| Hostile jobs are contained | non-root, no capabilities, read-only rootfs, limits, argument audit | `make hostile`, `examples/hostile` |
+
+"Exactly once" means **committed** exactly once: a worker killed mid-job means the job body may run again elsewhere, so jobs
+should be idempotent or write only to their output directory. Run the fault-injection suite yourself with `make chaos`.
+
+## Architecture at a glance
+
+```mermaid
+flowchart LR
+    subgraph You
+        CLI["computehive CLI"]
+        GUI["Desktop app<br/>(Tauri)"]
+    end
+    subgraph Cluster host
+        CO["Coordinator<br/>scheduler + gRPC/HTTPS"]
+        R[("Redis<br/>atomic Lua queue")]
+        PR["Prometheus"] --> GR["Grafana"]
+    end
+    subgraph Workers
+        W1["Worker A"] --> D1["Docker sandbox"]
+        W2["Worker B<br/>(a volunteer's laptop)"] --> D2["Docker sandbox"]
+    end
+    CLI -- "submit / status / logs / explain" --> CO
+    GUI --> CO
+    CO <--> R
+    W1 -- "heartbeat, pull a job, report" --> CO
+    W2 --> CO
+    PR -. "/metrics" .-> CO
+```
+
+Workers *pull* work over an outbound connection, so a laptop behind NAT can contribute. Every state change is one atomic Redis
+script. The full design (components, job lifecycle, Redis data model, failure detection, security) is in
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+## Quickstart
+
+Prerequisites: Docker with Compose v2, Go 1.25+, `make`.
 
 ```bash
 git clone <this repo> && cd ComputeHive
-make up        # Redis (AOF) + coordinator + 2 workers + Prometheus + Grafana
-make demo      # builds the CLI, submits examples/hello, prints its output
+make up      # builds the images on the first run, generates TLS certificates and tokens in .computehive/
+make demo    # a guided real run: jobs, live output, kill a worker mid-job, watch the cluster recover (~80 s)
 ```
 
-Expected tail of `make demo`:
+The first run is dominated by Docker image builds; later runs take seconds.
 
-```text
-submitted job <uuid>
-status:    succeeded
-exit code: 0
---- stdout (excerpt) ---
-hello from <container id> at <timestamp>
-```
+`make demo` prints what it measured, for example: six jobs spread two per worker; live output streamed while a job runs; and,
+after a `kill -9` of the worker running a 30 s job, the job re-assigned to another worker and finished on attempt 2 of 3.
 
 Then explore:
 
 ```bash
-./bin/computehive workers                       # registered workers + liveness
-./bin/computehive submit examples/hello --wait  # your own job: any dir with a Dockerfile
-./bin/computehive status <job-id>
-./bin/computehive result <job-id> --wait
-make down                                       # stop (data volumes are kept)
+./bin/computehive workers                          # workers, state, RAM/CPU/disk, reliability
+./bin/computehive submit examples/hello --wait     # your own job: any directory with a Dockerfile
+./bin/computehive jobs                             # recent jobs, newest first
+./bin/computehive logs <job-id> --follow           # watch a running job's output
+./bin/computehive explain <job-id>                 # why it went to that worker (scores per worker)
+make down                                          # stop (data volumes are kept)
 ```
 
 | Endpoint | URL |
 |---|---|
-| Coordinator gRPC | `localhost:50051` |
-| Coordinator HTTP (artifacts, `/healthz`, `/readyz`) | `http://localhost:8080` |
-| Grafana (admin / admin) | `http://localhost:3000` |
-| Prometheus | `http://localhost:9090` |
+| Coordinator gRPC | `localhost:50051` (TLS, API token) |
+| Coordinator HTTPS (artifacts, `/healthz`, `/readyz`, `/metrics`) | `https://localhost:8080` |
+| Grafana, with a provisioned cluster dashboard (admin / admin) | http://localhost:3000 |
+| Prometheus | http://localhost:9090 |
 
-Redis is published on an ephemeral loopback port (`docker compose port redis 6379`)
-so it never clashes with a Redis you already run.
+The CLI finds the API token and CA in `.computehive/` automatically. Redis is published on an ephemeral loopback port
+(`docker compose port redis 6379`) so it never clashes with one you already run.
 
-## Documentation
+## Running your own jobs
 
-| Document | What it covers |
+`computehive submit <dir>` builds the directory's Dockerfile, saves the image, uploads it (addressed by its SHA-256), and submits
+the job. Requirements can come from flags, from `computehive.yaml` in the directory (flat `key: value`), or from
+`LABEL computehive.<key>=...` lines in the Dockerfile; flags win.
+
+```bash
+computehive submit examples/hello --cpu 2 --mem 1024 --timeout 600 --wait
+computehive submit myjob --os linux --arch amd64 --label fast-disk --min-disk 5000
+computehive submit myjob --verify                       # run on two different workers; accept only if the outputs match
+computehive submit myjob --network-host pypi.org        # only workers whose owner allows it will run it
+computehive result <job-id> --download ./results        # output files, each verified against its SHA-256
+```
+
+`--wait` makes the exit code meaningful (non-zero unless the job succeeded), so `submit --wait && next-step` works. An unchanged
+directory is not rebuilt, so repeat submissions reuse the same artifact and prefer a worker that already holds it (`--rebuild` to
+force). Details: [docs/SCHEDULING.md](docs/SCHEDULING.md).
+
+### Examples
+
+| Example | Shows |
 |---|---|
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System design: components, job lifecycle, Redis data model, atomicity, failure recovery, interfaces |
-| [docs/SCHEDULING.md](docs/SCHEDULING.md) | How a job picks its worker: filters, scoring, patience, locality, `explain` |
-| [docs/OPERATIONS.md](docs/OPERATIONS.md) | Metrics catalogue, alerts, logs and correlation ids, graceful shutdown, runbook |
-| [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) | Assets, attackers, mitigations with the test that proves each, residual risks |
-| [docs/decisions.md](docs/decisions.md) | Every important decision: options, choice, tradeoff, evidence |
-| [docs/AUDIT.md](docs/AUDIT.md) | What was wrong at the start and what changed |
-| [docs/GVISOR.md](docs/GVISOR.md) | Optional gVisor isolation (implemented, not verified here) |
+| `examples/hello` | the minimal job |
+| `examples/sleep` | a long job to watch, or to kill a worker under (`SLEEP_SECONDS`) |
+| `examples/deterministic` | a job whose output is identical everywhere, for `--verify` |
+| `examples/cpu-heavy` | two CPUs burned for 15 s, capped at the requested 2 |
+| `examples/memory-heavy` | fits its limit; with `--mem 128 --env ALLOCATE_MB=600` the kernel OOM-kills it (exit 137) and the host is untouched |
+| `examples/failing` | exits 3: a job's own failure is terminal and is not retried |
+| `examples/hostile` | tries ten attacks from inside the sandbox and reports whether each was blocked |
 
-## Monorepo layout
+## Desktop app
 
-```text
-ComputeHive/
-├── cli/             # `computehive` CLI (Go) - same gRPC API as the desktop app
-├── client/          # Tauri desktop app (Vite + TypeScript + Rust)
-├── coordinator/     # gRPC + HTTP coordinator (Go)
-├── worker/          # worker runtime (Go)
-├── shared/proto/    # protobuf contracts (source of truth)
-├── deploy/          # Prometheus / Grafana provisioning
-├── examples/        # example jobs
-├── docs/            # AUDIT.md (and, as phases land, THREAT_MODEL / BENCHMARKS)
-├── docker-compose.yml
-└── Makefile
-```
-
-## How it works
-
-- **Coordinator** (`coordinator/`): `WorkerService` + `ClientService` over gRPC (`:50051`),
-  state in Redis, plus an HTTP server (`:8080`) with a content-addressed artifact store
-  (`PUT/GET /artifacts/<sha256>`) and `/healthz` / `/readyz`.
-- **Worker** (`worker/`): registers, heartbeats, pulls a job with `RequestJob`, downloads the
-  artifact and verifies its SHA-256, `docker load`s it, runs it with `--network none`, and
-  submits the result.
-- **CLI** (`cli/`): `submit` (build, `docker save`, hash, upload, `SubmitJob`), `status`, `result`,
-  `logs` (captured stdout/stderr excerpts), `workers`, and `worker join`.
-- **Desktop client** (`client/`): Tauri UI for the same flow, with a contributor mode that
-  starts a local worker.
-
-Artifacts are referenced as `computehive-artifact://<sha256>`; each worker resolves that
-against its own coordinator HTTP address, so the same job works inside Compose, on a LAN,
-or behind NAT. `https://` artifact URLs (S3/R2, as used by the desktop client) still work.
-
-## Joining a worker from another machine
-
-On the coordinator host, mint a one-hour, single-use enrollment token (the secrets live in `.computehive/`):
+A Tauri app with three tabs: **Run** (pick a folder, set resources, run, follow live output, see why a worker was chosen, download
+verified results), **Cluster** (live view of workers with their RAM/CPU/disk against the 90% limit, and recent jobs) and
+**Contributor** (share this machine: start/stop, pause, CPU/RAM/disk limits, idle-only, schedule, network allow-list). It talks to the
+same secured API as the CLI.
 
 ```bash
-make enroll                      # prints a token like chet_...
-cp .computehive/ca.crt /path/to/the/contributor/   # the cluster CA; it is public
+make up                                # the app reads .computehive/ for the token and CA
+cd client && npm install && npm run tauri dev
 ```
 
-On the contributor's machine:
+The window scrolls and reflows from phone width up (audited at 340 to 1920 px). Rust unit tests: `cd client/src-tauri && cargo test`;
+tests against a running cluster: `cargo test -- --ignored --test-threads=1`. The GUI itself is not exercised headlessly in CI.
+See [client/README.md](client/README.md).
+
+## Adding machines
+
+On the coordinator, mint a single-use token. It prints a complete command, including the CA's SHA-256 fingerprint:
 
 ```bash
-make build
-./bin/computehive worker join --coordinator <coordinator-host>:50051 --ca ca.crt --token chet_...
+./bin/computehive admin enroll --ttl 1h
 ```
 
-`worker join` checks Docker, coordinator reachability and the worker binary, enrols the worker once (it then keeps its own
-revocable credential in `~/.local/state/computehive/<id>/credential`), and runs it in the foreground. Revoke a worker with
+On the new machine (needs Docker):
+
+```bash
+git clone <this repo> && cd ComputeHive
+scripts/join.sh --coordinator <host>:50051 --token chet_... --ca-sha256 <fingerprint>
+```
+
+The script downloads the cluster CA from the coordinator and **refuses to continue unless its fingerprint matches**, so a man in the
+middle cannot substitute their own. The worker then enrols once and keeps its own revocable credential. Revoke a worker with
 `computehive admin revoke <worker-id>`.
 
-## Contributor controls
+### Contributor controls
 
-The person who owns the machine decides what runs on it. These talk to the worker over a private Unix socket:
+The person who owns the machine decides what runs on it. These talk to the worker over a private Unix socket (mode 0600):
 
 ```bash
 computehive worker status                                  # state, why it is not taking jobs, resources, policy
@@ -128,139 +173,140 @@ computehive worker policy set max_cpus=2 max_memory_mb=4096 schedule=22:00-07:00
 computehive worker policy set allow_network=true allowed_hosts=pypi.org     # off by default
 ```
 
-The policy is enforced on the worker itself, so the cluster cannot override it.
+The policy is enforced on the worker itself, so the cluster cannot override it. Ctrl-C or SIGTERM *drains*: the worker finishes its
+current job (up to `DRAIN_TIMEOUT`, 30 s) and exits; a second signal stops it at once.
+
+## How a job picks its worker
+
+A worker is handed a job only if it is the best idle fit for it, or the job has waited past a patience window (so nothing starves).
+The coordinator first rejects workers that are stale, overloaded, lack the CPU/RAM/GPU/disk/OS/arch/labels/isolation/network permission,
+have no memory headroom, are unreliable, or whose user is at their limit; then it ranks the rest by free RAM, free CPU, load,
+reliability, artifact locality, fit, uptime and the contributor's preference. The atomic Lua claim re-checks every safety rule, so the
+scheduler can only improve a placement, never break a rule. `computehive explain <job-id>` shows every worker's verdict and score.
+Full description and limits: [docs/SCHEDULING.md](docs/SCHEDULING.md).
+
+## Resource safety (the 90% rule)
+
+Workers sample RAM, CPU, load, disk (work directory and Docker root), swap, temperature, Docker health, GPU and network egress every second.
+
+- **Enter** "overloaded" the moment RAM, CPU or disk reaches **90%** (`RAM_LIMIT_PERCENT`, `CPU_LIMIT_PERCENT`, `DISK_LIMIT_PERCENT`).
+- **Leave** only after every metric has stayed below **80%** for **10 s**; readings in between change nothing (no flapping).
+- **Enforced twice:** the worker stops asking for jobs; independently the coordinator derives overload from the numbers and refuses
+  overloaded, stale or metric-less workers, so a misbehaving worker cannot opt out.
+- **Headroom:** a job is not placed if its declared memory (default 512 MB) would push the host over the limit.
+- **If the host stays critical for 15 s while a job runs**, the job is stopped gracefully and requeued elsewhere without counting as a failure.
+- **Every job container** gets `--memory` = `--memory-swap` (no swap), `--cpus`, `--pids-limit` and `--network none`, with defaults if it declares nothing.
+
+Prove it: `make pressure`, and `cd worker && go test ./internal/monitor/ -run RealContainer -v`.
 
 ## Security model (summary)
 
-Jobs are treated as untrusted and possibly malicious; see [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) for the full model,
-including residual risks.
+Jobs are treated as untrusted and possibly malicious. The full model, with the test behind each mitigation and the residual risks, is in
+[docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
 
-- **Sandbox per job:** non-root, all capabilities dropped, `no-new-privileges`, read-only root filesystem, default seccomp
-  profile, no network, no Docker socket, only its own work directory mounted, memory/swap/CPU/PID/file limits, wall-clock timeout
-  with forced kill, disk quota and capped logs. A final audit refuses to start any container whose flags weaken this.
-- **No surprises on your Docker:** images never pulled, registry logins never used, uploaded image archives may not retag your
-  images, and everything a job created is removed afterwards.
-- **Optional network:** only when the job asks, your policy allows the host, and traffic goes through a filtering proxy that
-  refuses private, loopback and cloud-metadata addresses.
-- **gVisor** (`ISOLATION=auto|runc|gvisor`) when available: [`docs/GVISOR.md`](docs/GVISOR.md) (implemented, not verified here).
-- **Trust:** TLS 1.3 (mTLS optional), expiring enrollment tokens, hashed revocable per-worker credentials, an API token for
-  submitters, per-identity rate limits, validated inputs. `AUTH_DISABLED` / `ALLOW_INSECURE` exist for development and log loudly.
-- **Result integrity:** `computehive submit DIR --verify` runs the job on two different workers and accepts it only if their
-  outputs match. Costs 2x, needs a deterministic job, and detects disagreement without knowing who lied.
-- **Prove it yourself:** `make hostile` runs the hostile-job suite (needs Docker).
+- **Sandbox per job:** non-root, all capabilities dropped, `no-new-privileges`, read-only root filesystem, default seccomp, no network,
+  no Docker socket, only its own work directory, memory/swap/CPU/PID/file limits, wall-clock timeout with forced kill, disk quota, capped logs.
+  A final audit refuses to start any container whose flags weaken this.
+- **No surprises on your Docker:** images are never pulled, registry logins never used, an uploaded image may not retag your images, and
+  everything a job created is removed afterwards.
+- **Optional network:** only when the job asks and your policy allows the host, through a filtering proxy that refuses private, loopback
+  and cloud-metadata addresses.
+- **Trust:** TLS 1.3 (mTLS optional), expiring single-use enrollment tokens, hashed revocable per-worker credentials, an API token for
+  submitters, per-source and per-identity rate limits, validated inputs. The coordinator **refuses to start** without a token and TLS unless
+  you pass `AUTH_DISABLED` / `ALLOW_INSECURE`, which log loudly.
+- **Untrusted output:** job output is stripped of terminal control sequences before it reaches your terminal, and is only ever shown
+  as text in the app.
+- **Result integrity:** `--verify` runs the job on two workers and accepts it only if the outputs match: 2x cost, deterministic jobs only,
+  and it detects disagreement without knowing who lied.
+- **gVisor** is supported when available ([docs/GVISOR.md](docs/GVISOR.md)); it is implemented but not verified here.
+
+## Observability
+
+`make up` starts Prometheus and Grafana. The coordinator exposes an authenticated `/metrics`; 12 alert rules cover a down coordinator or Redis,
+lost workers, the 90% rule, a stuck queue and a growing dead-letter set; Grafana opens with a provisioned **ComputeHive cluster**
+dashboard (a live one-row-per-worker view, latency histograms, failures, RPCs). Logs are JSON with request and job ids. The coordinator and
+workers shut down gracefully. Details, the metric catalogue and a runbook: [docs/OPERATIONS.md](docs/OPERATIONS.md).
 
 ## Make targets
 
 | Target | What it does |
 |---|---|
-| `make up` / `make down` / `make logs` | run the local cluster |
-| `make demo` | end-to-end job on the running cluster |
-| `make test` | unit tests with the race detector, all modules |
+| `make up` / `make down` / `make logs` | run the local cluster (3 workers) |
+| `make demo` | guided real run: jobs, live output, kill a worker, recovery |
+| `make test` | unit tests with the race detector, all Go modules |
 | `make lint` | `go vet` + `staticcheck`, all modules |
 | `make build` | `bin/computehive`, `bin/computehive-worker`, `bin/computehive-coordinator` |
-| `make proto` | regenerate protobuf Go code |
+| `make proto` | regenerate protobuf Go code (needs `protoc-gen-go` and `protoc-gen-go-grpc` on `PATH`) |
 | `make chaos` | fault injection: in-process suite plus `docker kill` of real workers |
 | `make pressure` | overloaded-worker check on the running cluster |
-| `make hostile` | hostile-job suite: every attack must be contained and the host must stay healthy |
+| `make hostile` | hostile-job suite: every attack contained, the host stays healthy |
 | `make enroll` | print a one-hour, single-use token for joining a worker |
 | `make reset` | stop the cluster and delete all its data and secrets |
 | `make bench` | not implemented yet; exits non-zero with a message |
 
-CI (`.github/workflows/ci.yml`) runs gofmt, `go vet`, `staticcheck`, `go test -race`, an
-integration job (`make up` + `make demo` on a Docker-equipped runner) and a `buf breaking`
-protobuf compatibility check on pull requests.
-
 ## Configuration
 
-Coordinator (flags override env, env overrides `.env`): `REDIS_ADDR` (default `127.0.0.1:6379`),
-`REDIS_URL`, `REDIS_PASSWORD`, `REDIS_DB`, `REDIS_TLS`, `GRPC_PORT` (50051), `HTTP_PORT` (8080),
-`ARTIFACT_DIR`, `ARTIFACT_MAX_BYTES`. Invalid values fail at startup with a message naming the
-flag and env var. Worker: see [`worker/README.md`](worker/README.md); notable is
-`COORDINATOR_ADDR` and `COORDINATOR_HTTP_URL` (default `http://<coordinator host>:8080`).
+Coordinator (flags override env): `REDIS_ADDR`, `REDIS_PASSWORD`, `REDIS_TLS`, `GRPC_PORT` (50051), `HTTP_PORT` (8080), `API_TOKEN` /
+`API_TOKEN_FILE`, `TLS_CERT_FILE`, `TLS_KEY_FILE`, `WORKER_DEAD_AFTER` (6s), `MAX_ATTEMPTS` (3), `RAM_LIMIT_PERCENT` (90), `USER_LIMIT`
+(0 = off), `SCHED_PATIENCE` (5s), `SHUTDOWN_GRACE` (3s). Invalid values fail at startup with a message naming the flag and env var.
 
-## Protocol
+Worker: `COORDINATOR_ADDR`, `COORDINATOR_TLS_CA`, `ENROLLMENT_TOKEN`, `WORKER_ID`, `WORKER_LABELS`, `WORKER_PREFERENCE`, `ARTIFACT_CACHE_MB` (2048),
+`DRAIN_TIMEOUT` (30s), `LOG_FORMAT` (json), `ISOLATION` (auto|runc|gvisor). See [worker/README.md](worker/README.md).
 
-`shared/proto/worker.proto` and `client.proto`. `WorkerService`: `RegisterWorker`, `Heartbeat`,
-`RequestJob`, `SubmitResult`. `ClientService`: `SubmitJob`, `GetJobStatus`, `GetJobResult`,
-`ListWorkers`. Changes are additive; CI rejects wire-breaking changes. Generated Go code is
-checked in under `coordinator/pkg/pb`.
+CLI: `--coordinator`, `--token`, `--ca` (or `COMPUTEHIVE_COORDINATOR`, `COMPUTEHIVE_TOKEN`, `COMPUTEHIVE_CA`, or the files in `.computehive/`).
 
-## Desktop client
+## Troubleshooting
 
-```bash
-cd client && pnpm install && pnpm tauri dev
+| Symptom | Likely cause and fix |
+|---|---|
+| `make up` fails immediately | Docker is not running, or your user cannot use it. Check `docker info`. |
+| `unauthenticated` from the CLI or app | The API token was not found. It is `.computehive/api.token` (written by `make up`); pass `--token` or set `COMPUTEHIVE_TOKEN`. |
+| A job stays `queued` | No worker satisfies its requirements. `computehive explain <job-id>` lists each worker's reason (GPU, `--os`, `--label`, memory headroom, ...). |
+| A worker shows `overloaded` | The host is at 90% RAM/CPU/disk (the reason is shown). It recovers 10 s after every metric is under 80%. |
+| Workers report `docker_unhealthy` after running `docker compose` by hand | Compose needs the Docker group id. Use `make` targets or `source scripts/env.sh` first. |
+| Prometheus target is down | Prometheus needs the API token and CA from `.computehive/` (mounted by `docker-compose.yml`); check `docker compose logs prometheus`. |
+| `REFUSING TO TRUST the CA` on join | The fingerprint you were given does not match what the coordinator serves: a typo, a regenerated CA, or something answering in its place. Get the command again from `admin enroll`. |
+| Grafana will not start after upgrading | Rarely, an old datasource conflicts. `docker compose rm -sf grafana && make up`. |
+| The desktop app says "No API token found" | Run `make up` from the repository (the app looks for `.computehive/`), or set `COMPUTEHIVE_TOKEN`. |
+| `make proto` says `protoc-gen-go: program not found` | Add Go's bin directory to `PATH`: `PATH=$PATH:$(go env GOPATH)/bin make proto`. |
+
+## Repository layout
+
+```text
+ComputeHive/
+├── cli/             # `computehive` CLI (Go)
+├── client/          # Tauri desktop app (TypeScript + Rust)
+├── coordinator/     # scheduler, queue (Lua), gRPC + HTTPS API, metrics (Go)
+├── worker/          # worker runtime: monitor, sandbox, network proxy, artifact cache (Go)
+├── shared/proto/    # protobuf contracts (source of truth; changes are additive)
+├── deploy/          # Prometheus rules and scrape config, Grafana provisioning and dashboard
+├── examples/        # example jobs
+├── scripts/         # bootstrap, demo, join, chaos and pressure scripts
+├── docs/            # architecture, scheduling, operations, threat model, decisions, audit
+├── docker-compose.yml
+└── Makefile
 ```
 
-See [`client/README.md`](client/README.md). The desktop client is not exercised by CI.
+| Document | What it covers |
+|---|---|
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | components, job lifecycle, Redis data model, atomicity, failure recovery, interfaces |
+| [docs/SCHEDULING.md](docs/SCHEDULING.md) | filters, scoring, patience, locality, `explain` |
+| [docs/OPERATIONS.md](docs/OPERATIONS.md) | metrics, alerts, logs and correlation ids, graceful shutdown, runbook |
+| [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) | assets, attackers, mitigations with their tests, residual risks |
+| [docs/decisions.md](docs/decisions.md) | every important decision: options, choice, tradeoff, evidence |
+| [docs/AUDIT.md](docs/AUDIT.md) | what was wrong at the start and what changed |
+| [docs/GVISOR.md](docs/GVISOR.md) | optional gVisor isolation |
 
-## Scheduling (best fit)
+## Known limitations
 
-A worker is handed a job only if it is the best idle fit for it (or the job has waited past a patience window). The coordinator rejects
-workers that are stale, overloaded, lack the CPU/RAM/GPU/disk/OS/arch/labels/isolation/network permission, have no memory headroom, are
-unreliable, or whose user is at their limit, then ranks the rest by free RAM, free CPU, load, reliability, artifact locality, fit, uptime and
-the contributor's preference. The atomic Lua claim re-checks every safety rule, so the scheduler can only improve placement, never break a rule.
-
-```bash
-computehive submit examples/hello --cpu 2 --mem 1024 --os linux --arch amd64 --label fast-disk
-computehive explain <job-id>      # every worker, its verdict, and the score breakdown
-```
-
-Defaults can live in the job directory (`computehive.yaml`, flat `key: value`, or `LABEL computehive.<key>=...` in the Dockerfile); flags win.
-An unchanged directory is not rebuilt on re-submit, so repeat jobs reuse the same artifact and prefer the worker that already has it
-(`--rebuild` to force). Details and limitations: [docs/SCHEDULING.md](docs/SCHEDULING.md).
-
-## Observability and operations
-
-`make up` also starts Prometheus and Grafana. The coordinator exposes an authenticated `/metrics` (API token, TLS); 12 alert rules (`deploy/prometheus/alerts.yml`)
-cover a down coordinator or Redis, lost workers, the 90% rule, a stuck queue and a growing dead-letter set; Grafana opens with a provisioned
-**ComputeHive cluster** dashboard (http://localhost:3000, admin/admin) that includes a live one-row-per-worker view. Logs are JSON with request and job ids.
-SIGTERM drains: a worker finishes its current job (up to `DRAIN_TIMEOUT`) before exiting, and the coordinator reports not-ready before closing.
-See [docs/OPERATIONS.md](docs/OPERATIONS.md).
-
-## Reliability guarantees (and how they are tested)
-
-| Guarantee | Mechanism | Test |
-|---|---|---|
-| A job is assigned to exactly one worker | one atomic Lua script moves it from pending to leased | `TestConcurrentClaimNeverDoubleAssigns` |
-| FIFO, preserved on retry | pending set scored by the job's original sequence number | `TestRequeueKeepsFIFOPositionAndCountsAttempt` |
-| Dead workers' jobs are requeued in under 15s | 2s heartbeats, dead after 6s, reaper every 1s (about 7s worst case) | `TestWorkerKilledMidJobIsRequeuedUnder15s...`, `scripts/chaos-cluster.sh` |
-| A late result from a presumed-dead worker cannot corrupt state | per-attempt lease tokens; stale and duplicate results are discarded | `TestPartitionedWorkerNeverCommitsOverRequeuedJob` |
-| No job lost or run to completion twice | all state in Redis (AOF); stateless coordinator | `TestCoordinatorCrashAndRestartLosesNothing`, `TestRedisRestartKeepsState`, `TestThousandJobsWithRandomWorkerKills` |
-| Lost assignment replies are recovered | heartbeat reconciliation of unreported leases | `TestLostClaimReplyIsReconciledByHeartbeat` |
-
-Retries: a job's own failure (non-zero exit, timeout) is terminal; infrastructure failures are retried with exponential backoff
-up to `MAX_ATTEMPTS` (default 3), after which the job is parked as `DEAD`. Evictions do not count against the job.
-Run the fault-injection suite yourself with `make chaos`. Design rationale: [`docs/decisions.md`](docs/decisions.md).
-
-Note: "exactly once" means **committed** exactly once. A worker killed mid-job means the job body may run again elsewhere, so
-jobs should be safe to re-run (idempotent) or write only to their output directory.
-
-## Resource limits (the 90% rule)
-
-Workers sample RAM, CPU, load, disk (job work dir and Docker root), swap, temperature, Docker health, GPU and network egress
-every second and send them with every heartbeat (`computehive workers` shows RAM/CPU/disk and state).
-
-- **Enter** "overloaded" the moment RAM, CPU or disk reaches **90%** (configurable: `RAM_LIMIT_PERCENT`, `CPU_LIMIT_PERCENT`, `DISK_LIMIT_PERCENT`).
-- **Leave** only after every metric has stayed below **80%** for **10s** (`RELEASE_PERCENT`, `RELEASE_AFTER`). Readings in between change nothing.
-- **Enforced twice:** the worker stops calling `RequestJob`; independently the coordinator derives overload from the reported numbers
-  and refuses overloaded, stale, or metric-less workers, so a misbehaving worker cannot opt out.
-- **Headroom:** a job is not placed if its declared memory (default 512 MB) would push the host to the limit.
-- **If the host stays critical for `PRESSURE_GRACE` (15s) while a job runs**, the job is stopped gracefully and requeued elsewhere
-  without counting as a failure, with an `event=job_evicted_pressure` log line.
-- **Every job container** gets `--memory` = `--memory-swap` (no swap), `--cpus`, `--pids-limit` and `--network none`, with defaults
-  (512 MB, 1 CPU, 256 PIDs) if the job declares nothing.
-
-Prove it on your machine: `make pressure` (a worker with a 1% RAM limit must show as overloaded and receive no jobs) and
-`cd worker && go test ./internal/monitor/ -run RealContainer -v` (a container fills memory; the worker stops, then resumes).
-
-## Known limitations (today)
-
+- **Not verified here:** gVisor isolation (no `runsc` available); GitHub Actions (the workflow was never run); macOS and Windows; the desktop
+  app's native window was not driven by an automated GUI test (the backend is tested against a live cluster and the UI against a browser).
 - Job output files are kept on the coordinator until you delete them (no retention policy yet).
-- gVisor support is implemented but was not verified (no `runsc` on the development machine).
-- Network jobs need the worker to run directly on the host, not in a container.
+- Network-allowlist mode needs the worker to run directly on the host, not in a container.
 - Containers share the host kernel (unless gVisor is used): a kernel vulnerability is the main residual risk.
-- Scheduling is first-come-first-served pull with capability filtering (no best-fit scoring yet).
-- Single-node Redis only (the Lua scripts address keys dynamically; Redis Cluster would need hash tags).
-- Scheduling weights are hand-set, not tuned, and a worker with a longer track record tends to keep winning ties (see docs/SCHEDULING.md).
-- Re-submitting an unchanged directory reuses the saved image; a changed base image or external dependency is not noticed until `--rebuild`.
+- One coordinator and one single-node Redis: no automatic failover (the Lua scripts address keys dynamically, so Redis Cluster would need hash tags).
+- Scheduling weights are hand-set, not tuned, and a worker with a longer track record tends to keep winning ties ([docs/SCHEDULING.md](docs/SCHEDULING.md)).
+- Re-submitting an unchanged directory reuses the saved image; a changed base image is not noticed until `--rebuild`.
 - Prometheus data is not persisted across container restarts in Compose, and alerts are not delivered anywhere (no Alertmanager).
+- Sandbox kills are counted by exit code 137/143, which also includes a manual kill, so that metric is an approximation.
+- Live output lags by about two seconds (it rides on the heartbeat) and shows only the last few KB.

@@ -236,6 +236,7 @@ func (s *Store) PublishHeartbeat(ctx context.Context, hb domain.WorkerHeartbeat)
 		Labels:             hb.Labels,
 		Preference:         int32(hb.Preference),
 		CachedArtifacts:    hb.CachedArtifacts,
+		LogTails:           hb.LogTails,
 	}
 	for _, id := range hb.RunningJobs {
 		req.RunningJobs = append(req.RunningJobs, &pb.JobID{Value: id})

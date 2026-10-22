@@ -37,7 +37,8 @@ Commands:
   admin enroll      Mint an expiring token that lets a new worker enrol
   admin revoke <id> Cut a worker off and requeue its jobs
   result <job-id>   Show the job result (exit code, output excerpts)
-  logs <job-id>     Show captured stdout/stderr excerpts of a finished job
+  logs <job-id>     Show captured stdout/stderr of a finished job; with --follow, stream a running job's output
+  jobs              List recent jobs (--limit N, --status running|failed|...)
   explain <job-id>  Show why a job went to the worker it did (or why it is still waiting)
   workers           List registered workers
   worker join       Run a worker on this machine (checks prerequisites first)
@@ -109,7 +110,9 @@ func run(args []string, out, errOut io.Writer) int {
 	case "result":
 		err = withClient(g, func(c pb.ClientServiceClient) error { return cmdResult(ctx, g, c, rest[1:], out, false) })
 	case "logs":
-		err = withClient(g, func(c pb.ClientServiceClient) error { return cmdResult(ctx, g, c, rest[1:], out, true) })
+		err = withClient(g, func(c pb.ClientServiceClient) error { return cmdLogs(ctx, g, c, rest[1:], out) })
+	case "jobs":
+		err = withClient(g, func(c pb.ClientServiceClient) error { return cmdJobs(ctx, c, rest[1:], out) })
 	case "explain":
 		err = withClient(g, func(c pb.ClientServiceClient) error { return cmdExplain(ctx, c, rest[1:], out) })
 	case "workers":
@@ -226,7 +229,14 @@ func cmdResult(ctx context.Context, g globals, c pb.ClientServiceClient, args []
 		if resp.GetResultAvailable() && (terminal || !*wait) {
 			printResult(out, id, resp, logsOnly)
 			if *download != "" {
-				return downloadOutputs(ctx, g, resp.GetResult().GetOutputArtifacts(), *download, out)
+				if err := downloadOutputs(ctx, g, resp.GetResult().GetOutputArtifacts(), *download, out); err != nil {
+					return err
+				}
+			}
+			// Waiting is how scripts use this (`submit --wait && next-step`), so a job that did not
+			// succeed must be a non-zero exit. Merely viewing a result (no --wait) stays exit 0.
+			if *wait && resp.GetStatus() != pb.Status_STATUS_SUCCEEDED {
+				return errNonSuccess
 			}
 			return nil
 		}
@@ -261,14 +271,16 @@ func printResult(out io.Writer, id string, resp *pb.GetJobResultResponse, logsOn
 		}
 		fmt.Fprintln(out, "--- stdout (excerpt) ---")
 	}
-	fmt.Fprint(out, r.GetStdoutExcerpt())
-	if !strings.HasSuffix(r.GetStdoutExcerpt(), "\n") && r.GetStdoutExcerpt() != "" {
+	// Job output is untrusted text: strip terminal control sequences before it reaches the user's terminal.
+	stdout, stderr := sanitizeTerminal(r.GetStdoutExcerpt()), sanitizeTerminal(r.GetStderrExcerpt())
+	fmt.Fprint(out, stdout)
+	if !strings.HasSuffix(stdout, "\n") && stdout != "" {
 		fmt.Fprintln(out)
 	}
-	if r.GetStderrExcerpt() != "" {
+	if stderr != "" {
 		fmt.Fprintln(out, "--- stderr (excerpt) ---")
-		fmt.Fprint(out, r.GetStderrExcerpt())
-		if !strings.HasSuffix(r.GetStderrExcerpt(), "\n") {
+		fmt.Fprint(out, stderr)
+		if !strings.HasSuffix(stderr, "\n") {
 			fmt.Fprintln(out)
 		}
 	}

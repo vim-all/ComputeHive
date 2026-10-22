@@ -1,52 +1,30 @@
-use flate2::{write::GzEncoder, Compression};
-use hmac::{Hmac, Mac};
-use redis::Commands;
-use reqwest::blocking::Client as BlockingHttpClient;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::{
-    collections::HashMap,
-    error::Error as StdError,
     fs::{self, File},
-    io::{self, BufRead, BufReader, BufWriter, ErrorKind, Read},
+    io::{self, BufRead, BufReader, ErrorKind, Read},
     path::{Path, PathBuf},
     process::{Child, Command, Output, Stdio},
     sync::{Mutex, OnceLock},
     thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
-use time::{macros::format_description, OffsetDateTime};
-use tonic::transport::Endpoint;
-use url::Url;
-use uuid::Uuid;
 
 pub mod coordinatorpb {
     tonic::include_proto!("compute.v1");
 }
 
-use coordinatorpb::client_service_client::ClientServiceClient;
-use coordinatorpb::{
-    GetJobResultRequest, ResourceSpec as CoordinatorResourceSpec, SubmitJobRequest,
-};
+mod cluster;
 
-const JOB_QUEUE_KEY: &str = "job_queue";
-const JOB_STATUS_QUEUED: &str = "queued";
-const ARTIFACT_RECORD_PREFIX: &str = "computehive_job_artifact:";
+use coordinatorpb::{GetJobResultRequest, ResourceSpec as CoordinatorResourceSpec, SubmitJobRequest};
+
 const DEFAULT_MAX_RUNTIME_SECONDS: i32 = 3600;
 const DEFAULT_REQUIRED_CPU_CORES: i32 = 1;
 const DEFAULT_REQUIRED_GPU_COUNT: i32 = 0;
 const DEFAULT_REQUIRED_MEMORY_MB: i32 = 1024;
-const DEFAULT_R2_REGION: &str = "auto";
-const CLIENT_COORDINATOR_ADDR_ENV_KEY: &str = "CLIENT_COORDINATOR_ADDR";
-const DEFAULT_COORDINATOR_ADDR: &str = "127.0.0.1:50051";
-const DEFAULT_SIGNED_DOWNLOAD_EXPIRY_SECONDS: u32 = 3600;
-const EMPTY_PAYLOAD_SHA256: &str =
-    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-
-static APP_CONFIG: OnceLock<Result<AppConfig, String>> = OnceLock::new();
 static ENV_FILE_LOADED: OnceLock<()> = OnceLock::new();
 static CONTRIBUTOR_WORKER_CHILD: OnceLock<Mutex<Option<Child>>> = OnceLock::new();
 static CONTRIBUTOR_RUNTIME_STATE: OnceLock<Mutex<ContributorRuntimeState>> = OnceLock::new();
@@ -65,46 +43,6 @@ struct DockerImageResult {
     generated_files: Vec<String>,
     summary: String,
     notes: Vec<String>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RunRequestResult {
-    image: DockerImageResult,
-    gzip_archive_path: String,
-    gzip_size_bytes: u64,
-    artifact_sha256: String,
-    artifact_object_key: String,
-    artifact_uri: String,
-    artifact_api_url: String,
-    artifact_public_url: String,
-    artifact_record_key: String,
-    artifact_etag: Option<String>,
-    redis_job_id: String,
-    redis_job_key: String,
-    redis_status_key: String,
-    redis_queue_key: String,
-    summary: String,
-    notes: Vec<String>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct IncomingRunRequest {
-    job_id: String,
-    project_name: String,
-    detected_stack: String,
-    status: String,
-    container_image: String,
-    artifact_sha256: String,
-    artifact_object_key: String,
-    artifact_uri: String,
-    artifact_api_url: String,
-    artifact_public_url: String,
-    gzip_archive_path: String,
-    gzip_size_bytes: u64,
-    created_at_unix: i64,
-    project_root: String,
 }
 
 struct DockerSetup {
@@ -148,50 +86,12 @@ struct RustProject {
     binary_name: String,
 }
 
-#[derive(Clone)]
-struct AppConfig {
-    object_storage: ObjectStorageConfig,
-    redis_url: String,
-    coordinator_addr: String,
-}
-
-#[derive(Clone)]
-struct ObjectStorageConfig {
-    endpoint_url: String,
-    bucket_name: String,
-    bucket_api_url: String,
-    bucket_public_url: String,
-    access_key_id: String,
-    secret_access_key: String,
-    session_token: String,
-    region: String,
-}
-
-#[derive(Serialize, Deserialize, Clone)]
-struct RedisResourceSpec {
-    cpu_cores: i32,
-    gpu_count: i32,
-    memory_mb: i32,
-}
-
-#[derive(Serialize, Deserialize)]
-struct RedisJobRecord {
-    id: String,
-    container_image: String,
-    command: Vec<String>,
-    required_resources: Option<RedisResourceSpec>,
-    environment: HashMap<String, String>,
-    max_runtime_seconds: i32,
-    status: String,
-    created_at_unix: i64,
-    assigned_worker_id: String,
-}
-
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RunRequestJobResult {
     job_id: String,
     worker_id: String,
+    failure_reason: String,
     status: String,
     result_status: String,
     partial: bool,
@@ -238,40 +138,6 @@ struct ContributorRuntimeState {
     last_job_id: Option<String>,
 }
 
-#[derive(Serialize, Deserialize)]
-struct ArtifactRecord {
-    job_id: String,
-    project_name: String,
-    project_root: String,
-    detected_stack: String,
-    dockerfile_path: String,
-    image_archive_path: String,
-    gzip_archive_path: String,
-    container_image: String,
-    artifact_sha256: String,
-    artifact_object_key: String,
-    artifact_uri: String,
-    artifact_api_url: String,
-    artifact_public_url: String,
-    gzip_size_bytes: u64,
-    image_size_bytes: u64,
-    docker_setup_source: String,
-    created_at_unix: i64,
-}
-
-struct UploadedArtifact {
-    artifact_uri: String,
-    artifact_api_url: String,
-    artifact_public_url: String,
-    artifact_object_key: String,
-    artifact_etag: Option<String>,
-}
-
-struct SignedObjectStorageRequest {
-    url: String,
-    headers: Vec<(String, String)>,
-}
-
 enum DockerInfoStatus {
     Ready,
     DaemonUnavailable(String),
@@ -281,516 +147,6 @@ enum DockerInfoStatus {
 #[tauri::command]
 fn create_project_docker_image(project_path: String) -> Result<DockerImageResult, String> {
     build_project_docker_image(&project_path)
-}
-
-#[tauri::command]
-async fn request_project_run(
-    project_path: String,
-    command: Vec<String>,
-) -> Result<RunRequestResult, String> {
-    let config = app_config()?;
-    let request_started = Instant::now();
-    let command_line_count = command
-        .iter()
-        .map(|segment| segment.trim())
-        .filter(|segment| !segment.is_empty())
-        .count();
-    let normalized_command = normalize_client_command(command)?;
-
-    let build_started = Instant::now();
-    let image = build_project_docker_image(&project_path)?;
-    let build_elapsed = build_started.elapsed();
-
-    let project_root = PathBuf::from(&image.project_root);
-    let gzip_archive_path = tar_gz_path_for_project(&project_root, &image.project_name);
-
-    if gzip_archive_path.exists() {
-        fs::remove_file(&gzip_archive_path)
-            .map_err(|error| format!("Failed to replace the existing compressed image: {error}"))?;
-    }
-
-    let compress_started = Instant::now();
-    gzip_file(Path::new(&image.image_archive_path), &gzip_archive_path)?;
-    let compress_elapsed = compress_started.elapsed();
-
-    let gzip_size_bytes = fs::metadata(&gzip_archive_path)
-        .map_err(|error| format!("Failed to inspect the compressed image: {error}"))?
-        .len();
-    let hash_started = Instant::now();
-    let artifact_sha256 = sha256_for_file(&gzip_archive_path)?;
-    let hash_elapsed = hash_started.elapsed();
-
-    let job_id = Uuid::new_v4().to_string();
-    let object_key = object_key_for_artifact(&image.project_name, &job_id, &artifact_sha256);
-
-    let upload_started = Instant::now();
-    let uploaded_artifact = upload_artifact_to_object_storage(
-        config,
-        &gzip_archive_path,
-        &object_key,
-        &artifact_sha256,
-    )
-    .await?;
-    let upload_elapsed = upload_started.elapsed();
-
-    let mut artifact_record = ArtifactRecord {
-        job_id: job_id.clone(),
-        project_name: image.project_name.clone(),
-        project_root: image.project_root.clone(),
-        detected_stack: image.detected_stack.clone(),
-        dockerfile_path: image.dockerfile_path.clone(),
-        image_archive_path: image.image_archive_path.clone(),
-        gzip_archive_path: gzip_archive_path.display().to_string(),
-        container_image: image.image_tag.clone(),
-        artifact_sha256: artifact_sha256.clone(),
-        artifact_object_key: uploaded_artifact.artifact_object_key.clone(),
-        artifact_uri: uploaded_artifact.artifact_uri.clone(),
-        artifact_api_url: uploaded_artifact.artifact_api_url.clone(),
-        artifact_public_url: uploaded_artifact.artifact_public_url.clone(),
-        gzip_size_bytes,
-        image_size_bytes: image.image_size_bytes,
-        docker_setup_source: image.docker_setup_source.clone(),
-        created_at_unix: current_unix_timestamp(),
-    };
-
-    let mut environment = HashMap::new();
-    environment.insert(
-        "COMPUTEHIVE_ARTIFACT_SHA256".to_string(),
-        artifact_record.artifact_sha256.clone(),
-    );
-    environment.insert(
-        "COMPUTEHIVE_ARTIFACT_URI".to_string(),
-        artifact_record.artifact_uri.clone(),
-    );
-    environment.insert(
-        "COMPUTEHIVE_ARTIFACT_API_URL".to_string(),
-        artifact_record.artifact_api_url.clone(),
-    );
-    environment.insert(
-        "COMPUTEHIVE_ARTIFACT_OBJECT_KEY".to_string(),
-        artifact_record.artifact_object_key.clone(),
-    );
-    environment.insert(
-        "COMPUTEHIVE_PROJECT_NAME".to_string(),
-        artifact_record.project_name.clone(),
-    );
-    environment.insert(
-        "COMPUTEHIVE_DETECTED_STACK".to_string(),
-        artifact_record.detected_stack.clone(),
-    );
-    environment.insert("COMPUTEHIVE_IMAGE_TAG".to_string(), image.image_tag.clone());
-    environment.insert(
-        "COMPUTEHIVE_IMAGE_ARCHIVE_PATH".to_string(),
-        artifact_record.gzip_archive_path.clone(),
-    );
-
-    let submit_started = Instant::now();
-    let coordinator_job_id = match submit_job_to_coordinator(
-        config,
-        &image,
-        environment,
-        &normalized_command,
-        &artifact_record.artifact_api_url,
-        &artifact_record.artifact_sha256,
-    )
-    .await
-    {
-        Ok(job_id) => job_id,
-        Err(error) => {
-            let cleanup_result = delete_artifact_from_object_storage(config, &object_key).await;
-            let cleanup_message = match cleanup_result {
-                Ok(()) => "The uploaded artifact was cleaned up automatically.".to_string(),
-                Err(cleanup_error) => format!(
-                    "The uploaded artifact could not be cleaned up automatically: {cleanup_error}"
-                ),
-            };
-
-            return Err(format!(
-                    "Failed to submit the run request to the coordinator after uploading the artifact. {error} {cleanup_message}"
-                ));
-        }
-    };
-    let submit_elapsed = submit_started.elapsed();
-    artifact_record.job_id = coordinator_job_id.clone();
-
-    let mut notes = image.notes.clone();
-    notes.push(format!(
-        "Compressed the Docker image archive to {}.",
-        gzip_archive_path.display()
-    ));
-    notes.push(format!(
-        "Calculated SHA-256 for the compressed artifact: {}.",
-        artifact_sha256
-    ));
-    notes.push(format!(
-        "Uploaded the compressed artifact to object storage as {}.",
-        uploaded_artifact.artifact_object_key
-    ));
-    notes.push(format!(
-        "Public artifact link: {}.",
-        uploaded_artifact.artifact_public_url
-    ));
-    if config.object_storage.bucket_public_url == config.object_storage.bucket_api_url {
-        notes.push(
-            "S3_PUBLIC_BUCKET_URL is not configured, so the public artifact link currently uses the same bucket base URL as S3_BUCKET."
-                .to_string(),
-        );
-    }
-    notes.push(format!(
-        "Submitted the job with job id {}.",
-        coordinator_job_id
-    ));
-    match persist_artifact_record(config, &coordinator_job_id, &artifact_record) {
-        Ok(()) => notes.push(format!(
-            "Stored the uploaded artifact metadata at {}.",
-            artifact_record_key(&coordinator_job_id)
-        )),
-        Err(error) => notes.push(format!(
-            "The run request was queued, but the client could not persist the local artifact metadata: {}.",
-            error
-        )),
-    }
-    notes.push(
-        "The submit payload contains metadata only (artifact URI/object key/hash, image tag, command, resources); the tar.gz image bytes are not sent to the coordinator."
-            .to_string(),
-    );
-    notes.push(format!(
-        "Timing: image build {} ms, compression {} ms, hash {} ms, upload {} ms, coordinator submit {} ms, total {} ms.",
-        build_elapsed.as_millis(),
-        compress_elapsed.as_millis(),
-        hash_elapsed.as_millis(),
-        upload_elapsed.as_millis(),
-        submit_elapsed.as_millis(),
-        request_started.elapsed().as_millis(),
-    ));
-    notes.push(format!(
-        "Stored {} client command line(s) in the queued job record.",
-        command_line_count
-    ));
-
-    let summary = format!(
-        "Built the Docker image, compressed it to a tar.gz artifact, uploaded it to object storage, and submitted run request {} to the coordinator.",
-        coordinator_job_id
-    );
-
-    Ok(RunRequestResult {
-        image,
-        gzip_archive_path: gzip_archive_path.display().to_string(),
-        gzip_size_bytes,
-        artifact_sha256,
-        artifact_object_key: uploaded_artifact.artifact_object_key,
-        artifact_uri: uploaded_artifact.artifact_uri,
-        artifact_api_url: uploaded_artifact.artifact_api_url,
-        artifact_public_url: uploaded_artifact.artifact_public_url,
-        artifact_record_key: artifact_record_key(&coordinator_job_id),
-        artifact_etag: uploaded_artifact.artifact_etag,
-        redis_job_id: coordinator_job_id.clone(),
-        redis_job_key: job_key(&coordinator_job_id),
-        redis_status_key: job_status_key(&coordinator_job_id),
-        redis_queue_key: JOB_QUEUE_KEY.to_string(),
-        summary,
-        notes,
-    })
-}
-
-#[tauri::command]
-fn list_incoming_run_requests() -> Result<Vec<IncomingRunRequest>, String> {
-    let config = app_config()?;
-    let client = redis::Client::open(config.redis_url.as_str())
-        .map_err(|error| format!("Failed to parse the Redis URL: {error}"))?;
-    let mut connection = client
-        .get_connection()
-        .map_err(|error| format!("Failed to connect to Redis: {error}"))?;
-
-    let queued_job_ids = connection
-        .lrange::<_, Vec<String>>(JOB_QUEUE_KEY, 0, 49)
-        .map_err(|error| format!("Failed to read the Redis job queue: {error}"))?;
-
-    if queued_job_ids.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let job_keys = queued_job_ids
-        .iter()
-        .map(|job_id| job_key(job_id))
-        .collect::<Vec<_>>();
-    let artifact_keys = queued_job_ids
-        .iter()
-        .map(|job_id| artifact_record_key(job_id))
-        .collect::<Vec<_>>();
-    let status_keys = queued_job_ids
-        .iter()
-        .map(|job_id| job_status_key(job_id))
-        .collect::<Vec<_>>();
-    let job_payloads = redis::cmd("MGET")
-        .arg(&job_keys)
-        .query::<Vec<Option<String>>>(&mut connection)
-        .map_err(|error| format!("Failed to load queued job records: {error}"))?;
-    let artifact_payloads = redis::cmd("MGET")
-        .arg(&artifact_keys)
-        .query::<Vec<Option<String>>>(&mut connection)
-        .map_err(|error| format!("Failed to load queued artifact records: {error}"))?;
-    let statuses = redis::cmd("MGET")
-        .arg(&status_keys)
-        .query::<Vec<Option<String>>>(&mut connection)
-        .map_err(|error| format!("Failed to load queued job statuses: {error}"))?;
-
-    let mut requests = Vec::with_capacity(queued_job_ids.len());
-
-    for (index, job_id) in queued_job_ids.into_iter().enumerate() {
-        let Some(job_payload) = job_payloads.get(index).and_then(|payload| payload.as_ref()) else {
-            continue;
-        };
-        let artifact_payload = artifact_payloads
-            .get(index)
-            .and_then(|payload| payload.as_deref());
-        let status = statuses
-            .get(index)
-            .and_then(|value| value.clone())
-            .unwrap_or_else(|| JOB_STATUS_QUEUED.to_string());
-
-        let job: RedisJobRecord = serde_json::from_str(job_payload).map_err(|error| {
-            format!(
-                "Failed to parse the queued job record {}: {error}",
-                job_key(&job_id)
-            )
-        })?;
-
-        let artifact = artifact_payload
-            .map(serde_json::from_str::<ArtifactRecord>)
-            .transpose()
-            .map_err(|error| {
-                format!(
-                    "Failed to parse the queued artifact record {}: {error}",
-                    artifact_record_key(&job_id)
-                )
-            })?;
-
-        requests.push(IncomingRunRequest {
-            job_id: job.id,
-            project_name: artifact
-                .as_ref()
-                .map(|record| record.project_name.clone())
-                .unwrap_or_else(|| "Unknown project".to_string()),
-            detected_stack: artifact
-                .as_ref()
-                .map(|record| record.detected_stack.clone())
-                .unwrap_or_else(|| "Unknown stack".to_string()),
-            status,
-            container_image: job.container_image,
-            artifact_sha256: artifact
-                .as_ref()
-                .map(|record| record.artifact_sha256.clone())
-                .unwrap_or_default(),
-            artifact_object_key: artifact
-                .as_ref()
-                .map(|record| record.artifact_object_key.clone())
-                .unwrap_or_default(),
-            artifact_uri: artifact
-                .as_ref()
-                .map(|record| record.artifact_uri.clone())
-                .unwrap_or_default(),
-            artifact_api_url: artifact
-                .as_ref()
-                .map(|record| record.artifact_api_url.clone())
-                .unwrap_or_default(),
-            artifact_public_url: artifact
-                .as_ref()
-                .map(|record| record.artifact_public_url.clone())
-                .unwrap_or_default(),
-            gzip_archive_path: artifact
-                .as_ref()
-                .map(|record| record.gzip_archive_path.clone())
-                .unwrap_or_default(),
-            gzip_size_bytes: artifact
-                .as_ref()
-                .map(|record| record.gzip_size_bytes)
-                .unwrap_or_default(),
-            created_at_unix: artifact
-                .as_ref()
-                .map(|record| record.created_at_unix)
-                .unwrap_or(job.created_at_unix),
-            project_root: artifact
-                .as_ref()
-                .map(|record| record.project_root.clone())
-                .unwrap_or_default(),
-        });
-    }
-
-    Ok(requests)
-}
-
-#[tauri::command]
-async fn get_run_request_result(job_id: String) -> Result<Option<RunRequestJobResult>, String> {
-    let trimmed_job_id = job_id.trim();
-    if trimmed_job_id.is_empty() {
-        return Err("job_id is required".to_string());
-    }
-
-    let config = app_config()?;
-    let endpoint = coordinator_endpoint(&config.coordinator_addr);
-    let channel = Endpoint::from_shared(endpoint.clone())
-        .map_err(|error| format!("Failed to parse coordinator address {endpoint}: {error}"))?
-        .connect_timeout(Duration::from_secs(3))
-        .timeout(Duration::from_secs(5))
-        .connect()
-        .await
-        .map_err(|error| format!("Failed to connect to coordinator at {endpoint}: {error}"))?;
-
-    let mut client = ClientServiceClient::new(channel);
-    let response = client
-        .get_job_result(GetJobResultRequest {
-            job_id: Some(coordinatorpb::JobId {
-                value: trimmed_job_id.to_string(),
-            }),
-        })
-        .await;
-
-    let response = match response {
-        Ok(response) => response.into_inner(),
-        Err(error) if error.code() == tonic::Code::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(format!(
-                "Coordinator GetJobResult request failed for {}: {error}",
-                trimmed_job_id
-            ))
-        }
-    };
-
-    let status = coordinator_job_status_label(response.status);
-    let mut job_result = RunRequestJobResult {
-        job_id: trimmed_job_id.to_string(),
-        worker_id: String::new(),
-        status: status.to_string(),
-        result_status: String::new(),
-        partial: false,
-        exit_code: 0,
-        stdout_excerpt: String::new(),
-        stderr_excerpt: String::new(),
-        output_uri: String::new(),
-        output_api_url: String::new(),
-        output_public_url: String::new(),
-        output_size_bytes: 0,
-        output_artifacts: Vec::new(),
-        finished_at_unix: 0,
-        completed: coordinator_job_status_terminal(response.status),
-    };
-
-    if let Some(result) = response.result {
-        let result_status = coordinator_result_status_name(result.status);
-        let job_id = result
-            .job_id
-            .as_ref()
-            .map(|id| id.value.trim())
-            .filter(|value| !value.is_empty())
-            .unwrap_or(trimmed_job_id);
-
-        job_result.job_id = job_id.to_string();
-        job_result.result_status = result_status.to_string();
-        job_result.exit_code = result.exit_code;
-        job_result.stdout_excerpt = result.stdout_excerpt;
-        job_result.stderr_excerpt = result.stderr_excerpt;
-        job_result.output_uri = result.output_uri;
-        job_result.output_api_url = result.output_api_url;
-        job_result.output_public_url = result.output_public_url;
-        job_result.output_size_bytes = result.output_size_bytes;
-        job_result.finished_at_unix = result.finished_at_unix;
-        job_result.output_artifacts = result
-            .output_artifacts
-            .into_iter()
-            .map(|artifact| RunRequestOutputArtifact {
-                relative_path: artifact.relative_path,
-                object_key: artifact.object_key,
-                uri: artifact.uri,
-                api_url: artifact.api_url,
-                public_url: artifact.public_url,
-                sha256: artifact.sha256,
-                size_bytes: artifact.size_bytes,
-                content_type: artifact.content_type,
-            })
-            .collect();
-        job_result.completed =
-            job_result.completed || coordinator_result_status_terminal(result.status);
-    }
-
-    if !response.result_available && !job_result.completed {
-        job_result.exit_code = 0;
-    }
-
-    Ok(Some(job_result))
-}
-
-#[tauri::command]
-fn get_signed_result_artifact_url(object_key: String) -> Result<String, String> {
-    let trimmed_object_key = object_key.trim();
-    if trimmed_object_key.is_empty() {
-        return Err("object_key is required".to_string());
-    }
-
-    let config = app_config()?;
-    presign_object_storage_download_url(
-        &config.object_storage,
-        trimmed_object_key,
-        DEFAULT_SIGNED_DOWNLOAD_EXPIRY_SECONDS,
-    )
-}
-
-#[tauri::command]
-fn start_contributor_sharing() -> Result<ContributorSharingStatus, String> {
-    let slot = contributor_worker_slot();
-    let mut guard = slot
-        .lock()
-        .map_err(|_| "Contributor worker process lock is poisoned.".to_string())?;
-
-    if let Some(child) = guard.as_mut() {
-        match child.try_wait() {
-            Ok(None) => {
-                let runtime = contributor_runtime_snapshot();
-                return Ok(ContributorSharingStatus {
-                    running: true,
-                    pid: Some(child.id()),
-                    details: "Sharing is already running.".to_string(),
-                    job_running: runtime.job_running,
-                    current_job_id: runtime.current_job_id,
-                    last_job_id: runtime.last_job_id,
-                });
-            }
-            Ok(Some(_)) | Err(_) => {
-                *guard = None;
-            }
-        }
-    }
-
-    reset_contributor_runtime_state();
-
-    let mut command = resolve_worker_command()?;
-    configure_worker_command(&mut command)?;
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let child = command
-        .stdin(Stdio::null())
-        .spawn()
-        .map_err(|error| format!("Failed to start local worker process: {error}"))?;
-
-    let mut child = child;
-    if let Some(stdout) = child.stdout.take() {
-        thread::spawn(move || stream_worker_logs(stdout));
-    }
-    if let Some(stderr) = child.stderr.take() {
-        thread::spawn(move || stream_worker_logs(stderr));
-    }
-
-    let pid = child.id();
-    *guard = Some(child);
-
-    let runtime = contributor_runtime_snapshot();
-    Ok(ContributorSharingStatus {
-        running: true,
-        pid: Some(pid),
-        details: "Sharing started. Worker process is running in background.".to_string(),
-        job_running: runtime.job_running,
-        current_job_id: runtime.current_job_id,
-        last_job_id: runtime.last_job_id,
-    })
 }
 
 #[tauri::command]
@@ -992,6 +348,10 @@ fn resolve_worker_command() -> Result<Command, String> {
     }
 
     let worker_dir = workspace_worker_dir()?;
+    let built_by_make = worker_dir.join("../bin/computehive-worker");
+    if built_by_make.exists() {
+        return Ok(Command::new(built_by_make));
+    }
     let compiled_worker = worker_dir.join("worker");
     if compiled_worker.exists() {
         return Ok(Command::new(compiled_worker));
@@ -1095,9 +455,21 @@ fn build_project_docker_image(project_path: &str) -> Result<DockerImageResult, S
         .unwrap_or("project")
         .to_string();
     let sanitized_name = sanitize_name(&project_name);
-    let image_tag = format!("computehive-{}:latest", sanitized_name);
+    // The worker only loads image tars whose tags are in the computehive-job namespace (so a crafted image cannot
+    // overwrite the contributor's own images), so that is the repository this tag must use.
+    let image_tag = format!("computehive-job:{}", sanitized_name);
     let image_file_name = format!("{sanitized_name}-computehive-image.tar");
-    let image_archive_path = project_root.join(&image_file_name);
+    // The saved image is a build artifact, not part of the user's project: keep it out of their folder (and their
+    // version control) in the OS temp directory, one subfolder per project path so two projects never collide.
+    let archive_dir = std::env::temp_dir()
+        .join("computehive-desktop")
+        .join(format!("{:x}", {
+            let digest = Sha256::digest(project_root.to_string_lossy().as_bytes());
+            u64::from_be_bytes(digest[..8].try_into().unwrap_or([0; 8]))
+        }));
+    fs::create_dir_all(&archive_dir)
+        .map_err(|e| format!("Failed to create the build folder {}: {e}", archive_dir.display()))?;
+    let image_archive_path = archive_dir.join(&image_file_name);
 
     let mut docker_setup = ensure_docker_setup(&project_root, &project_name)?;
     docker_setup
@@ -1731,23 +1103,6 @@ fn save_docker_image(image_archive_path: &Path, image_tag: &str) -> Result<(), S
     }
 }
 
-fn gzip_file(source_path: &Path, target_path: &Path) -> Result<(), String> {
-    let input = File::open(source_path)
-        .map_err(|error| format!("Failed to open the Docker image tar for compression: {error}"))?;
-    let output = File::create(target_path).map_err(|error| {
-        format!("Failed to create the compressed Docker image archive: {error}")
-    })?;
-
-    let mut encoder = GzEncoder::new(BufWriter::new(output), Compression::best());
-    io::copy(&mut BufReader::new(input), &mut encoder)
-        .map_err(|error| format!("Failed to compress the Docker image archive: {error}"))?;
-    encoder
-        .finish()
-        .map_err(|error| format!("Failed to finalize the compressed image archive: {error}"))?;
-
-    Ok(())
-}
-
 fn sha256_for_file(path: &Path) -> Result<String, String> {
     let file = File::open(path)
         .map_err(|error| format!("Failed to open the compressed image for hashing: {error}"))?;
@@ -1766,504 +1121,6 @@ fn sha256_for_file(path: &Path) -> Result<String, String> {
     }
 
     Ok(format!("{:x}", hasher.finalize()))
-}
-
-async fn upload_artifact_to_object_storage(
-    config: &AppConfig,
-    artifact_path: &Path,
-    object_key: &str,
-    artifact_sha256: &str,
-) -> Result<UploadedArtifact, String> {
-    let config = config.clone();
-    let artifact_path = artifact_path.to_path_buf();
-    let object_key = object_key.to_string();
-    let artifact_sha256 = artifact_sha256.to_string();
-
-    tauri::async_runtime::spawn_blocking(move || {
-        upload_artifact_to_object_storage_blocking(
-            &config,
-            &artifact_path,
-            &object_key,
-            &artifact_sha256,
-        )
-    })
-    .await
-    .map_err(|error| format!("The object storage upload task failed: {error}"))?
-}
-
-async fn delete_artifact_from_object_storage(
-    config: &AppConfig,
-    object_key: &str,
-) -> Result<(), String> {
-    let config = config.clone();
-    let object_key = object_key.to_string();
-
-    tauri::async_runtime::spawn_blocking(move || {
-        let signed_request = sign_object_storage_request(
-            &config.object_storage,
-            "DELETE",
-            &object_key,
-            EMPTY_PAYLOAD_SHA256,
-            &[],
-        )?;
-        let response = build_object_storage_http_client()?
-            .delete(&signed_request.url)
-            .headers(reqwest_headers(&signed_request.headers)?)
-            .send()
-            .map_err(|error| {
-                format!(
-                    "Failed to delete the uploaded artifact from object storage: {}",
-                    format_reqwest_error(&error)
-                )
-            })?;
-
-        if response.status().is_success() || response.status().as_u16() == 404 {
-            Ok(())
-        } else {
-            let status = response.status();
-            let body = response
-                .text()
-                .unwrap_or_else(|_| "Object storage did not return an error body.".to_string());
-            Err(format!(
-                "Object storage cleanup failed with status {}. {}",
-                status, body
-            ))
-        }
-    })
-    .await
-    .map_err(|error| format!("The object storage cleanup task failed: {error}"))?
-}
-
-fn upload_artifact_to_object_storage_blocking(
-    config: &AppConfig,
-    artifact_path: &Path,
-    object_key: &str,
-    artifact_sha256: &str,
-) -> Result<UploadedArtifact, String> {
-    let artifact_size_bytes = fs::metadata(artifact_path)
-        .map_err(|error| format!("Failed to inspect the compressed artifact for upload: {error}"))?
-        .len();
-
-    let signed_request = sign_object_storage_request(
-        &config.object_storage,
-        "PUT",
-        object_key,
-        artifact_sha256,
-        &[
-            ("content-type", "application/gzip"),
-            ("x-amz-meta-artifact-sha256", artifact_sha256),
-        ],
-    )?;
-
-    let headers = reqwest_headers(&signed_request.headers)?;
-    let client = build_object_storage_http_client()?;
-    let mut last_error = String::new();
-    let mut response = None;
-
-    for attempt in 1..=3 {
-        let file = File::open(artifact_path).map_err(|error| {
-            format!("Failed to open the compressed artifact for upload: {error}")
-        })?;
-        let body = reqwest::blocking::Body::sized(file, artifact_size_bytes);
-
-        match client
-            .put(&signed_request.url)
-            .headers(headers.clone())
-            .body(body)
-            .send()
-        {
-            Ok(ok_response) => {
-                response = Some(ok_response);
-                break;
-            }
-            Err(error) => {
-                last_error = format_reqwest_error(&error);
-                if attempt < 3 {
-                    thread::sleep(Duration::from_millis((attempt as u64) * 500));
-                }
-            }
-        }
-    }
-
-    let response = response.ok_or_else(|| {
-        format!(
-            "Failed to upload the artifact to object storage after 3 attempts ({} bytes): {}",
-            artifact_size_bytes, last_error
-        )
-    })?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response
-            .text()
-            .unwrap_or_else(|_| "Object storage did not return an error body.".to_string());
-        return Err(format!(
-            "Object storage upload failed with status {}. {}",
-            status, body
-        ));
-    }
-
-    Ok(UploadedArtifact {
-        artifact_uri: format!("s3://{}/{}", config.object_storage.bucket_name, object_key),
-        artifact_api_url: join_bucket_api_url(&config.object_storage.bucket_api_url, object_key),
-        artifact_public_url: join_bucket_api_url(
-            &config.object_storage.bucket_public_url,
-            object_key,
-        ),
-        artifact_object_key: object_key.to_string(),
-        artifact_etag: response
-            .headers()
-            .get("etag")
-            .and_then(|value| value.to_str().ok())
-            .map(ToString::to_string),
-    })
-}
-
-fn sign_object_storage_request(
-    config: &ObjectStorageConfig,
-    method: &str,
-    object_key: &str,
-    payload_sha256: &str,
-    extra_headers: &[(&str, &str)],
-) -> Result<SignedObjectStorageRequest, String> {
-    let endpoint = Url::parse(&config.endpoint_url)
-        .map_err(|error| format!("Failed to parse the object storage endpoint: {error}"))?;
-    let host = endpoint_host_header(&endpoint)?;
-    let object_key = object_key.trim_start_matches('/');
-    let canonical_uri = format!(
-        "/{}/{}",
-        aws_uri_encode_path_segment(config.bucket_name.trim_matches('/')),
-        aws_uri_encode_path_segment(object_key)
-    );
-    let request_url = format!(
-        "{}/{}/{}",
-        config.endpoint_url.trim_end_matches('/'),
-        config.bucket_name.trim_matches('/'),
-        object_key
-    );
-    let timestamp = aws_timestamp().map_err(|error| {
-        format!("Failed to create the object storage request timestamp: {error}")
-    })?;
-
-    let mut canonical_headers = vec![
-        ("host".to_string(), host),
-        (
-            "x-amz-content-sha256".to_string(),
-            payload_sha256.to_string(),
-        ),
-        ("x-amz-date".to_string(), timestamp.amz_date.clone()),
-    ];
-
-    for (name, value) in extra_headers {
-        canonical_headers.push((name.to_ascii_lowercase(), value.trim().to_string()));
-    }
-
-    canonical_headers.sort_by(|left, right| left.0.cmp(&right.0));
-
-    let canonical_headers_text = canonical_headers
-        .iter()
-        .map(|(name, value)| format!("{name}:{value}\n"))
-        .collect::<String>();
-    let signed_headers = canonical_headers
-        .iter()
-        .map(|(name, _)| name.as_str())
-        .collect::<Vec<_>>()
-        .join(";");
-    let credential_scope = format!("{}/{}/s3/aws4_request", timestamp.date_stamp, config.region);
-    let canonical_request = format!(
-        "{method}\n{canonical_uri}\n\n{canonical_headers_text}\n{signed_headers}\n{payload_sha256}"
-    );
-    let string_to_sign = format!(
-        "AWS4-HMAC-SHA256\n{}\n{}\n{}",
-        timestamp.amz_date,
-        credential_scope,
-        sha256_hex(canonical_request.as_bytes())
-    );
-    let signature = aws_v4_signature(
-        &config.secret_access_key,
-        &timestamp.date_stamp,
-        &config.region,
-        "s3",
-        &string_to_sign,
-    )?;
-    let authorization = format!(
-        "AWS4-HMAC-SHA256 Credential={}/{}, SignedHeaders={}, Signature={}",
-        config.access_key_id, credential_scope, signed_headers, signature
-    );
-
-    let mut headers = canonical_headers;
-    headers.push(("authorization".to_string(), authorization));
-
-    Ok(SignedObjectStorageRequest {
-        url: request_url,
-        headers,
-    })
-}
-
-fn presign_object_storage_download_url(
-    config: &ObjectStorageConfig,
-    object_key: &str,
-    expires_seconds: u32,
-) -> Result<String, String> {
-    if expires_seconds == 0 {
-        return Err("expires_seconds must be greater than 0".to_string());
-    }
-
-    let endpoint = Url::parse(&config.endpoint_url)
-        .map_err(|error| format!("Failed to parse the object storage endpoint: {error}"))?;
-    let host = endpoint_host_header(&endpoint)?;
-    let object_key = object_key.trim_start_matches('/');
-    let canonical_uri = format!(
-        "/{}/{}",
-        aws_uri_encode_path_segment(config.bucket_name.trim_matches('/')),
-        aws_uri_encode_path_segment(object_key)
-    );
-    let request_url = format!(
-        "{}/{}/{}",
-        config.endpoint_url.trim_end_matches('/'),
-        config.bucket_name.trim_matches('/'),
-        object_key
-    );
-    let timestamp = aws_timestamp().map_err(|error| {
-        format!("Failed to create the object storage request timestamp: {error}")
-    })?;
-    let credential_scope = format!("{}/{}/s3/aws4_request", timestamp.date_stamp, config.region);
-
-    let mut query_pairs = vec![
-        (
-            "X-Amz-Algorithm".to_string(),
-            "AWS4-HMAC-SHA256".to_string(),
-        ),
-        (
-            "X-Amz-Credential".to_string(),
-            format!("{}/{}", config.access_key_id, credential_scope),
-        ),
-        ("X-Amz-Date".to_string(), timestamp.amz_date.clone()),
-        ("X-Amz-Expires".to_string(), expires_seconds.to_string()),
-        ("X-Amz-SignedHeaders".to_string(), "host".to_string()),
-    ];
-    if let Some(session_token) = optional_non_empty(&config.session_token) {
-        query_pairs.push((
-            "X-Amz-Security-Token".to_string(),
-            session_token.to_string(),
-        ));
-    }
-
-    let canonical_query = canonical_query_string(&query_pairs);
-    let canonical_headers = format!("host:{host}\n");
-    let canonical_request = format!(
-        "GET\n{canonical_uri}\n{canonical_query}\n{canonical_headers}\nhost\nUNSIGNED-PAYLOAD"
-    );
-    let string_to_sign = format!(
-        "AWS4-HMAC-SHA256\n{}\n{}\n{}",
-        timestamp.amz_date,
-        credential_scope,
-        sha256_hex(canonical_request.as_bytes())
-    );
-    let signature = aws_v4_signature(
-        &config.secret_access_key,
-        &timestamp.date_stamp,
-        &config.region,
-        "s3",
-        &string_to_sign,
-    )?;
-
-    Ok(format!(
-        "{request_url}?{canonical_query}&X-Amz-Signature={signature}"
-    ))
-}
-
-fn build_object_storage_http_client() -> Result<BlockingHttpClient, String> {
-    BlockingHttpClient::builder()
-        .connect_timeout(Duration::from_secs(20))
-        .timeout(None::<Duration>)
-        .tcp_keepalive(Duration::from_secs(30))
-        .build()
-        .map_err(|error| format!("Failed to initialize the object storage HTTP client: {error}"))
-}
-
-fn reqwest_headers(headers: &[(String, String)]) -> Result<reqwest::header::HeaderMap, String> {
-    use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-
-    let mut map = HeaderMap::new();
-    for (name, value) in headers {
-        let header_name = HeaderName::from_bytes(name.as_bytes())
-            .map_err(|error| format!("Invalid object storage header name `{name}`: {error}"))?;
-        let header_value = HeaderValue::from_str(value).map_err(|error| {
-            format!("Invalid object storage header value for `{name}`: {error}")
-        })?;
-        map.insert(header_name, header_value);
-    }
-
-    Ok(map)
-}
-
-fn endpoint_host_header(endpoint: &Url) -> Result<String, String> {
-    let host = endpoint
-        .host_str()
-        .ok_or_else(|| "The object storage endpoint is missing a host.".to_string())?;
-
-    Ok(match endpoint.port() {
-        Some(port) => format!("{host}:{port}"),
-        None => host.to_string(),
-    })
-}
-
-fn aws_uri_encode_path_segment(value: &str) -> String {
-    let mut encoded = String::with_capacity(value.len());
-
-    for byte in value.as_bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
-                encoded.push(*byte as char)
-            }
-            _ => encoded.push_str(&format!("%{byte:02X}")),
-        }
-    }
-
-    encoded
-}
-
-fn aws_uri_encode_query_component(value: &str) -> String {
-    let mut encoded = String::with_capacity(value.len());
-
-    for byte in value.as_bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                encoded.push(*byte as char)
-            }
-            _ => encoded.push_str(&format!("%{byte:02X}")),
-        }
-    }
-
-    encoded
-}
-
-fn canonical_query_string(pairs: &[(String, String)]) -> String {
-    let mut encoded_pairs = pairs
-        .iter()
-        .map(|(key, value)| {
-            (
-                aws_uri_encode_query_component(key),
-                aws_uri_encode_query_component(value),
-            )
-        })
-        .collect::<Vec<_>>();
-    encoded_pairs.sort_by(|left, right| left.cmp(right));
-
-    encoded_pairs
-        .into_iter()
-        .map(|(key, value)| format!("{key}={value}"))
-        .collect::<Vec<_>>()
-        .join("&")
-}
-
-fn aws_v4_signature(
-    secret_access_key: &str,
-    date_stamp: &str,
-    region: &str,
-    service: &str,
-    string_to_sign: &str,
-) -> Result<String, String> {
-    let key_date = hmac_sha256(format!("AWS4{secret_access_key}").as_bytes(), date_stamp)?;
-    let key_region = hmac_sha256(&key_date, region)?;
-    let key_service = hmac_sha256(&key_region, service)?;
-    let signing_key = hmac_sha256(&key_service, "aws4_request")?;
-    let signature = hmac_sha256(&signing_key, string_to_sign)?;
-    Ok(hex_lower(&signature))
-}
-
-fn hmac_sha256(key: &[u8], message: &str) -> Result<Vec<u8>, String> {
-    let mut mac = Hmac::<Sha256>::new_from_slice(key)
-        .map_err(|error| format!("Invalid HMAC key: {error}"))?;
-    mac.update(message.as_bytes());
-    Ok(mac.finalize().into_bytes().to_vec())
-}
-
-fn sha256_hex(data: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    hex_lower(&hasher.finalize())
-}
-
-fn hex_lower(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(bytes.len() * 2);
-
-    for byte in bytes {
-        output.push(HEX[(byte >> 4) as usize] as char);
-        output.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-
-    output
-}
-
-struct AwsTimestamp {
-    amz_date: String,
-    date_stamp: String,
-}
-
-fn aws_timestamp() -> Result<AwsTimestamp, time::error::Format> {
-    let now = OffsetDateTime::now_utc();
-    let amz_date = now.format(format_description!(
-        "[year][month][day]T[hour][minute][second]Z"
-    ))?;
-    let date_stamp = now.format(format_description!("[year][month][day]"))?;
-
-    Ok(AwsTimestamp {
-        amz_date,
-        date_stamp,
-    })
-}
-
-fn format_reqwest_error(error: &reqwest::Error) -> String {
-    let mut message = error.to_string();
-    let mut source = error.source();
-
-    while let Some(next) = source {
-        message.push_str(" Caused by: ");
-        message.push_str(&next.to_string());
-        source = next.source();
-    }
-
-    message
-}
-
-fn current_unix_timestamp() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs() as i64)
-        .unwrap_or(0)
-}
-
-fn job_key(job_id: &str) -> String {
-    format!("job:{job_id}")
-}
-
-fn job_status_key(job_id: &str) -> String {
-    format!("job_status:{job_id}")
-}
-
-fn artifact_record_key(job_id: &str) -> String {
-    format!("{ARTIFACT_RECORD_PREFIX}{job_id}")
-}
-
-fn persist_artifact_record(
-    config: &AppConfig,
-    job_id: &str,
-    artifact_record: &ArtifactRecord,
-) -> Result<(), String> {
-    let client = redis::Client::open(config.redis_url.as_str())
-        .map_err(|error| format!("Failed to parse the Redis URL: {error}"))?;
-    let mut connection = client
-        .get_connection()
-        .map_err(|error| format!("Failed to connect to Redis: {error}"))?;
-    let payload = serde_json::to_string(artifact_record)
-        .map_err(|error| format!("Failed to serialize the artifact record: {error}"))?;
-
-    connection
-        .set::<_, _, ()>(artifact_record_key(job_id), payload)
-        .map_err(|error| format!("Failed to persist the artifact record in Redis: {error}"))
 }
 
 fn coordinator_job_status_label(status: i32) -> &'static str {
@@ -2297,46 +1154,6 @@ fn coordinator_result_status_terminal(status: i32) -> bool {
     matches!(status, 4 | 5 | 6)
 }
 
-fn optional_non_empty(value: &str) -> Option<&str> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed)
-    }
-}
-
-fn join_bucket_api_url(base_url: &str, object_key: &str) -> String {
-    format!(
-        "{}/{}",
-        base_url.trim_end_matches('/'),
-        object_key.trim_start_matches('/'),
-    )
-}
-
-fn parse_bucket_url(bucket_url: &str) -> Result<(String, String, String), String> {
-    let parsed = Url::parse(bucket_url)
-        .map_err(|error| format!("Failed to parse S3_BUCKET URL: {error}"))?;
-
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| "S3_BUCKET URL must include a host.".to_string())?;
-
-    let bucket_name = parsed
-        .path_segments()
-        .and_then(|mut segments| segments.find(|segment| !segment.trim().is_empty()))
-        .map(|segment| segment.trim().to_string())
-        .ok_or_else(|| "S3_BUCKET URL must include a bucket name in the path.".to_string())?;
-
-    let endpoint_url = match parsed.port() {
-        Some(port) => format!("{}://{}:{}", parsed.scheme(), host, port),
-        None => format!("{}://{}", parsed.scheme(), host),
-    };
-    let bucket_api_url = format!("{}/{}", endpoint_url, bucket_name);
-
-    Ok((endpoint_url, bucket_name, bucket_api_url))
-}
-
 fn normalize_client_command(command: Vec<String>) -> Result<Vec<String>, String> {
     let lines = command
         .into_iter()
@@ -2344,122 +1161,13 @@ fn normalize_client_command(command: Vec<String>) -> Result<Vec<String>, String>
         .filter(|segment| !segment.is_empty())
         .collect::<Vec<_>>();
 
+    // No command: the image's own CMD runs (the artifact is attached, so the coordinator allows this).
     if lines.is_empty() {
-        return Err(
-            "At least one command segment is required before requesting a run.".to_string(),
-        );
+        return Ok(Vec::new());
     }
 
     let script = lines.join("\n");
     Ok(vec!["/bin/sh".to_string(), "-lc".to_string(), script])
-}
-
-fn tar_gz_path_for_project(project_root: &Path, project_name: &str) -> PathBuf {
-    let sanitized_name = sanitize_name(project_name);
-    project_root.join(format!("{sanitized_name}-computehive-image.tar.gz"))
-}
-
-fn object_key_for_artifact(project_name: &str, job_id: &str, artifact_sha256: &str) -> String {
-    let sanitized_name = sanitize_name(project_name);
-    let hash_prefix = artifact_sha256.chars().take(16).collect::<String>();
-    format!(
-        "computehive/run-requests/{sanitized_name}/{job_id}/{sanitized_name}-{hash_prefix}.tar.gz"
-    )
-}
-
-fn app_config() -> Result<&'static AppConfig, String> {
-    match APP_CONFIG.get_or_init(load_app_config) {
-        Ok(config) => Ok(config),
-        Err(error) => Err(error.clone()),
-    }
-}
-
-fn load_app_config() -> Result<AppConfig, String> {
-    ensure_env_file_loaded();
-
-    let bucket_url = required_env("S3_BUCKET")?;
-    let access_key_id = required_env("S3_ACCESS_KEY_ID")?;
-    let secret_access_key = required_env("S3_SECRET_ACCESS_KEY")?;
-    let session_token = optional_env("S3_SESSION_TOKEN").unwrap_or_default();
-    let redis_url = required_env("REDIS_URL")?;
-    let coordinator_addr = optional_env(CLIENT_COORDINATOR_ADDR_ENV_KEY)
-        .or_else(|| optional_env("COORDINATOR_ADDR"))
-        .unwrap_or_else(|| DEFAULT_COORDINATOR_ADDR.to_string());
-    let (endpoint_url, bucket_name, bucket_api_url) = parse_bucket_url(&bucket_url)?;
-    let bucket_public_url =
-        optional_env("S3_PUBLIC_BUCKET_URL").unwrap_or_else(|| bucket_api_url.clone());
-
-    Ok(AppConfig {
-        object_storage: ObjectStorageConfig {
-            endpoint_url,
-            bucket_name,
-            bucket_api_url,
-            bucket_public_url,
-            access_key_id,
-            secret_access_key,
-            session_token,
-            region: DEFAULT_R2_REGION.to_string(),
-        },
-        redis_url,
-        coordinator_addr,
-    })
-}
-
-async fn submit_job_to_coordinator(
-    config: &AppConfig,
-    image: &DockerImageResult,
-    environment: HashMap<String, String>,
-    command: &[String],
-    artifact_api_url: &str,
-    artifact_sha256: &str,
-) -> Result<String, String> {
-    let endpoint = coordinator_endpoint(&config.coordinator_addr);
-    let channel = Endpoint::from_shared(endpoint.clone())
-        .map_err(|error| format!("Failed to parse coordinator address {endpoint}: {error}"))?
-        .connect_timeout(Duration::from_secs(3))
-        .timeout(Duration::from_secs(5))
-        .connect()
-        .await
-        .map_err(|error| format!("Failed to connect to coordinator at {endpoint}: {error}"))?;
-
-    let mut client = ClientServiceClient::new(channel);
-    let response = client
-        .submit_job(SubmitJobRequest {
-            container_image: image.image_tag.clone(),
-            command: command.to_vec(),
-            required_resources: Some(CoordinatorResourceSpec {
-                cpu_cores: DEFAULT_REQUIRED_CPU_CORES,
-                gpu_count: DEFAULT_REQUIRED_GPU_COUNT,
-                memory_mb: DEFAULT_REQUIRED_MEMORY_MB,
-            }),
-            environment,
-            max_runtime_seconds: DEFAULT_MAX_RUNTIME_SECONDS,
-            job: None,
-            artifact_url: artifact_api_url.to_string(),
-            artifact_sha256: artifact_sha256.to_string(),
-        })
-        .await
-        .map_err(|error| format!("Coordinator SubmitJob request failed: {error}"))?;
-
-    let job_id = response
-        .into_inner()
-        .job_id
-        .map(|id| id.value)
-        .unwrap_or_default();
-    if job_id.trim().is_empty() {
-        return Err("Coordinator SubmitJob response did not include a job id.".to_string());
-    }
-
-    Ok(job_id)
-}
-
-fn coordinator_endpoint(address: &str) -> String {
-    let trimmed = address.trim();
-    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
-        trimmed.to_string()
-    } else {
-        format!("http://{trimmed}")
-    }
 }
 
 fn ensure_env_file_loaded() {
@@ -2481,13 +1189,6 @@ fn env_file_candidates() -> Vec<PathBuf> {
     }
 
     paths
-}
-
-fn required_env(key: &str) -> Result<String, String> {
-    std::env::var(key)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| format!("Missing required configuration value: {key}"))
 }
 
 fn optional_env(key: &str) -> Option<String> {
@@ -2578,6 +1279,334 @@ fn summarize_command_output(output: &Output) -> String {
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+// ---------------------------------------------------------------------------------------------------
+// running a project on the cluster
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RunRequestResult {
+    image: DockerImageResult,
+    tar_size_bytes: u64,
+    artifact_sha256: String,
+    job_id: String,
+    summary: String,
+    notes: Vec<String>,
+}
+
+/// What the user asked for beyond the defaults. Every field is optional; the coordinator validates them again.
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct RunOptions {
+    cpu_cores: Option<i32>,
+    memory_mb: Option<i32>,
+    gpu_count: Option<i32>,
+    timeout_seconds: Option<i32>,
+    min_disk_mb: Option<i32>,
+    verify: bool,
+    os: Option<String>,
+    arch: Option<String>,
+    labels: Vec<String>,
+}
+
+fn validate_options(o: &RunOptions) -> Result<(), String> {
+    let check = |name: &str, v: Option<i32>, lo: i32, hi: i32| -> Result<(), String> {
+        match v {
+            Some(x) if x < lo || x > hi => Err(format!("{name} must be between {lo} and {hi}, got {x}")),
+            _ => Ok(()),
+        }
+    };
+    check("CPU cores", o.cpu_cores, 1, 1024)?;
+    check("memory (MB)", o.memory_mb, 16, 4 * 1024 * 1024)?;
+    check("GPUs", o.gpu_count, 0, 64)?;
+    check("time limit (seconds)", o.timeout_seconds, 1, 7 * 24 * 3600)?;
+    check("minimum free disk (MB)", o.min_disk_mb, 0, 16 * 1024 * 1024)?;
+    if o.labels.len() > 16 {
+        return Err("at most 16 labels are allowed".to_string());
+    }
+    Ok(())
+}
+
+/// Builds the project into an image, uploads it to the cluster, and submits the job. Returns as soon as the job
+/// is queued; the UI then follows it with `get_job_progress`.
+#[tauri::command]
+async fn request_project_run(
+    project_path: String,
+    command: Vec<String>,
+    options: Option<RunOptions>,
+) -> Result<RunRequestResult, String> {
+    let started = Instant::now();
+    let cfg = cluster::load_config();
+    if cfg.api_token.is_none() {
+        return Err(
+            "No API token found. Run `make up` in the repository (it writes .computehive/api.token), or set COMPUTEHIVE_TOKEN."
+                .to_string(),
+        );
+    }
+    let opts = options.unwrap_or_default();
+    validate_options(&opts)?;
+    let command_lines = normalize_client_command(command)?;
+
+    let build_started = Instant::now();
+    let build_path = project_path.clone();
+    let image = tauri::async_runtime::spawn_blocking(move || build_project_docker_image(&build_path))
+        .await
+        .map_err(|e| format!("The image build task failed: {e}"))??;
+    let build_ms = build_started.elapsed().as_millis();
+
+    // The artifact is the plain `docker save` tar (the same bytes `computehive submit` uploads): the worker
+    // inspects its tags before loading it. It is addressed by its SHA-256, which the store verifies.
+    let archive = PathBuf::from(&image.image_archive_path);
+    let upload_started = Instant::now();
+    let (sha, tar_size) = tauri::async_runtime::spawn_blocking(move || -> Result<(String, u64), String> {
+        let sha = sha256_for_file(&archive)?;
+        let size = fs::metadata(&archive)
+            .map_err(|e| format!("Failed to inspect the image archive: {e}"))?
+            .len();
+        cluster::upload_artifact_blocking(&archive, &sha)?;
+        Ok((sha, size))
+    })
+    .await
+    .map_err(|e| format!("The upload task failed: {e}"))??;
+    let upload_ms = upload_started.elapsed().as_millis();
+
+    let mut client = cluster::client(&cfg).await?;
+    let response = client
+        .submit_job(SubmitJobRequest {
+            container_image: image.image_tag.clone(),
+            command: command_lines,
+            required_resources: Some(CoordinatorResourceSpec {
+                cpu_cores: opts.cpu_cores.unwrap_or(DEFAULT_REQUIRED_CPU_CORES),
+                gpu_count: opts.gpu_count.unwrap_or(DEFAULT_REQUIRED_GPU_COUNT),
+                memory_mb: opts.memory_mb.unwrap_or(DEFAULT_REQUIRED_MEMORY_MB),
+            }),
+            max_runtime_seconds: opts.timeout_seconds.unwrap_or(DEFAULT_MAX_RUNTIME_SECONDS),
+            artifact_url: format!("computehive-artifact://{sha}"),
+            artifact_sha256: sha.clone(),
+            verify: opts.verify,
+            min_disk_mb: opts.min_disk_mb.unwrap_or(0),
+            os: opts.os.unwrap_or_default(),
+            arch: opts.arch.unwrap_or_default(),
+            labels: opts.labels,
+            ..Default::default()
+        })
+        .await
+        .map_err(cluster::friendly)?;
+    let job_id = response
+        .into_inner()
+        .job_id
+        .map(|id| id.value)
+        .unwrap_or_default();
+    if job_id.trim().is_empty() {
+        return Err("The coordinator did not return a job id.".to_string());
+    }
+
+    let mut notes = image.notes.clone();
+    notes.push(format!(
+        "Saved the image ({} bytes, sha256 {}) and uploaded it to the cluster's artifact store.",
+        tar_size,
+        &sha[..12.min(sha.len())]
+    ));
+    notes.push(format!(
+        "Timing: image build {build_ms} ms, hash and upload {upload_ms} ms, total {} ms.",
+        started.elapsed().as_millis()
+    ));
+    let summary = format!("Built the image, uploaded it, and queued job {job_id}.");
+    Ok(RunRequestResult {
+        image,
+        tar_size_bytes: tar_size,
+        artifact_sha256: sha,
+        job_id,
+        summary,
+        notes,
+    })
+}
+
+#[tauri::command]
+async fn get_run_request_result(job_id: String) -> Result<Option<RunRequestJobResult>, String> {
+    let trimmed_job_id = job_id.trim();
+    if trimmed_job_id.is_empty() {
+        return Err("job_id is required".to_string());
+    }
+    let cfg = cluster::load_config();
+    let mut client = cluster::client(&cfg).await?;
+    let response = match client
+        .get_job_result(GetJobResultRequest {
+            job_id: Some(coordinatorpb::JobId {
+                value: trimmed_job_id.to_string(),
+            }),
+        })
+        .await
+    {
+        Ok(response) => response.into_inner(),
+        Err(error) if error.code() == tonic::Code::NotFound => return Ok(None),
+        Err(error) => return Err(cluster::friendly(error)),
+    };
+
+    let mut job_result = RunRequestJobResult {
+        job_id: trimmed_job_id.to_string(),
+        worker_id: String::new(),
+        failure_reason: String::new(),
+        status: coordinator_job_status_label(response.status).to_string(),
+        result_status: String::new(),
+        partial: false,
+        exit_code: 0,
+        stdout_excerpt: String::new(),
+        stderr_excerpt: String::new(),
+        output_uri: String::new(),
+        output_api_url: String::new(),
+        output_public_url: String::new(),
+        output_size_bytes: 0,
+        output_artifacts: Vec::new(),
+        finished_at_unix: 0,
+        completed: coordinator_job_status_terminal(response.status),
+    };
+    if let Some(result) = response.result {
+        job_result.failure_reason = result.failure_reason.clone();
+        job_result.result_status = coordinator_result_status_name(result.status).to_string();
+        job_result.exit_code = result.exit_code;
+        job_result.stdout_excerpt = result.stdout_excerpt;
+        job_result.stderr_excerpt = result.stderr_excerpt;
+        job_result.output_uri = result.output_uri;
+        job_result.output_api_url = result.output_api_url;
+        job_result.output_public_url = result.output_public_url;
+        job_result.output_size_bytes = result.output_size_bytes;
+        job_result.finished_at_unix = result.finished_at_unix;
+        job_result.output_artifacts = result
+            .output_artifacts
+            .into_iter()
+            .map(|a| RunRequestOutputArtifact {
+                relative_path: a.relative_path,
+                object_key: a.object_key,
+                uri: a.uri,
+                api_url: a.api_url,
+                public_url: a.public_url,
+                sha256: a.sha256,
+                size_bytes: a.size_bytes,
+                content_type: a.content_type,
+            })
+            .collect();
+        job_result.completed = job_result.completed || coordinator_result_status_terminal(result.status);
+    }
+    Ok(Some(job_result))
+}
+
+// ---------------------------------------------------------------------------------------------------
+// contributor mode: run a worker on this machine
+
+/// Environment for the local worker: where the cluster is, the CA to trust, how to enrol, and where to keep its
+/// state (including the private control socket the controls below talk to).
+fn apply_worker_env(
+    command: &mut Command,
+    cfg: &cluster::ClusterConfig,
+    state_dir: &Path,
+    enrollment_token: Option<&str>,
+) -> Result<(), String> {
+    command
+        .env("COORDINATOR_ADDR", &cfg.coordinator_addr)
+        .env("COORDINATOR_HTTP_URL", &cfg.http_url)
+        .env("STATE_DIR", state_dir)
+        // The app follows the worker through its log lines, so keep them in the line-based text format.
+        .env("LOG_FORMAT", "text");
+    if let Some(pem) = &cfg.ca_pem {
+        let ca_path = state_dir.join("cluster-ca.crt");
+        fs::write(&ca_path, pem).map_err(|e| format!("Failed to save the cluster CA: {e}"))?;
+        command.env("COORDINATOR_TLS_CA", ca_path);
+        if let Some(name) = &cfg.tls_server_name {
+            command.env("COORDINATOR_TLS_SERVER_NAME", name);
+        }
+    }
+    if let Some(token) = enrollment_token {
+        command.env("ENROLLMENT_TOKEN", token);
+    }
+    let host = std::env::var("HOSTNAME")
+        .ok()
+        .filter(|h| !h.trim().is_empty())
+        .unwrap_or_else(|| "this-machine".to_string());
+    command.env("WORKER_ID", format!("desktop-{}", sanitize_name(&host)));
+    Ok(())
+}
+
+/// Starts (or reports) the worker on this machine. If the worker has never enrolled, a single-use enrollment
+/// token is used: the one the user typed, or one minted with the API token.
+#[tauri::command]
+async fn start_contributor_sharing(
+    enrollment_token: Option<String>,
+) -> Result<ContributorSharingStatus, String> {
+    {
+        let slot = contributor_worker_slot();
+        let mut guard = slot
+            .lock()
+            .map_err(|_| "Contributor worker process lock is poisoned.".to_string())?;
+        if let Some(child) = guard.as_mut() {
+            match child.try_wait() {
+                Ok(None) => {
+                    let runtime = contributor_runtime_snapshot();
+                    return Ok(ContributorSharingStatus {
+                        running: true,
+                        pid: Some(child.id()),
+                        details: "Sharing is already running.".to_string(),
+                        job_running: runtime.job_running,
+                        current_job_id: runtime.current_job_id,
+                        last_job_id: runtime.last_job_id,
+                    });
+                }
+                Ok(Some(_)) | Err(_) => *guard = None,
+            }
+        }
+    }
+
+    let cfg = cluster::load_config();
+    let state_dir = cluster::contributor_state_dir();
+    fs::create_dir_all(&state_dir).map_err(|e| format!("Failed to create {}: {e}", state_dir.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700));
+    }
+
+    // A worker that already enrolled keeps its own credential; only a first start needs a token.
+    let token = if state_dir.join("credential").exists() {
+        None
+    } else {
+        match enrollment_token.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()) {
+            Some(t) => Some(t),
+            None => Some(cluster::mint_enrollment_token(&cfg).await.map_err(|e| {
+                format!("This machine has not joined the cluster yet and no enrollment token was given. Paste one (from `computehive admin enroll`), or provide the API token so the app can create one. ({e})")
+            })?),
+        }
+    };
+
+    reset_contributor_runtime_state();
+    let mut command = resolve_worker_command()?;
+    configure_worker_command(&mut command)?;
+    apply_worker_env(&mut command, &cfg, &state_dir, token.as_deref())?;
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command
+        .stdin(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("Failed to start local worker process: {error}"))?;
+    if let Some(stdout) = child.stdout.take() {
+        thread::spawn(move || stream_worker_logs(stdout));
+    }
+    if let Some(stderr) = child.stderr.take() {
+        thread::spawn(move || stream_worker_logs(stderr));
+    }
+    let pid = child.id();
+    *contributor_worker_slot()
+        .lock()
+        .map_err(|_| "Contributor worker process lock is poisoned.".to_string())? = Some(child);
+
+    let runtime = contributor_runtime_snapshot();
+    Ok(ContributorSharingStatus {
+        running: true,
+        pid: Some(pid),
+        details: "Sharing started. The worker is joining the cluster.".to_string(),
+        job_running: runtime.job_running,
+        current_job_id: runtime.current_job_id,
+        last_job_id: runtime.last_job_id,
+    })
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -2585,13 +1614,123 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             create_project_docker_image,
             request_project_run,
-            list_incoming_run_requests,
             get_run_request_result,
-            get_signed_result_artifact_url,
             start_contributor_sharing,
             stop_contributor_sharing,
-            get_contributor_sharing_status
+            get_contributor_sharing_status,
+            cluster::cluster_overview,
+            cluster::get_job_progress,
+            cluster::explain_job,
+            cluster::cancel_job,
+            cluster::download_job_outputs,
+            cluster::contributor_control_status,
+            cluster::contributor_set_policy,
+            cluster::contributor_pause,
+            cluster::contributor_resume
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod live_tests {
+    use super::*;
+
+    /// The whole desktop path against the real, secured cluster: build the example project, upload it, submit,
+    /// follow it to the end, and read the result. Needs `make up` and Docker. Run: cargo test -- --ignored
+    #[test]
+    #[ignore = "needs a running cluster (make up) and Docker"]
+    fn live_build_upload_submit_follow_and_read_the_result() {
+        // Build from a throwaway copy: the app writes helper files (a .dockerignore) into the project it builds,
+        // and a test must not leave anything in the repository.
+        let project = std::env::temp_dir().join(format!("computehive-live-hello-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&project);
+        fs::create_dir_all(&project).expect("temp project");
+        fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/hello/Dockerfile"),
+            project.join("Dockerfile"),
+        )
+        .expect("copy the example Dockerfile");
+        let res = tauri::async_runtime::block_on(request_project_run(
+            project.display().to_string(),
+            Vec::new(), // no command: the image's own CMD runs
+            Some(RunOptions::default()),
+        ))
+        .expect("request_project_run");
+        assert!(res.image.image_tag.starts_with("computehive-job:"), "the worker only accepts this namespace: {}", res.image.image_tag);
+        assert!(!res.job_id.is_empty());
+
+        let deadline = Instant::now() + Duration::from_secs(120);
+        let last = loop {
+            let p = tauri::async_runtime::block_on(cluster::get_job_progress(res.job_id.clone())).expect("progress");
+            if p.terminal {
+                break p.status;
+            }
+            assert!(Instant::now() < deadline, "job did not finish in time (last status {})", p.status);
+            thread::sleep(Duration::from_secs(1));
+        };
+        assert_eq!(last, "succeeded");
+
+        let result = tauri::async_runtime::block_on(get_run_request_result(res.job_id.clone()))
+            .expect("result")
+            .expect("a finished job has a result");
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stdout_excerpt.contains("hello from"), "stdout was {:?}", result.stdout_excerpt);
+
+        let why = tauri::async_runtime::block_on(cluster::explain_job(res.job_id)).expect("explain");
+        assert!(why.evaluations.iter().any(|e| e.chosen), "the decision should name the chosen worker");
+        let _ = fs::remove_dir_all(&project);
+    }
+
+    /// The contributor path from the app: start a worker (it enrols with a token the app mints), watch it appear in
+    /// the cluster, change its limits over the control socket, pause and resume it, then stop it. Uses a throwaway
+    /// state directory so it never touches a real worker's credential.
+    #[test]
+    #[ignore = "needs a running cluster (make up), Docker and the worker binary (make build)"]
+    fn live_contributor_start_control_and_stop() {
+        let dir = std::env::temp_dir().join(format!("computehive-desktop-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        std::env::set_var("COMPUTEHIVE_STATE_DIR", &dir);
+        std::env::set_var("HOSTNAME", "livetest");
+
+        let started = tauri::async_runtime::block_on(start_contributor_sharing(None)).expect("start sharing");
+        assert!(started.running);
+
+        // The worker needs a moment to enrol and open its control socket.
+        let deadline = Instant::now() + Duration::from_secs(40);
+        let status = loop {
+            match cluster::contributor_control_status() {
+                Ok(v) => break v,
+                Err(e) => {
+                    assert!(Instant::now() < deadline, "the worker never became controllable: {e}");
+                    thread::sleep(Duration::from_millis(500));
+                }
+            }
+        };
+        assert_eq!(status["worker_id"], "desktop-livetest");
+
+        // Change the limits the way the sliders do: send the whole policy back with edited fields.
+        let mut policy = status["policy"].clone();
+        policy["max_cpus"] = serde_json::json!(2);
+        policy["max_job_disk_mb"] = serde_json::json!(128);
+        let applied = cluster::contributor_set_policy(policy).expect("apply policy");
+        assert_eq!(applied["max_cpus"], 2.0);
+        assert_eq!(applied["max_job_disk_mb"], 128);
+        // A policy with an unknown field must be refused, never silently half-applied.
+        assert!(cluster::contributor_set_policy(serde_json::json!({"max_cpuz": 1})).is_err());
+
+        cluster::contributor_pause(false).expect("pause");
+        assert_eq!(cluster::contributor_control_status().unwrap()["policy"]["paused"], true);
+        cluster::contributor_resume().expect("resume");
+        assert_eq!(cluster::contributor_control_status().unwrap()["policy"]["paused"], false);
+
+        // It is a real member of the cluster while it runs.
+        let overview = tauri::async_runtime::block_on(cluster::cluster_overview());
+        assert!(overview.workers.iter().any(|w| w.id == "desktop-livetest"), "the worker did not join the cluster");
+
+        let stopped = tauri::async_runtime::block_on(async { stop_contributor_sharing() }).expect("stop sharing");
+        assert!(!stopped.running);
+        std::env::remove_var("COMPUTEHIVE_STATE_DIR");
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
