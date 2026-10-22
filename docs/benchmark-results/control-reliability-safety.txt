@@ -1,0 +1,99 @@
+load: 3.84 3.71 3.95
+BENCH assign_latency workers=1 jobs=300 p50_ms=160 p95_ms=404 p99_ms=476 max_ms=500
+BENCH assign_latency workers=8 jobs=300 p50_ms=89 p95_ms=259 p99_ms=4389 max_ms=4576
+BENCH assign_latency workers=32 jobs=300 p50_ms=43 p95_ms=1876 p99_ms=4525 max_ms=4648
+--- PASS: TestBenchAssignLatency (45.01s)
+ok  	coordinator/internal/chaos	45.028s
+BENCH requestjob_rpc_empty pool=1 calls=1000 p50_ms=0.83 p95_ms=1.24 p99_ms=1.65
+--- FAIL: TestBenchRequestJobRPC (11.65s)
+FAIL
+FAIL	coordinator/internal/chaos	11.660s
+FAIL
+BenchmarkEvaluate/workers=10-16         	  393156	      6806 ns/op	    4808 B/op	      28 allocs/op
+BenchmarkEvaluate/workers=100-16        	   29422	     82123 ns/op	   44744 B/op	     211 allocs/op
+BenchmarkEvaluate/workers=1000-16       	    1980	   1084420 ns/op	  402120 B/op	    2014 allocs/op
+    chaos_test.go:139: iteration 0: kill -> requeued 5.31s, -> reassigned 6.34s, -> completed 6.65s (limit 15s)
+    chaos_test.go:139: iteration 1: kill -> requeued 5.61s, -> reassigned 6.63s, -> completed 6.96s (limit 15s)
+    chaos_test.go:139: iteration 2: kill -> requeued 6.32s, -> reassigned 7.34s, -> completed 7.67s (limit 15s)
+    chaos_test.go:139: iteration 3: kill -> requeued 5.05s, -> reassigned 6.08s, -> completed 6.40s (limit 15s)
+    chaos_test.go:139: iteration 4: kill -> requeued 6.65s, -> reassigned 7.68s, -> completed 7.99s (limit 15s)
+    chaos_test.go:139: iteration 5: kill -> requeued 5.76s, -> reassigned 6.79s, -> completed 7.10s (limit 15s)
+    chaos_test.go:139: iteration 6: kill -> requeued 6.45s, -> reassigned 7.47s, -> completed 7.80s (limit 15s)
+    chaos_test.go:139: iteration 7: kill -> requeued 5.14s, -> reassigned 6.15s, -> completed 6.48s (limit 15s)
+    chaos_test.go:139: iteration 8: kill -> requeued 6.42s, -> reassigned 7.45s, -> completed 7.76s (limit 15s)
+    chaos_test.go:139: iteration 9: kill -> requeued 5.67s, -> reassigned 6.68s, -> completed 7.01s (limit 15s)
+    chaos_test.go:139: iteration 10: kill -> requeued 5.48s, -> reassigned 6.49s, -> completed 6.81s (limit 15s)
+    chaos_test.go:139: iteration 11: kill -> requeued 5.69s, -> reassigned 6.70s, -> completed 7.01s (limit 15s)
+    chaos_test.go:139: iteration 12: kill -> requeued 6.02s, -> reassigned 7.03s, -> completed 7.36s (limit 15s)
+    chaos_test.go:139: iteration 13: kill -> requeued 4.68s, -> reassigned 5.71s, -> completed 6.02s (limit 15s)
+    chaos_test.go:139: iteration 14: kill -> requeued 4.75s, -> reassigned 5.93s, -> completed 7.09s (limit 15s)
+    chaos_test.go:139: iteration 15: kill -> requeued 5.91s, -> reassigned 6.94s, -> completed 7.27s (limit 15s)
+    chaos_test.go:139: iteration 16: kill -> requeued 5.65s, -> reassigned 6.67s, -> completed 6.99s (limit 15s)
+    chaos_test.go:139: iteration 17: kill -> requeued 4.77s, -> reassigned 5.80s, -> completed 6.11s (limit 15s)
+    chaos_test.go:139: iteration 18: kill -> requeued 6.20s, -> reassigned 7.22s, -> completed 7.55s (limit 15s)
+    chaos_test.go:139: iteration 19: kill -> requeued 4.96s, -> reassigned 5.98s, -> completed 6.31s (limit 15s)
+    chaos_test.go:139: iteration 20: kill -> requeued 6.11s, -> reassigned 7.14s, -> completed 7.45s (limit 15s)
+    chaos_test.go:139: iteration 21: kill -> requeued 6.12s, -> reassigned 7.15s, -> completed 7.46s (limit 15s)
+    chaos_test.go:139: iteration 22: kill -> requeued 5.20s, -> reassigned 6.24s, -> completed 6.55s (limit 15s)
+    chaos_test.go:139: iteration 23: kill -> requeued 5.23s, -> reassigned 6.25s, -> completed 6.56s (limit 15s)
+    chaos_test.go:139: iteration 24: kill -> requeued 5.01s, -> reassigned 6.03s, -> completed 6.36s (limit 15s)
+    chaos_test.go:139: iteration 25: kill -> requeued 5.18s, -> reassigned 6.21s, -> completed 6.52s (limit 15s)
+    chaos_test.go:139: iteration 26: kill -> requeued 5.82s, -> reassigned 6.85s, -> completed 7.16s (limit 15s)
+    chaos_test.go:139: iteration 27: kill -> requeued 5.69s, -> reassigned 6.73s, -> completed 7.03s (limit 15s)
+    chaos_test.go:139: iteration 28: kill -> requeued 6.07s, -> reassigned 7.09s, -> completed 7.39s (limit 15s)
+    chaos_test.go:139: iteration 29: kill -> requeued 6.18s, -> reassigned 7.20s, -> completed 7.52s (limit 15s)
+--- PASS: TestWorkerKilledMidJobIsRequeuedUnder15sAndCompletesElsewhere (246.82s)
+ok  	coordinator/internal/chaos	246.833s
+    chaos_test.go:423: 1000 jobs, 133 worker kills, 53 jobs re-run after a kill, 2 stale results discarded, 1 duplicates ignored: 1000 SUCCEEDED, 0 lost, each committed exactly once (33.4s)
+--- PASS: TestThousandJobsWithRandomWorkerKills (42.51s)
+ok  	coordinator/internal/chaos	42.518s
+    chaos_test.go:423: 1000 jobs, 110 worker kills, 54 jobs re-run after a kill, 0 stale results discarded, 0 duplicates ignored: 1000 SUCCEEDED, 0 lost, each committed exactly once (27.6s)
+--- PASS: TestThousandJobsWithRandomWorkerKills (39.49s)
+ok  	coordinator/internal/chaos	39.499s
+    chaos_test.go:423: 1000 jobs, 125 worker kills, 52 jobs re-run after a kill, 4 stale results discarded, 0 duplicates ignored: 1000 SUCCEEDED, 0 lost, each committed exactly once (31.3s)
+--- PASS: TestThousandJobsWithRandomWorkerKills (38.88s)
+ok  	coordinator/internal/chaos	38.884s
+    chaos_test.go:423: 5000 jobs, 805 worker kills, 359 jobs re-run after a kill, 11 stale results discarded, 0 duplicates ignored: 5000 SUCCEEDED, 0 lost, each committed exactly once (201.4s)
+--- PASS: TestThousandJobsWithRandomWorkerKills (250.69s)
+ok  	coordinator/internal/chaos	250.700s
+=== RUN   TestRealContainerMemoryPressureTripsAndClearsOverload
+    sampler_test.go:139: allocating 1411 MB pushed RAM from ~79.4% to 86.5% (limit 83.4%): worker stopped taking jobs
+    sampler_test.go:144: memory freed: worker resumed after 0s (ReleaseAfter was 2s)
+--- PASS: TestRealContainerMemoryPressureTripsAndClearsOverload (6.82s)
+PASS
+ok  	github.com/vim-all/ComputeHive/worker/internal/monitor	6.828s
+=== RUN   TestHostile
+=== RUN   TestHostile/baseline:_no_privileges,_filtered_syscalls
+=== RUN   TestHostile/(a)_network:_cannot_reach_the_internet,_LAN,_or_resolve_names
+=== RUN   TestHostile/(b)_host_files:_the_host's_secret_is_unreachable_by_any_path
+=== RUN   TestHostile/(c)_writes_outside_the_sandbox_are_refused;_only_/tmp_and_the_work_dir_are_writable
+=== RUN   TestHostile/privilege_escalation_attempts_all_fail
+=== RUN   TestHostile/(h)_the_Docker_socket_is_not_reachable
+=== RUN   TestHostile/(i)_cloud_metadata_endpoints_are_unreachable
+=== RUN   TestHostile/(d)_fork_bomb_is_stopped_at_the_PID_limit
+=== RUN   TestHostile/(e)_allocating_all_memory_is_stopped_at_the_memory_cap
+=== RUN   TestHostile/(f)_a_CPU_spin_is_killed_by_the_wall-clock_timeout_and_capped_at_its_CPU_quota
+=== RUN   TestHostile/(g)_filling_the_disk_is_stopped;_the_host_disk_is_unaffected
+=== RUN   TestHostile/output_is_bounded:_a_job_printing_gigabytes_costs_a_fixed_amount_of_memory
+--- PASS: TestHostile (60.37s)
+    --- PASS: TestHostile/baseline:_no_privileges,_filtered_syscalls (0.64s)
+    --- PASS: TestHostile/(a)_network:_cannot_reach_the_internet,_LAN,_or_resolve_names (5.70s)
+    --- PASS: TestHostile/(b)_host_files:_the_host's_secret_is_unreachable_by_any_path (2.58s)
+    --- PASS: TestHostile/(c)_writes_outside_the_sandbox_are_refused;_only_/tmp_and_the_work_dir_are_writable (0.52s)
+    --- PASS: TestHostile/privilege_escalation_attempts_all_fail (0.53s)
+    --- PASS: TestHostile/(h)_the_Docker_socket_is_not_reachable (0.60s)
+    --- PASS: TestHostile/(i)_cloud_metadata_endpoints_are_unreachable (5.66s)
+    --- PASS: TestHostile/(d)_fork_bomb_is_stopped_at_the_PID_limit (0.92s)
+    --- PASS: TestHostile/(e)_allocating_all_memory_is_stopped_at_the_memory_cap (3.33s)
+    --- PASS: TestHostile/(f)_a_CPU_spin_is_killed_by_the_wall-clock_timeout_and_capped_at_its_CPU_quota (7.27s)
+    --- PASS: TestHostile/(g)_filling_the_disk_is_stopped;_the_host_disk_is_unaffected (6.42s)
+    --- PASS: TestHostile/output_is_bounded:_a_job_printing_gigabytes_costs_a_fixed_amount_of_memory (26.11s)
+=== RUN   TestHostileImageArchiveCannotRetagTheContributorsImages
+--- PASS: TestHostileImageArchiveCannotRetagTheContributorsImages (0.47s)
+=== RUN   TestHostileUnlistedImageIsRefusedAndNeverPulled
+--- PASS: TestHostileUnlistedImageIsRefusedAndNeverPulled (0.12s)
+=== RUN   TestBuildArgsRejectsHostileSpecs
+--- PASS: TestBuildArgsRejectsHostileSpecs (0.00s)
+ok  	github.com/vim-all/ComputeHive/worker/internal/executor	60.968s
+load after: 9.40 6.36 5.01
+ALLDONE

@@ -1,0 +1,17 @@
+# assign latency, appendfsync=always (test default), host load 3.8-5.4
+BENCH assign_latency workers=1 jobs=300 p50_ms=10 p95_ms=15 p99_ms=20 max_ms=29
+BENCH assign_latency workers=8 jobs=300 p50_ms=10 p95_ms=20 p99_ms=28 max_ms=37
+    bench_test.go:185: slow assignment: job #0 of 300 waited 1756 ms
+    bench_test.go:185: slow assignment: job #1 of 300 waited 3328 ms
+    bench_test.go:185: slow assignment: job #2 of 300 waited 2780 ms
+    bench_test.go:185: slow assignment: job #3 of 300 waited 2261 ms
+    bench_test.go:185: slow assignment: job #4 of 300 waited 2249 ms
+    bench_test.go:185: slow assignment: job #5 of 300 waited 2277 ms
+    bench_test.go:185: slow assignment: job #6 of 300 waited 2120 ms
+    bench_test.go:185: slow assignment: job #7 of 300 waited 1602 ms
+    bench_test.go:185: slow assignment: job #8 of 300 waited 1344 ms
+BENCH assign_latency workers=32 jobs=300 p50_ms=11 p95_ms=145 p99_ms=2261 max_ms=3328
+# assign latency, appendfsync=everysec (deployment)
+BENCH assign_latency workers=1 jobs=300 p50_ms=9 p95_ms=16 p99_ms=16 max_ms=17
+BENCH assign_latency workers=8 jobs=300 p50_ms=8 p95_ms=15 p99_ms=16 max_ms=16
+BENCH assign_latency workers=32 jobs=300 p50_ms=8 p95_ms=15 p99_ms=16 max_ms=17

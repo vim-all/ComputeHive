@@ -25,7 +25,7 @@ alive=$("$CLI" workers | grep -cE ' (ready|waiting|running) ' || true)
 fail=0
 for i in $(seq 1 "$ITER"); do
   echo "== iteration $i/$ITER"
-  out=$("$CLI" submit examples/sleep --env SLEEP_SECONDS=40 --timeout 120)
+  out=$("$CLI" submit examples/sleep --env "SLEEP_SECONDS=${CHAOS_SLEEP:-40}" --timeout 120)
   job=$(echo "$out" | sed -n 's/^submitted job //p')
   echo "job $job"
 

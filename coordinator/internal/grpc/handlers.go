@@ -194,6 +194,7 @@ func (s *Server) SubmitResult(ctx context.Context, req *pb.SubmitResultRequest) 
 				return nil, internal("fail attempt", err)
 			}
 			if d == queue.DispOK {
+				s.placer.released(workerID, jobID)
 				s.metrics.JobRequeued(reason, 1)
 			}
 			log.Warn("attempt failed, job retried", "reason", reason, "disposition", d, "new_state", newState)
@@ -233,6 +234,7 @@ func (s *Server) SubmitResult(ctx context.Context, req *pb.SubmitResultRequest) 
 		if d == queue.DispStale {
 			log.Warn("discarded result from superseded attempt")
 		} else if d == queue.DispOK {
+			s.placer.released(workerID, jobID)
 			s.metrics.JobCompleted(r.GetStatus().String(), reason, r.GetExitCode(), ran)
 			log.Info("result committed", "status", r.GetStatus().String(), "exit_code", r.GetExitCode())
 		}

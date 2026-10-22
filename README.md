@@ -242,7 +242,7 @@ workers shut down gracefully. Details, the metric catalogue and a runbook: [docs
 | `make hostile` | hostile-job suite: every attack contained, the host stays healthy |
 | `make enroll` | print a one-hour, single-use token for joining a worker |
 | `make reset` | stop the cluster and delete all its data and secrets |
-| `make bench` | not implemented yet; exits non-zero with a message |
+| `make bench` | reproducible benchmarks; results and honest limits in [docs/BENCHMARKS.md](docs/BENCHMARKS.md) (`SECTION=control\|reliability\|safety\|cluster`, `BENCH_QUICK=1`) |
 
 ## Configuration
 
@@ -290,6 +290,7 @@ ComputeHive/
 | Document | What it covers |
 |---|---|
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | components, job lifecycle, Redis data model, atomicity, failure recovery, interfaces |
+| [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | every measured number, the exact command behind it, the machine and its load, and what was not measured |
 | [docs/SCHEDULING.md](docs/SCHEDULING.md) | filters, scoring, patience, locality, `explain` |
 | [docs/OPERATIONS.md](docs/OPERATIONS.md) | metrics, alerts, logs and correlation ids, graceful shutdown, runbook |
 | [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) | assets, attackers, mitigations with their tests, residual risks |

@@ -512,3 +512,23 @@ Verified: the new examples on the live cluster (failing, memory within and over 
 live log streaming with hostile escape sequences neutralised; `ListJobs` and log-tail security (a worker without the lease cannot write logs) against a real Redis; the CA-fingerprint join with a
 wrong and a correct fingerprint and a clean drain of the joined worker; the Rust backend's 5 live tests; the frontend type-check, build and a 21-combination responsive audit.
 Not verified: the native desktop window; macOS and Windows; behaviour with more than three workers.
+
+### D-66: Redis persistence is `appendfsync everysec`, and the benchmark shows why
+- **Decision:** the deployed Redis uses `--appendonly yes --appendfsync everysec`. A crash can lose up to one second of acknowledged writes; leases, retries and
+  idempotent results are designed so that a lost last second means a re-run, not a lost or double-committed job.
+- **Evidence:** with `appendfsync always` on this shared machine, assignment latency showed 2 to 4 s stalls (p99 up to 2.2 s); with `everysec` the maximum over 300 jobs
+  was 17 ms at 1, 8 and 32 workers (`docs/benchmark-results/assign-latency.txt`). The tests keep `always` by default (strictest) and take
+  `COMPUTEHIVE_TEST_REDIS_FSYNC=everysec` to match the deployment.
+
+### D-67: Cache the scheduler's view, update it in place, and keep the original as a fallback
+- **Problem (measured):** idle pollers each re-read the cluster and the first 50 pending jobs, about 100 Redis commands per job at 1 to 8 workers.
+- **Decision:** one shared 250 ms snapshot, updated in place when a claim succeeds or a result is reported through this coordinator, an empty queue re-read at once
+  (one command), and a one-time re-read when a worker that is asking still looks busy. The Lua claim stays the safety net, so staleness can only cost optimality.
+- **What went wrong on the way (kept as evidence):** version 1 never learned about completions, so one worker managed 3.8 jobs/s (was 49); version 2 re-read on every
+  stale poll and was worse at 8 to 64 workers; version 3 (final) tells the cache about completions. Outcome: better at 2 to 4 workers, neutral at 8, **not better and
+  possibly worse at 16 to 64** (see `docs/BENCHMARKS.md`). Not claimed as an improvement there.
+
+### Mistake logged: `docker compose down -v` in a clone deleted the dev cluster's volumes
+- To time clone-to-first-job I cloned the repo and ran the cluster from the clone, then tore it down with `down -v`. `docker-compose.yml` pins `name: computehive`, so the clone
+  shared the dev cluster's project and volumes, and the teardown removed the dev Redis data and worker state volumes. Source, `.computehive/` secrets and images were untouched; the
+  cluster was restarted and all three workers re-registered and ran a job. Lesson: a clone needs `COMPOSE_PROJECT_NAME` set to something else before it is run or torn down.

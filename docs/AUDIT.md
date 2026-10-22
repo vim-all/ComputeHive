@@ -123,3 +123,6 @@ Docker 29.8 (runc only), Go 1.27, cargo 1.94, 16 cores / 15 GB RAM. Not verifiab
 | A36 | The desktop window could not be shrunk below 1080x720 and the layout had unmeasured scroll/overflow behaviour | **Phase 7 (done)**: 340x460 minimum, layout rules, 21-combination audit |
 | A37 | No way to list jobs, follow a running job's output, or see which worker ran a finished job without reading Redis | **Phase 7 (done)**: `ListJobs`, live output tail, `last_worker` |
 | A38 | Adding a machine meant copying a CA file by hand and trusting it blindly | **Phase 7 (done)**: fingerprint-verified one-line join (`scripts/join.sh`) |
+| A39 | Idle workers made the control plane spend ~100 Redis commands per job (each poll re-read the cluster and the first 50 pending jobs), capping throughput | **Phase 8 (partly done)**: shared snapshot cache; 40 to 90% better at 2 to 4 workers, neutral at 8, not improved at 16 to 64 (`docs/BENCHMARKS.md`) |
+| A40 | Test Redis fsyncs every write, which on a shared disk produced 2 to 4 s assignment stalls that looked like a scheduler bug | **Phase 8 (done)**: diagnosed by changing only persistence; deployment already uses `everysec`; tests take `COMPUTEHIVE_TEST_REDIS_FSYNC` |
+| A41 | A fresh clone takes ~6 min to reach a first job (295 s in `go mod download`, three identical worker builds in parallel) | **Open**: measured, not fixed |

@@ -11,3 +11,4 @@ data/
 
 # Browser-automation scratch output
 .playwright-mcp/
+bench-results/

@@ -64,8 +64,12 @@ func Start(t testing.TB) *Redis {
 	var rnd [4]byte
 	_, _ = rand.Read(rnd[:])
 	name := "ch-test-redis-" + hex.EncodeToString(rnd[:])
+	fsync := "always" // the strictest policy by default; COMPUTEHIVE_TEST_REDIS_FSYNC=everysec matches docker-compose.yml
+	if v := os.Getenv("COMPUTEHIVE_TEST_REDIS_FSYNC"); v != "" {
+		fsync = v
+	}
 	if out, err := docker("run", "-d", "--name", name, "-p", fmt.Sprintf("127.0.0.1:%d:6379", port),
-		"redis:7-alpine", "redis-server", "--appendonly", "yes", "--appendfsync", "always", "--save", ""); err != nil {
+		"redis:7-alpine", "redis-server", "--appendonly", "yes", "--appendfsync", fsync, "--save", ""); err != nil {
 		t.Fatalf("start redis container: %v: %s", err, out)
 	}
 	t.Cleanup(func() { _, _ = docker("rm", "-f", "-v", name) })

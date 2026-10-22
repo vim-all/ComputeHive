@@ -1,0 +1,34 @@
+load at start: 5.67 5.99 6.04
+=== RUN   TestBenchThroughput
+BENCH throughput workers=1 rep=0 jobs=1000 seconds=20.428 jobs_per_second=49.0 redis_commands_per_job=88.9 redis_script_calls_per_job=4.12
+BENCH throughput workers=1 rep=1 jobs=1000 seconds=24.454 jobs_per_second=40.9 redis_commands_per_job=89.3 redis_script_calls_per_job=4.16
+BENCH throughput workers=1 rep=2 jobs=1000 seconds=19.877 jobs_per_second=50.3 redis_commands_per_job=89.3 redis_script_calls_per_job=4.11
+BENCH throughput_summary workers=1 jobs=1000 reps=3 min=40.9 median=49.0 max=50.3
+BENCH throughput workers=2 rep=0 jobs=1000 seconds=17.880 jobs_per_second=55.9 redis_commands_per_job=108.6 redis_script_calls_per_job=4.02
+BENCH throughput workers=2 rep=1 jobs=1000 seconds=23.242 jobs_per_second=43.0 redis_commands_per_job=108.6 redis_script_calls_per_job=4.16
+BENCH throughput workers=2 rep=2 jobs=1000 seconds=23.039 jobs_per_second=43.4 redis_commands_per_job=111.9 redis_script_calls_per_job=4.23
+BENCH throughput_summary workers=2 jobs=1000 reps=3 min=43.0 median=43.4 max=55.9
+BENCH throughput workers=4 rep=0 jobs=1000 seconds=19.821 jobs_per_second=50.5 redis_commands_per_job=122.6 redis_script_calls_per_job=4.50
+BENCH throughput workers=4 rep=1 jobs=1000 seconds=19.154 jobs_per_second=52.2 redis_commands_per_job=115.7 redis_script_calls_per_job=4.48
+BENCH throughput workers=4 rep=2 jobs=1000 seconds=19.461 jobs_per_second=51.4 redis_commands_per_job=116.7 redis_script_calls_per_job=4.39
+BENCH throughput_summary workers=4 jobs=1000 reps=3 min=50.5 median=51.4 max=52.2
+BENCH throughput workers=8 rep=0 jobs=1000 seconds=10.057 jobs_per_second=99.4 redis_commands_per_job=114.2 redis_script_calls_per_job=4.45
+BENCH throughput workers=8 rep=1 jobs=1000 seconds=15.131 jobs_per_second=66.1 redis_commands_per_job=122.4 redis_script_calls_per_job=4.80
+BENCH throughput workers=8 rep=2 jobs=1000 seconds=10.509 jobs_per_second=95.2 redis_commands_per_job=116.1 redis_script_calls_per_job=4.55
+BENCH throughput_summary workers=8 jobs=1000 reps=3 min=66.1 median=95.2 max=99.4
+BENCH throughput workers=16 rep=0 jobs=1000 seconds=6.144 jobs_per_second=162.8 redis_commands_per_job=99.7 redis_script_calls_per_job=5.36
+BENCH throughput workers=16 rep=1 jobs=1000 seconds=11.009 jobs_per_second=90.8 redis_commands_per_job=114.8 redis_script_calls_per_job=6.28
+BENCH throughput workers=16 rep=2 jobs=1000 seconds=5.551 jobs_per_second=180.2 redis_commands_per_job=102.5 redis_script_calls_per_job=5.51
+BENCH throughput_summary workers=16 jobs=1000 reps=3 min=90.8 median=162.8 max=180.2
+BENCH throughput workers=32 rep=0 jobs=1000 seconds=5.090 jobs_per_second=196.5 redis_commands_per_job=155.1 redis_script_calls_per_job=10.30
+BENCH throughput workers=32 rep=1 jobs=1000 seconds=5.182 jobs_per_second=193.0 redis_commands_per_job=153.8 redis_script_calls_per_job=9.59
+BENCH throughput workers=32 rep=2 jobs=1000 seconds=5.105 jobs_per_second=195.9 redis_commands_per_job=139.3 redis_script_calls_per_job=9.51
+BENCH throughput_summary workers=32 jobs=1000 reps=3 min=193.0 median=195.9 max=196.5
+BENCH throughput workers=64 rep=0 jobs=1000 seconds=11.476 jobs_per_second=87.1 redis_commands_per_job=219.0 redis_script_calls_per_job=13.58
+BENCH throughput workers=64 rep=1 jobs=1000 seconds=10.797 jobs_per_second=92.6 redis_commands_per_job=194.6 redis_script_calls_per_job=15.45
+BENCH throughput workers=64 rep=2 jobs=1000 seconds=5.167 jobs_per_second=193.5 redis_commands_per_job=198.7 redis_script_calls_per_job=14.87
+BENCH throughput_summary workers=64 jobs=1000 reps=3 min=87.1 median=92.6 max=193.5
+--- PASS: TestBenchThroughput (592.06s)
+PASS
+ok  	coordinator/internal/chaos	592.084s
+load at end: 11.92 8.23 6.85

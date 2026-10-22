@@ -1,0 +1,329 @@
+cd cli && go build -o ../bin/computehive ./cmd/computehive
+cd worker && go build -o ../bin/computehive-worker ./cmd/worker
+cd coordinator && go build -o ../bin/computehive-coordinator ./cmd/server
+chmod +x scripts/*.sh && scripts/bootstrap.sh
+generated a new API token in .computehive/api.token
+wrote certificates to .computehive/certs
+  CA (give to workers and the CLI): .computehive/certs/ca.crt
+  server: .computehive/certs/server.crt + server.key (coordinator: TLS_CERT_FILE / TLS_KEY_FILE)
+starting redis and the coordinator ...
+ Image computehive-coordinator Building 
+#1 [internal] load local bake definitions
+#1 reading from stdin 710B done
+#1 DONE 0.0s
+
+#2 [internal] load build definition from Dockerfile
+#2 transferring dockerfile:
+#2 transferring dockerfile: 616B done
+#2 DONE 0.1s
+
+#3 [internal] load metadata for docker.io/library/alpine:3.21
+#3 DONE 0.1s
+
+#4 [internal] load metadata for docker.io/library/golang:1.25-alpine
+#4 DONE 15.0s
+
+#5 [internal] load .dockerignore
+#5 transferring context: 97B done
+#5 DONE 0.1s
+
+#6 [internal] load build context
+#6 DONE 0.0s
+
+#7 [stage-1 1/4] FROM docker.io/library/alpine:3.21@sha256:fbea4ca676632cb44223a6a040cac2c7e6c108e23aebc10bb7b1d893b6d9acdd
+#7 resolve docker.io/library/alpine:3.21@sha256:fbea4ca676632cb44223a6a040cac2c7e6c108e23aebc10bb7b1d893b6d9acdd 0.1s done
+#7 DONE 0.1s
+
+#8 [build 1/6] FROM docker.io/library/golang:1.25-alpine@sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59
+#8 resolve docker.io/library/golang:1.25-alpine@sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59
+#8 resolve docker.io/library/golang:1.25-alpine@sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59 0.1s done
+#8 DONE 0.1s
+
+#6 [internal] load build context
+#6 transferring context: 537.04kB done
+#6 DONE 0.1s
+
+#9 [build 2/6] WORKDIR /src/coordinator
+#9 CACHED
+
+#10 [build 3/6] COPY coordinator/go.mod coordinator/go.sum ./
+#10 CACHED
+
+#11 [build 4/6] RUN go mod download
+#11 CACHED
+
+#12 [build 5/6] COPY coordinator ./
+#12 DONE 0.1s
+
+#13 [build 6/6] RUN CGO_ENABLED=0 go build -trimpath -o /out/coordinator ./cmd/server
+#13 DONE 14.3s
+
+#14 [stage-1 2/4] RUN adduser -D -h /app coordinator && mkdir -p /data/artifacts && chown -R coordinator /data
+#14 CACHED
+
+#15 [stage-1 3/4] WORKDIR /app
+#15 CACHED
+
+#16 [stage-1 4/4] COPY --from=build /out/coordinator /usr/local/bin/coordinator
+#16 CACHED
+
+#17 exporting to image
+#17 exporting layers done
+#17 exporting manifest sha256:8d7bd2c0a68c89376e77fb80cc1e6e9a6cea1141ebb19c5dcde3b8e43ff73cbe 0.0s done
+#17 exporting config sha256:dca31cb716795f9a70b2161e5cc21eea0c0bd7e1d08d65e5102c8a0e4657def8 0.0s done
+#17 exporting attestation manifest sha256:c4697326a19834f59c287fe1d4416d1abd51fe6f6d5083c662e550dcf5948e4a
+#17 exporting attestation manifest sha256:c4697326a19834f59c287fe1d4416d1abd51fe6f6d5083c662e550dcf5948e4a 0.1s done
+#17 exporting manifest list sha256:ca7fe4f3b7ceb688cd50b6ad02fa68e85d2657d474eb00663194f1e87bbfffde 0.0s done
+#17 naming to docker.io/library/computehive-coordinator:latest
+#17 naming to docker.io/library/computehive-coordinator:latest 0.0s done
+#17 unpacking to docker.io/library/computehive-coordinator:latest
+#17 unpacking to docker.io/library/computehive-coordinator:latest 0.2s done
+#17 DONE 0.4s
+
+#18 resolving provenance for metadata file
+#18 DONE 0.0s
+ Image computehive-coordinator Built 
+ Container computehive-coordinator-1 Recreate 
+ Container computehive-coordinator-1 Recreated 
+ Container computehive-redis-1 Starting 
+ Container computehive-redis-1 Started 
+ Container computehive-redis-1 Waiting 
+ Container computehive-redis-1 Healthy 
+ Container computehive-coordinator-1 Starting 
+ Container computehive-coordinator-1 Started 
+ Container computehive-coordinator-1 Waiting 
+ Container computehive-redis-1 Waiting 
+ Container computehive-redis-1 Healthy 
+ Container computehive-coordinator-1 Healthy 
+starting the workers and the metrics stack ...
+ Image computehive-coordinator Building 
+ Image computehive-worker-1 Building 
+ Image computehive-worker-2 Building 
+ Image computehive-worker-3 Building 
+#1 [internal] load local bake definitions
+#1 reading from stdin 2.53kB done
+#1 DONE 0.0s
+
+#2 [worker-3 internal] load build definition from Dockerfile
+#2 transferring dockerfile:
+#2 transferring dockerfile: 592B done
+#2 DONE 0.1s
+
+#3 [worker-1 internal] load metadata for docker.io/library/golang:1.25-alpine
+#3 ...
+
+#4 [coordinator internal] load build definition from Dockerfile
+#4 transferring dockerfile: 616B done
+#4 DONE 0.2s
+
+#5 [coordinator internal] load metadata for docker.io/library/alpine:3.21
+#5 DONE 0.1s
+
+#3 [coordinator internal] load metadata for docker.io/library/golang:1.25-alpine
+#3 DONE 0.5s
+
+#6 [coordinator internal] load .dockerignore
+#6 transferring context: 97B done
+#6 DONE 0.0s
+
+#7 [coordinator internal] load build context
+#7 DONE 0.0s
+
+#8 [coordinator stage-1 1/4] FROM docker.io/library/alpine:3.21@sha256:fbea4ca676632cb44223a6a040cac2c7e6c108e23aebc10bb7b1d893b6d9acdd
+#8 resolve docker.io/library/alpine:3.21@sha256:fbea4ca676632cb44223a6a040cac2c7e6c108e23aebc10bb7b1d893b6d9acdd
+#8 resolve docker.io/library/alpine:3.21@sha256:fbea4ca676632cb44223a6a040cac2c7e6c108e23aebc10bb7b1d893b6d9acdd 0.2s done
+#8 DONE 0.2s
+
+#9 [coordinator build 1/6] FROM docker.io/library/golang:1.25-alpine@sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59
+#9 resolve docker.io/library/golang:1.25-alpine@sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59 0.2s done
+#9 DONE 0.2s
+
+#7 [coordinator internal] load build context
+#7 transferring context: 3.12kB done
+#7 DONE 0.0s
+
+#10 [coordinator stage-1 2/4] RUN adduser -D -h /app coordinator && mkdir -p /data/artifacts && chown -R coordinator /data
+#10 CACHED
+
+#11 [coordinator stage-1 3/4] WORKDIR /app
+#11 CACHED
+
+#12 [coordinator build 4/6] RUN go mod download
+#12 CACHED
+
+#13 [coordinator build 5/6] COPY coordinator ./
+#13 CACHED
+
+#14 [coordinator build 6/6] RUN CGO_ENABLED=0 go build -trimpath -o /out/coordinator ./cmd/server
+#14 CACHED
+
+#15 [coordinator build 3/6] COPY coordinator/go.mod coordinator/go.sum ./
+#15 CACHED
+
+#16 [coordinator build 2/6] WORKDIR /src/coordinator
+#16 CACHED
+
+#17 [coordinator stage-1 4/4] COPY --from=build /out/coordinator /usr/local/bin/coordinator
+#17 CACHED
+
+#18 [coordinator] exporting to image
+#18 exporting layers done
+#18 exporting manifest sha256:8d7bd2c0a68c89376e77fb80cc1e6e9a6cea1141ebb19c5dcde3b8e43ff73cbe 0.0s done
+#18 exporting config sha256:dca31cb716795f9a70b2161e5cc21eea0c0bd7e1d08d65e5102c8a0e4657def8
+#18 exporting config sha256:dca31cb716795f9a70b2161e5cc21eea0c0bd7e1d08d65e5102c8a0e4657def8 0.0s done
+#18 exporting attestation manifest sha256:ccc244ec0959c9433a5cc08780d7a059e0da04bddeb8c85df90eac4eafa48a22 0.1s done
+#18 exporting manifest list sha256:b442becaaa9b8d483f58b3b27fbc40b1b0a2d08da2eff0f7a0bb0ad2bebf2ecc
+#18 exporting manifest list sha256:b442becaaa9b8d483f58b3b27fbc40b1b0a2d08da2eff0f7a0bb0ad2bebf2ecc 0.0s done
+#18 naming to docker.io/library/computehive-coordinator:latest 0.0s done
+#18 unpacking to docker.io/library/computehive-coordinator:latest 0.0s done
+#18 DONE 0.2s
+
+#19 [worker-1 internal] load metadata for docker.io/library/docker:29-cli
+#19 ...
+
+#20 [coordinator] resolving provenance for metadata file
+#20 DONE 0.0s
+
+#19 [worker-1 internal] load metadata for docker.io/library/docker:29-cli
+#19 DONE 2.0s
+
+#6 [worker-2 internal] load .dockerignore
+#6 CACHED
+
+#21 [worker-2 internal] load build context
+#21 DONE 0.0s
+
+#9 [worker-2 build 1/7] FROM docker.io/library/golang:1.25-alpine@sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59
+#9 resolve docker.io/library/golang:1.25-alpine@sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59 0.1s done
+#9 resolve docker.io/library/golang:1.25-alpine@sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59 0.1s done
+#9 DONE 0.3s
+
+#22 [worker-1 stage-1 1/4] FROM docker.io/library/docker:29-cli@sha256:5e6baf67325a79f64ed3bed6863954d5e05d0f3d4e57cbdb14809346814bbfdb
+#22 resolve docker.io/library/docker:29-cli@sha256:5e6baf67325a79f64ed3bed6863954d5e05d0f3d4e57cbdb14809346814bbfdb 0.1s done
+#22 DONE 0.1s
+
+#21 [worker-2 internal] load build context
+#21 transferring context: 377.26kB done
+#21 DONE 0.0s
+
+#23 [worker-1 build 2/7] WORKDIR /src
+#23 CACHED
+
+#24 [worker-3 build 3/7] COPY coordinator ./coordinator
+#24 DONE 0.2s
+
+#25 [worker-2 build 4/7] COPY worker ./worker
+#25 DONE 0.2s
+
+#26 [worker-1 build 5/7] WORKDIR /src/worker
+#26 DONE 0.2s
+
+#27 [worker-3 build 6/7] RUN go mod download
+#27 DONE 294.5s
+
+#28 [worker-3 build 7/7] RUN CGO_ENABLED=0 go build -trimpath -o /out/worker ./cmd/worker
+#28 DONE 12.5s
+
+#29 [worker-2 stage-1 2/4] RUN adduser -D -h /app worker && mkdir -p /state && chown worker /state
+#29 CACHED
+
+#30 [worker-2 stage-1 3/4] WORKDIR /app
+#30 CACHED
+
+#31 [worker-2 stage-1 4/4] COPY --from=build /out/worker /usr/local/bin/worker
+#31 CACHED
+
+#32 [worker-1] exporting to image
+#32 exporting layers done
+#32 exporting manifest sha256:a4282a03d6f8e1a9fb2092fa4868c096893012fd61d10abdf3693046247bee15
+#32 exporting manifest sha256:a4282a03d6f8e1a9fb2092fa4868c096893012fd61d10abdf3693046247bee15 0.0s done
+#32 exporting config sha256:548d2b67145ba4ed0b6934d492b1e6c42f638e084273073938e6a5ca54d4355c 0.0s done
+#32 exporting attestation manifest sha256:d4bee35fcdd87d4da4a5d66e84aebcbd80523ee6f2f1d2656e42e33ec56af204
+#32 exporting attestation manifest sha256:d4bee35fcdd87d4da4a5d66e84aebcbd80523ee6f2f1d2656e42e33ec56af204 0.2s done
+#32 exporting manifest list sha256:50524195381c909f45cdd266fbb3df31e0ffd9f16cb3ff0519caf8f2e8264e1f
+#32 exporting manifest list sha256:50524195381c909f45cdd266fbb3df31e0ffd9f16cb3ff0519caf8f2e8264e1f 0.1s done
+#32 naming to docker.io/library/computehive-worker-1:latest 0.0s done
+#32 unpacking to docker.io/library/computehive-worker-1:latest
+#32 unpacking to docker.io/library/computehive-worker-1:latest 0.1s done
+#32 DONE 0.6s
+
+#33 [worker-2] exporting to image
+#33 exporting layers done
+#33 exporting manifest sha256:c459466990f469b3e3632806e3cc5cfa222217a16e721dd1f91ac74bc43fa96a 0.0s done
+#33 exporting config sha256:9e865253e41a5508caa8343762b4e32c324d8bbb6554efbd5e3cfb93f169ea27 0.0s done
+#33 exporting attestation manifest sha256:3f776135c87e58f3015a23a20fd2c94a9e2e5976f52392aff1578b26b022a463 0.2s done
+#33 exporting manifest list sha256:7daa26d70cb6ed3b3da05b6fb1351505f10f01e20eeebc13d39207ff999ff0c2 0.1s done
+#33 naming to docker.io/library/computehive-worker-2:latest 0.0s done
+#33 unpacking to docker.io/library/computehive-worker-2:latest 0.1s done
+#33 DONE 0.6s
+
+#34 [worker-3] exporting to image
+#34 exporting layers done
+#34 exporting manifest sha256:a1e05f4b1055571d6de9e1f053c309da59023f9e6896f27a2d58fc915710b93f 0.0s done
+#34 exporting config sha256:6ed04880bc970ec89eedf22ae89d0796b7d3965938e1fec33c4d6945601c1600 0.0s done
+#34 exporting attestation manifest sha256:b8d7af417d93cda8c862968257a3e9e69e12742a0f0ac0a1a1d0af9b4942aa27 0.2s done
+#34 exporting manifest list sha256:1aa5cd44e7483c86b9bcd6370fc9721b483c990cfdbce281e2bf332aa2a8ed47 0.1s done
+#34 naming to docker.io/library/computehive-worker-3:latest 0.0s done
+#34 unpacking to docker.io/library/computehive-worker-3:latest 0.1s done
+#34 DONE 0.6s
+
+#35 [worker-2] resolving provenance for metadata file
+#35 DONE 0.3s
+
+#36 [worker-3] resolving provenance for metadata file
+#36 DONE 0.1s
+
+#37 [worker-1] resolving provenance for metadata file
+#37 DONE 0.0s
+ Image computehive-worker-2 Built 
+ Image computehive-worker-3 Built 
+ Image computehive-coordinator Built 
+ Image computehive-worker-1 Built 
+ Container computehive-redis-1 Running 
+ Container computehive-coordinator-1 Running 
+ Container computehive-worker-2-1 Recreate 
+ Container computehive-worker-3-1 Recreate 
+ Container computehive-worker-1-1 Recreate 
+ Container computehive-prometheus-1 Recreate 
+ Container computehive-worker-1-1 Recreated 
+ Container computehive-worker-3-1 Recreated 
+ Container computehive-prometheus-1 Recreated 
+ Container computehive-grafana-1 Recreate 
+ Container computehive-worker-2-1 Recreated 
+ Container computehive-grafana-1 Recreated 
+ Container computehive-redis-1 Waiting 
+ Container computehive-prometheus-1 Starting 
+ Container computehive-prometheus-1 Started 
+ Container computehive-grafana-1 Starting 
+ Container computehive-redis-1 Healthy 
+ Container computehive-coordinator-1 Waiting 
+ Container computehive-coordinator-1 Waiting 
+ Container computehive-coordinator-1 Waiting 
+ Container computehive-grafana-1 Started 
+ Container computehive-coordinator-1 Healthy 
+ Container computehive-coordinator-1 Healthy 
+ Container computehive-worker-3-1 Starting 
+ Container computehive-worker-2-1 Starting 
+ Container computehive-coordinator-1 Healthy 
+ Container computehive-worker-1-1 Starting 
+ Container computehive-worker-3-1 Started 
+ Container computehive-worker-2-1 Started 
+ Container computehive-worker-1-1 Started 
+ Container computehive-worker-2-1 Waiting 
+ Container computehive-worker-3-1 Waiting 
+ Container computehive-prometheus-1 Waiting 
+ Container computehive-grafana-1 Waiting 
+ Container computehive-redis-1 Waiting 
+ Container computehive-coordinator-1 Waiting 
+ Container computehive-worker-1-1 Waiting 
+ Container computehive-worker-2-1 Healthy 
+ Container computehive-redis-1 Healthy 
+ Container computehive-prometheus-1 Healthy 
+ Container computehive-grafana-1 Healthy 
+ Container computehive-worker-3-1 Healthy 
+ Container computehive-coordinator-1 Healthy 
+ Container computehive-worker-1-1 Healthy 
+
+cluster is up:  gRPC localhost:50051   HTTP localhost:8080   Grafana http://localhost:3000   Prometheus http://localhost:9090
+secrets:        .computehive/  (API token and CA; the CLI finds them automatically)
+try:            make demo

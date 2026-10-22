@@ -1,0 +1,35 @@
+date:        2026-10-22T10:35:28Z
+commit:      524e1b3 (with uncommitted changes)
+os:          Linux 7.2.4-arch1-2
+cpu:         13th Gen Intel(R) Core(TM) i7-13620H (16 threads)
+memory:      15.3 GB
+load (1/5/15 min, before): 3.96 3.61 4.14
+go:          go version go1.27.1-X:nodwarf5 linux/amd64
+docker:      29.8.0
+redis image: redis:7-alpine
+mode:        full
+
+== cluster: end-to-end latency of one job (submit to result), 20 sequential runs on 3 real workers
+BENCH e2e_job_latency runs=20 min_s=2.05 p50_s=2.06 p95_s=7.06 max_s=7.08
+
+== cluster: throughput with 1, 2 and 3 real workers (30 hello jobs each, submitted in parallel)
+BENCH real_throughput workers=1 jobs=30 seconds=36.5 jobs_per_minute=49.3
+BENCH real_throughput workers=2 jobs=30 seconds=37.5 jobs_per_minute=48.0
+BENCH real_throughput workers=3 jobs=30 seconds=35.5 jobs_per_minute=50.7
+
+== cluster: real docker kill -> requeue (10 iterations)
+killed worker-2 -> requeue observed after 6.58s -> job succeeded after 24.21s (attempt 2 of 3)
+killed worker-1 -> requeue observed after 5.47s -> job succeeded after 23.62s (attempt 2 of 3)
+killed worker-2 -> requeue observed after 4.97s -> job succeeded after 22.84s (attempt 2 of 3)
+killed worker-1 -> requeue observed after 5.46s -> job succeeded after 23.08s (attempt 2 of 3)
+killed worker-2 -> requeue observed after 6.52s -> job succeeded after 24.13s (attempt 2 of 3)
+killed worker-1 -> requeue observed after 5.52s -> job succeeded after 26.84s (attempt 2 of 3)
+killed worker-2 -> requeue observed after 6.24s -> job succeeded after 24.13s (attempt 2 of 3)
+killed worker-1 -> requeue observed after 6.32s -> job succeeded after 24.23s (attempt 2 of 3)
+killed worker-2 -> requeue observed after 6.25s -> job succeeded after 23.88s (attempt 2 of 3)
+killed worker-1 -> requeue observed after 5.46s -> job succeeded after 23.10s (attempt 2 of 3)
+cluster chaos: PASS (10 kills, every job recovered, requeue < 15s)
+
+load (1/5/15 min, after): 1.12 2.02 3.22
+
+raw results: bench-results/20261022-160528/raw.txt

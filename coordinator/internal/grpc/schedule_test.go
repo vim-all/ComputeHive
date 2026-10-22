@@ -23,6 +23,7 @@ type cluster struct {
 	w   pb.WorkerServiceClient
 	c   pb.ClientServiceClient
 	q   *queue.Queue
+	svc *Server           // the coordinator service, for tests that need to reach the placer
 	tok map[string]string // lease token of each job a fake worker was given
 }
 
@@ -60,7 +61,7 @@ func startCluster(t *testing.T, mod func(*config.Config)) *cluster {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { conn.Close() })
-	return &cluster{w: pb.NewWorkerServiceClient(conn), c: pb.NewClientServiceClient(conn), q: q, tok: map[string]string{}}
+	return &cluster{w: pb.NewWorkerServiceClient(conn), c: pb.NewClientServiceClient(conn), q: q, svc: svc, tok: map[string]string{}}
 }
 
 // box describes a fake worker's hardware and current load.
@@ -382,5 +383,47 @@ func TestWorkerAnnouncementsAreSanitised(t *testing.T) {
 	states, _ := cl.q.WorkerStates(context.Background())
 	if len(states[0].Cached) != 1 || !states[0].Cached[strings.Repeat("a", 64)] {
 		t.Fatalf("cached artifacts %v: only well-formed digests may be kept", states[0].Cached)
+	}
+}
+
+// With a long snapshot TTL the placer decides from its cached view. After one worker claims a job, the cache
+// must reflect it at once: the next worker is offered the next job, and nobody is ever given the same job twice.
+func TestSnapshotCacheReflectsClaimsImmediately(t *testing.T) {
+	cl := startCluster(t, func(c *config.Config) { c.SchedSnapshotTTL = time.Hour })
+	b := box{cpu: 4, memMB: 8192}
+	cl.join(t, "wa", b)
+	cl.join(t, "wb", b)
+	j1 := cl.submit(t, nil)
+	j2 := cl.submit(t, nil)
+
+	first := cl.ask(t, "wa")
+	second := cl.ask(t, "wb")
+	if first == "" || second == "" {
+		t.Fatalf("both workers should have been given a job from the cached view: wa=%q wb=%q", first, second)
+	}
+	if first == second {
+		t.Fatalf("job %s was assigned to two workers", first)
+	}
+	if got := map[string]bool{first: true, second: true}; !got[j1] || !got[j2] {
+		t.Fatalf("assigned %q and %q, want %q and %q", first, second, j1, j2)
+	}
+	if third := cl.ask(t, "wa"); third != "" {
+		t.Fatalf("worker wa is at capacity and nothing is pending, got %q", third)
+	}
+}
+
+// A worker that finished its job and asks again must get the next job at once, even though the cached view
+// (long TTL) still shows it running the first one.
+func TestSnapshotCacheSeesCompletions(t *testing.T) {
+	cl := startCluster(t, func(c *config.Config) { c.SchedSnapshotTTL = time.Hour })
+	cl.join(t, "wa", box{cpu: 4, memMB: 8192})
+	j1 := cl.submit(t, nil)
+	if got := cl.ask(t, "wa"); got != j1 {
+		t.Fatalf("first ask = %q, want %q", got, j1)
+	}
+	cl.finish(t, "wa", j1)
+	j2 := cl.submit(t, nil)
+	if got := cl.ask(t, "wa"); got != j2 {
+		t.Fatalf("after finishing %s the worker should be given %s immediately, got %q", j1, j2, got)
 	}
 }

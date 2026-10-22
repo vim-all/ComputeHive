@@ -64,8 +64,8 @@ hostile: ## run the hostile-job suite (needs Docker): network, host files, fork 
 pressure: build ## prove an overloaded worker is shown as overloaded and never receives jobs (needs `make up`)
 	chmod +x scripts/pressure-cluster.sh && scripts/pressure-cluster.sh 6
 
-bench: ## throughput / latency benchmarks
-	@echo "benchmarks are implemented in the benchmarking phase" >&2; exit 1
+bench: ## reproducible benchmarks (SECTION=control|reliability|safety|cluster, BENCH_QUICK=1 for a short run)
+	@scripts/bench.sh $(SECTION)
 
 clean:
 	rm -rf $(BIN)
