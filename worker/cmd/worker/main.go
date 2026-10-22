@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/vim-all/ComputeHive/worker/internal/artifact"
 	"github.com/vim-all/ComputeHive/worker/internal/config"
@@ -35,9 +36,20 @@ func main() {
 		os.Exit(2)
 	}
 
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{}))
+	var logHandler slog.Handler = slog.NewJSONHandler(os.Stdout, nil)
+	if cfg.LogFormat == "text" {
+		logHandler = slog.NewTextHandler(os.Stdout, nil)
+	}
+	// Every line carries the component and worker id; slog.SetDefault makes package-level logging match.
+	logger := slog.New(logHandler).With("component", "worker", "worker_id", cfg.WorkerID)
+	slog.SetDefault(logger)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// runCtx is the agent's lifetime. A signal does not cancel it directly: it starts a drain (finish the
+	// current job, up to DRAIN_TIMEOUT), and only then is runCtx cancelled, which hands any unfinished job back.
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
 
 	redisStore := store.New(cfg)
 	artifactFetcher := artifact.NewFetcherWithSigV4(cfg.ArtifactDownloadTimeout, cfg.ArtifactMaxBytes, artifact.SigV4Config{
@@ -112,16 +124,34 @@ func main() {
 		logger.Warn("removed job containers left by a previous run", "count", n)
 	}
 	resourceMonitor := monitor.New(monitor.NewSystemSampler(os.TempDir(), cfg.DockerBinary, cfg.WorkerID), cfg.MonitorConfig(), nil, logger)
-	go resourceMonitor.Run(ctx, cfg.SampleInterval)
+	go resourceMonitor.Run(runCtx, cfg.SampleInterval)
+	// The kill switch stops everything at once (cancelRun), unlike a signal, which drains.
 	agent := workerapp.NewAgent(cfg, redisStore, artifactFetcher, resourceReporter, dockerExecutor, outputManager, resourceMonitor, logger).
-		WithPolicy(pol).WithHistory(hist).WithSandbox(dockerExecutor).WithIsolation(dockerExecutor.IsolationLevel()).WithStop(stop)
+		WithPolicy(pol).WithHistory(hist).WithSandbox(dockerExecutor).WithIsolation(dockerExecutor.IsolationLevel()).WithStop(cancelRun)
 	go func() {
-		if err := control.Serve(ctx, cfg.ControlSocket, agent, logger); err != nil {
+		if err := control.Serve(runCtx, cfg.ControlSocket, agent, logger); err != nil {
 			logger.Error("control socket stopped", "error", err)
 		}
 	}()
+	go func() {
+		select {
+		case <-ctx.Done():
+		case <-runCtx.Done():
+			return
+		}
+		stop() // a second signal now terminates the process immediately
+		agent.BeginDrain()
+		timer := time.NewTimer(cfg.DrainTimeout)
+		defer timer.Stop()
+		select {
+		case <-runCtx.Done(): // the worker finished its job and exited by itself
+		case <-timer.C:
+			logger.Warn("drain timeout: handing the running job back to the queue", "event", "drain_timeout", "timeout", cfg.DrainTimeout.String())
+			cancelRun()
+		}
+	}()
 
-	if err := agent.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+	if err := agent.Run(runCtx); err != nil && !errors.Is(err, context.Canceled) {
 		logger.Error("worker stopped unexpectedly", "error", err)
 		os.Exit(1)
 	}

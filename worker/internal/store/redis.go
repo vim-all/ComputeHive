@@ -125,7 +125,7 @@ func (s *Store) register(ctx context.Context, client pb.WorkerServiceClient, res
 		if err := s.cred.set(issued); err != nil {
 			return fmt.Errorf("enrolled, but could not save the credential (the worker would have to be re-enrolled): %w", err)
 		}
-		slog.Info("enrolled with the coordinator; credential saved", "worker_id", s.cfg.WorkerID)
+		slog.Info("enrolled with the coordinator; credential saved")
 	}
 	s.mu.Lock()
 	s.registered = true

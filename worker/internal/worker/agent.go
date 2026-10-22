@@ -79,6 +79,7 @@ type Agent struct {
 	isolation string
 	stopRoot  context.CancelFunc
 	killed    atomic.Bool
+	draining  atomic.Bool // graceful shutdown: take no new job, finish the current one
 	notTaking string
 	started   time.Time
 
@@ -111,8 +112,23 @@ func NewAgent(cfg config.Config, store storeAPI, fetcher fetcherAPI, reporter re
 	}
 }
 
+// BeginDrain starts a graceful shutdown: the worker stops asking for jobs and reports itself draining so
+// the coordinator stops assigning, but a job already running is left to finish. Run returns once the
+// worker is idle. The caller decides how long to wait (it cancels Run's context to hand the job back).
+func (a *Agent) BeginDrain() {
+	if a.draining.CompareAndSwap(false, true) {
+		a.logger.Info("draining: no new jobs; finishing the current one", "event", "drain_started", "job_id", a.currentJob())
+	}
+}
+
+func (a *Agent) currentJob() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.currentJobID
+}
+
 func (a *Agent) Run(ctx context.Context) error {
-	a.logger.Info("worker started", "worker_id", a.cfg.WorkerID, "coordinator_addr", a.cfg.CoordinatorAddr)
+	a.logger.Info("worker started", "coordinator_addr", a.cfg.CoordinatorAddr)
 
 	go a.heartbeatLoop(ctx)
 	go a.pressureLoop(ctx)
@@ -122,6 +138,11 @@ func (a *Agent) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
+		}
+		// Draining: this point is only reached between jobs, so any job in progress has finished.
+		if a.draining.Load() {
+			a.logger.Info("drained: no job in progress, exiting", "event", "drained")
+			return nil
 		}
 
 		// Safety rule 1 (worker side): never ask for work while the host is overloaded.
@@ -282,7 +303,7 @@ func (a *Agent) publishHeartbeat(ctx context.Context) {
 		heartbeat.CachedArtifacts = c.CachedDigests(64)
 	}
 	heartbeat.Resources.CPUCores, heartbeat.Resources.MemoryMB = a.donated(heartbeat.Resources.CPUCores, heartbeat.Resources.MemoryMB)
-	if adm := a.admission(); !adm.Allowed {
+	if adm := a.admission(); !adm.Allowed || a.draining.Load() {
 		heartbeat.Draining = true // tell the coordinator too: it will refuse to assign us anything
 	}
 	if currentJob != "" {

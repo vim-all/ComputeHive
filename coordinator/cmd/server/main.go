@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"coordinator/internal/config"
 	grpcserver "coordinator/internal/grpc"
 	"coordinator/internal/httpapi"
+	"coordinator/internal/metrics"
 	"coordinator/internal/queue"
 )
 
@@ -73,16 +75,23 @@ func main() {
 	if cfg.TLSCertFile == "" {
 		log.Warn("TLS is OFF: traffic, including credentials, is unencrypted. Development only.")
 	}
-	svc := grpcserver.NewServer(q, cfg, log).WithAuth(authSvc)
+	m := metrics.New(q)
+	svc := grpcserver.NewServer(q, cfg, log).WithAuth(authSvc).WithMetrics(m)
 
 	// Failure detection. All state is in Redis, so on startup the first tick recovers
 	// whatever was in flight when the previous coordinator died.
-	go q.RunReaper(ctx, log, nil)
+	go q.RunReaper(ctx, log, &queue.ReaperHooks{Requeued: m.JobRequeued, WorkersLost: m.WorkersLost})
 	log.Info("failure detection running",
 		"worker_dead_after", cfg.WorkerDeadAfter.String(), "reap_interval", cfg.ReapInterval.String(),
 		"max_requeue_latency", cfg.RequeueBound().String())
 
+	// On SIGTERM the coordinator first reports itself not ready (so load balancers and probes stop sending
+	// traffic), keeps serving for a short grace period, then stops the servers and lets in-flight calls finish.
+	var draining atomic.Bool
 	handler, err := httpapi.New(cfg.ArtifactDir, cfg.ArtifactMaxBytes, func(ctx context.Context) error {
+		if draining.Load() {
+			return errors.New("draining: shutting down")
+		}
 		return rdb.Ping(ctx).Err()
 	}, authSvc, func(ctx context.Context, workerID, jobID string) (int, bool) {
 		// Output files are accepted only from the worker that currently holds the job's lease.
@@ -96,6 +105,7 @@ func main() {
 		log.Error("http init failed", "error", err)
 		os.Exit(1)
 	}
+	handler = httpapi.WithMetrics(handler, m.Handler(), authSvc)
 	httpServer := &http.Server{Addr: cfg.HTTPListenAddr(), Handler: handler, ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		log.Info("coordinator HTTP server listening", "addr", cfg.HTTPListenAddr(), "artifact_dir", cfg.ArtifactDir, "tls", cfg.TLSCertFile != "")
@@ -116,14 +126,24 @@ func main() {
 			os.Exit(1)
 		}
 	}()
+	// Servers run until the drain period after the signal is over.
+	srvCtx, stopServers := context.WithCancel(context.Background())
+	defer stopServers()
 	go func() {
 		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		draining.Store(true)
+		log.Info("shutdown requested: reporting not-ready, then draining", "grace", cfg.ShutdownGrace.String())
+		time.Sleep(cfg.ShutdownGrace)
+		stopServers()
+	}()
+	go func() {
+		<-srvCtx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		_ = httpServer.Shutdown(shutdownCtx)
 	}()
 
-	if err := grpcserver.Start(ctx, cfg, svc); err != nil {
+	if err := grpcserver.Start(srvCtx, cfg, svc); err != nil {
 		log.Error("gRPC server stopped", "error", err)
 		os.Exit(1)
 	}

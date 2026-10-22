@@ -88,6 +88,7 @@ func (s *Server) Heartbeat(ctx context.Context, req *pb.HeartbeatRequest) (*pb.H
 		running = append(running, j.GetValue())
 	}
 	res := req.GetAvailableResources()
+	s.metrics.WorkerOverloaded(workerID, req.GetOverloaded())
 	cancel, err := s.queue.Heartbeat(ctx, queue.WorkerReport{
 		ID: workerID, CPU: int(res.GetCpuCores()), MemMB: int(res.GetMemoryMb()), GPU: int(res.GetGpuCount()),
 		Overloaded: req.GetOverloaded(), Draining: req.GetDraining(), MaxJobs: int(req.GetMaxJobs()), Running: running,
@@ -182,6 +183,9 @@ func (s *Server) SubmitResult(ctx context.Context, req *pb.SubmitResultRequest) 
 			if err != nil {
 				return nil, internal("fail attempt", err)
 			}
+			if d == queue.DispOK {
+				s.metrics.JobRequeued(reason, 1)
+			}
 			log.Warn("attempt failed, job retried", "reason", reason, "disposition", d, "new_state", newState)
 			return dispositionResponse(d), nil
 		}
@@ -202,8 +206,12 @@ func (s *Server) SubmitResult(ctx context.Context, req *pb.SubmitResultRequest) 
 				PublicURL: a.GetPublicUrl(), SHA256: a.GetSha256(), SizeBytes: a.GetSizeBytes(), ContentType: a.GetContentType(),
 			})
 		}
+		var ran time.Duration
 		if j, err := s.queue.Get(ctx, jobID); err == nil && j != nil {
 			res.Attempt = j.Attempt
+			if j.AssignedMs > 0 {
+				ran = time.Since(time.UnixMilli(j.AssignedMs))
+			}
 		}
 		d, err := s.queue.Complete(ctx, jobID, token, succeeded, res)
 		if err != nil {
@@ -215,6 +223,7 @@ func (s *Server) SubmitResult(ctx context.Context, req *pb.SubmitResultRequest) 
 		if d == queue.DispStale {
 			log.Warn("discarded result from superseded attempt")
 		} else if d == queue.DispOK {
+			s.metrics.JobCompleted(r.GetStatus().String(), reason, r.GetExitCode(), ran)
 			log.Info("result committed", "status", r.GetStatus().String(), "exit_code", r.GetExitCode())
 		}
 		return dispositionResponse(d), nil
@@ -247,6 +256,7 @@ func (s *Server) SubmitJob(ctx context.Context, req *pb.SubmitJobRequest) (*pb.S
 	if err != nil {
 		return nil, internal("enqueue job", err)
 	}
+	s.metrics.JobSubmitted()
 	s.log.Info("job submitted", "job_id", jobID, "image", spec.ContainerImage, "queue_seq", seq)
 	return &pb.SubmitJobResponse{JobId: &pb.JobID{Value: jobID}, Status: pb.Status_STATUS_QUEUED}, nil
 }

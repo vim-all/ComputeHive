@@ -589,7 +589,16 @@ func (q *Queue) ReapExpiredLeases(ctx context.Context) (int, error) {
 // RunReaper runs failure detection until ctx is done. Because every step is an
 // idempotent script over Redis state, several coordinators can run it concurrently,
 // and a freshly started coordinator recovers in-flight jobs on its first tick.
-func (q *Queue) RunReaper(ctx context.Context, log *slog.Logger, onRequeue func(jobs int)) {
+// ReaperHooks lets the caller observe what the reaper does (for metrics). Any field may be nil.
+type ReaperHooks struct {
+	Requeued    func(reason string, jobs int) // reason is "worker_dead" or "lease_expired"
+	WorkersLost func(workers int)
+}
+
+func (q *Queue) RunReaper(ctx context.Context, log *slog.Logger, hooks *ReaperHooks) {
+	if hooks == nil {
+		hooks = &ReaperHooks{}
+	}
 	t := time.NewTicker(q.cfg.ReapInterval)
 	defer t.Stop()
 	for {
@@ -603,9 +612,12 @@ func (q *Queue) RunReaper(ctx context.Context, log *slog.Logger, onRequeue func(
 			}
 			if jobs > 0 {
 				log.Warn("requeued jobs from dead workers", "jobs", jobs, "workers", workers)
-				if onRequeue != nil {
-					onRequeue(jobs)
+				if hooks.Requeued != nil {
+					hooks.Requeued("worker_dead", jobs)
 				}
+			}
+			if workers > 0 && hooks.WorkersLost != nil {
+				hooks.WorkersLost(workers)
 			}
 			if n, err := q.ReapVerifyTimeouts(ctx); err != nil {
 				if ctx.Err() == nil {
@@ -623,8 +635,8 @@ func (q *Queue) RunReaper(ctx context.Context, log *slog.Logger, onRequeue func(
 			}
 			if n > 0 {
 				log.Warn("requeued jobs with expired leases", "jobs", n)
-				if onRequeue != nil {
-					onRequeue(n)
+				if hooks.Requeued != nil {
+					hooks.Requeued("lease_expired", n)
 				}
 			}
 		}

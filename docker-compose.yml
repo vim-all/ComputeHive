@@ -7,6 +7,9 @@ x-worker: &worker
     context: .
     dockerfile: worker/Dockerfile
   restart: unless-stopped
+  # `docker stop` sends SIGTERM, which drains: the worker finishes its job for up to DRAIN_TIMEOUT (30s)
+  # before handing it back. Docker's default 10s would SIGKILL it mid-drain, so wait longer.
+  stop_grace_period: 45s
   depends_on:
     coordinator:
       condition: service_healthy
@@ -43,6 +46,7 @@ services:
       context: .
       dockerfile: coordinator/Dockerfile
     restart: unless-stopped
+    stop_grace_period: 30s # SIGTERM: report not-ready, keep serving SHUTDOWN_GRACE, then drain in-flight calls
     depends_on:
       redis:
         condition: service_healthy
@@ -118,8 +122,16 @@ services:
 
   prometheus:
     image: prom/prometheus:v3.5.0
+    # Runs as the host user so it can read the private (0600) API token that /metrics requires; the
+    # TSDB therefore lives on a tmpfs owned by that user (metrics history is not kept across restarts).
+    user: "${COMPUTEHIVE_UID:-1000}:${COMPUTEHIVE_GID:-1000}"
+    tmpfs:
+      - /prometheus:uid=${COMPUTEHIVE_UID:-1000},gid=${COMPUTEHIVE_GID:-1000}
     volumes:
       - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - ./.computehive/api.token:/etc/prometheus/secrets/api.token:ro
+      - ./.computehive/ca.crt:/etc/prometheus/secrets/ca.crt:ro
     ports:
       - "127.0.0.1:9090:9090"
 
@@ -129,6 +141,7 @@ services:
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
     volumes:
       - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
     ports:
       - "127.0.0.1:3000:3000"
     depends_on:

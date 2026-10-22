@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"coordinator/internal/config"
+	"coordinator/internal/metrics"
 	"coordinator/internal/queue"
 	"coordinator/internal/scheduler"
 	pb "coordinator/pkg/pb"
@@ -26,6 +27,8 @@ type placer struct {
 	q   *queue.Queue
 	cfg scheduler.Config
 	ttl time.Duration
+
+	metrics *metrics.Metrics
 
 	mu     sync.Mutex
 	snap   []queue.WorkerState
@@ -102,11 +105,25 @@ func orNone(s string) string {
 }
 
 // claimFor finds the job worker should run and claims it atomically. (nil, reason, nil) means there is
-// nothing suitable for this worker right now.
+// nothing suitable for this worker right now. It records how long the decision took and how long the
+// assigned job had waited.
 func (p *placer) claimFor(ctx context.Context, workerID string) (*queue.Claimed, string, error) {
+	start := time.Now()
+	claimed, reason, waited, err := p.pick(ctx, workerID)
+	if err == nil {
+		if claimed != nil {
+			p.metrics.JobAssigned(waited, time.Since(start))
+		} else {
+			p.metrics.NoJob(time.Since(start))
+		}
+	}
+	return claimed, reason, err
+}
+
+func (p *placer) pick(ctx context.Context, workerID string) (*queue.Claimed, string, time.Duration, error) {
 	ws, nowMs, err := p.workers(ctx)
 	if err != nil {
-		return nil, "", err
+		return nil, "", 0, err
 	}
 	known := false
 	for _, w := range ws {
@@ -116,11 +133,12 @@ func (p *placer) claimFor(ctx context.Context, workerID string) (*queue.Claimed,
 		}
 	}
 	if !known { // the snapshot may predate its registration: the claim script gives the authoritative answer
-		return p.q.Claim(ctx, workerID)
+		c, r, err := p.q.Claim(ctx, workerID)
+		return c, r, 0, err
 	}
 	pending, err := p.q.PendingJobs(ctx, scanPending)
 	if err != nil {
-		return nil, "", err
+		return nil, "", 0, err
 	}
 	userRunning := map[string]int64{}
 	for _, j := range pending {
@@ -132,7 +150,7 @@ func (p *placer) claimFor(ctx context.Context, workerID string) (*queue.Claimed,
 			n, seen := userRunning[u]
 			if !seen {
 				if n, err = p.q.UserRunning(ctx, u); err != nil {
-					return nil, "", err
+					return nil, "", 0, err
 				}
 				userRunning[u] = n
 			}
@@ -144,20 +162,20 @@ func (p *placer) claimFor(ctx context.Context, workerID string) (*queue.Claimed,
 		}
 		claimed, reason, err := p.q.ClaimJob(ctx, workerID, j.ID)
 		if err != nil {
-			return nil, "", err
+			return nil, "", 0, err
 		}
 		if claimed == nil {
 			if reason == "unknown_worker" {
-				return nil, reason, nil
+				return nil, reason, 0, nil
 			}
 			continue // lost a race for this job, or a safety rule the snapshot did not see: try the next one
 		}
 		if b, err := json.Marshal(p.record(d, workerID, j.WaitMs)); err == nil {
 			_ = p.q.RecordDecision(ctx, j.ID, string(b)) // best effort: losing the explanation must not lose the job
 		}
-		return claimed, "", nil
+		return claimed, "", time.Duration(j.WaitMs) * time.Millisecond, nil
 	}
-	return nil, "empty", nil
+	return nil, "empty", 0, nil
 }
 
 func toPBEvals(cs []recordedCandidate, chosen string) []*pb.WorkerEvaluation {

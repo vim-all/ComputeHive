@@ -1,6 +1,12 @@
 apiVersion: 1
+# Datasources created before the UID was pinned have a random one, and Grafana cannot change the UID of an
+# existing provisioned datasource (it fails to start). Delete by name first; it is re-created just below.
+deleteDatasources:
+  - name: Prometheus
+    orgId: 1
 datasources:
   - name: Prometheus
+    uid: prometheus
     type: prometheus
     access: proxy
     url: http://prometheus:9090

@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"time"
 
 	"coordinator/internal/auth"
 	"coordinator/internal/config"
+	"coordinator/internal/metrics"
 	"coordinator/internal/queue"
 	pb "coordinator/pkg/pb"
 
@@ -28,7 +30,14 @@ type Server struct {
 	log   *slog.Logger
 	auth  *auth.Service // nil: no authentication (unit tests); production always sets it
 
-	placer *placer // best-fit scheduling on top of the atomic claim
+	placer  *placer          // best-fit scheduling on top of the atomic claim
+	metrics *metrics.Metrics // nil: metrics off (every method is nil-safe)
+}
+
+// WithMetrics turns on Prometheus instrumentation of the RPCs and the scheduler.
+func (s *Server) WithMetrics(m *metrics.Metrics) *Server {
+	s.metrics, s.placer.metrics = m, m
+	return s
 }
 
 // NewServer builds the gRPC service over q.
@@ -66,9 +75,12 @@ func Serve(ctx context.Context, listener net.Listener, svc *Server, tlsCfg *tls.
 	if tlsCfg != nil {
 		opts = append(opts, grpc.Creds(credentials.NewTLS(tlsCfg)))
 	}
+	// Observation wraps authentication, so rejected calls are counted and logged too.
+	chain := []grpc.UnaryServerInterceptor{svc.observe()}
 	if svc.auth != nil {
-		opts = append(opts, grpc.ChainUnaryInterceptor(svc.auth.Unary()))
+		chain = append(chain, svc.auth.Unary())
 	}
+	opts = append(opts, grpc.ChainUnaryInterceptor(chain...))
 	grpcServer := grpc.NewServer(opts...)
 	pb.RegisterWorkerServiceServer(grpcServer, svc)
 	pb.RegisterClientServiceServer(grpcServer, svc)
@@ -76,7 +88,15 @@ func Serve(ctx context.Context, listener net.Listener, svc *Server, tlsCfg *tls.
 
 	go func() {
 		<-ctx.Done()
-		grpcServer.GracefulStop()
+		// Let in-flight calls finish, but never hang shutdown on a stuck client.
+		stopped := make(chan struct{})
+		go func() { grpcServer.GracefulStop(); close(stopped) }()
+		select {
+		case <-stopped:
+		case <-time.After(15 * time.Second):
+			svc.log.Warn("gRPC graceful stop timed out; forcing")
+			grpcServer.Stop()
+		}
 	}()
 
 	svc.log.Info("coordinator gRPC server listening", "addr", listener.Addr().String(), "tls", tlsCfg != nil, "mtls", tlsCfg != nil && tlsCfg.ClientAuth == tls.RequireAndVerifyClientCert, "auth", svc.authEnforced())

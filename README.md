@@ -55,6 +55,7 @@ so it never clashes with a Redis you already run.
 |---|---|
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System design: components, job lifecycle, Redis data model, atomicity, failure recovery, interfaces |
 | [docs/SCHEDULING.md](docs/SCHEDULING.md) | How a job picks its worker: filters, scoring, patience, locality, `explain` |
+| [docs/OPERATIONS.md](docs/OPERATIONS.md) | Metrics catalogue, alerts, logs and correlation ids, graceful shutdown, runbook |
 | [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) | Assets, attackers, mitigations with the test that proves each, residual risks |
 | [docs/decisions.md](docs/decisions.md) | Every important decision: options, choice, tradeoff, evidence |
 | [docs/AUDIT.md](docs/AUDIT.md) | What was wrong at the start and what changed |
@@ -208,6 +209,14 @@ Defaults can live in the job directory (`computehive.yaml`, flat `key: value`, o
 An unchanged directory is not rebuilt on re-submit, so repeat jobs reuse the same artifact and prefer the worker that already has it
 (`--rebuild` to force). Details and limitations: [docs/SCHEDULING.md](docs/SCHEDULING.md).
 
+## Observability and operations
+
+`make up` also starts Prometheus and Grafana. The coordinator exposes an authenticated `/metrics` (API token, TLS); 12 alert rules (`deploy/prometheus/alerts.yml`)
+cover a down coordinator or Redis, lost workers, the 90% rule, a stuck queue and a growing dead-letter set; Grafana opens with a provisioned
+**ComputeHive cluster** dashboard (http://localhost:3000, admin/admin) that includes a live one-row-per-worker view. Logs are JSON with request and job ids.
+SIGTERM drains: a worker finishes its current job (up to `DRAIN_TIMEOUT`) before exiting, and the coordinator reports not-ready before closing.
+See [docs/OPERATIONS.md](docs/OPERATIONS.md).
+
 ## Reliability guarantees (and how they are tested)
 
 | Guarantee | Mechanism | Test |
@@ -252,6 +261,6 @@ Prove it on your machine: `make pressure` (a worker with a 1% RAM limit must sho
 - Containers share the host kernel (unless gVisor is used): a kernel vulnerability is the main residual risk.
 - Scheduling is first-come-first-served pull with capability filtering (no best-fit scoring yet).
 - Single-node Redis only (the Lua scripts address keys dynamically; Redis Cluster would need hash tags).
-- Metrics and the Grafana dashboard are not wired yet (Prometheus scrape target is down by design).
 - Scheduling weights are hand-set, not tuned, and a worker with a longer track record tends to keep winning ties (see docs/SCHEDULING.md).
 - Re-submitting an unchanged directory reuses the saved image; a changed base image or external dependency is not noticed until `--rebuild`.
+- Prometheus data is not persisted across container restarts in Compose, and alerts are not delivered anywhere (no Alertmanager).

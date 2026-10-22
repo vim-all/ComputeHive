@@ -49,6 +49,10 @@ type Config struct {
 	SchedPatience    time.Duration
 	SchedSnapshotTTL time.Duration
 
+	// ShutdownGrace: after SIGTERM the coordinator reports not-ready for this long while still serving, so
+	// probes and load balancers stop sending traffic before the listeners close.
+	ShutdownGrace time.Duration
+
 	// Trust.
 	APIToken        string // required for submitters/operators (env API_TOKEN or API_TOKEN_FILE)
 	AuthDisabled    bool   // AUTH_DISABLED=true: development only
@@ -172,6 +176,7 @@ func Load(args []string) (Config, error) {
 		UserLimit:        envInt(getenv, "USER_LIMIT", 0),
 		SchedPatience:    envDuration(getenv, "SCHED_PATIENCE", 5*time.Second),
 		SchedSnapshotTTL: envDuration(getenv, "SCHED_SNAPSHOT_TTL", 250*time.Millisecond),
+		ShutdownGrace:    envDuration(getenv, "SHUTDOWN_GRACE", 3*time.Second),
 
 		APIToken:        strings.TrimSpace(getenv("API_TOKEN")),
 		AuthDisabled:    envBool(getenv, "AUTH_DISABLED", false),
@@ -233,6 +238,7 @@ func Load(args []string) (Config, error) {
 	fs.DurationVar(&cfg.VerifyTimeout, "verify-timeout", cfg.VerifyTimeout, "how long a verify=true replica waits for its sibling before the job fails")
 	fs.IntVar(&cfg.UserLimit, "user-limit", cfg.UserLimit, "max jobs one user may have running at once (0 = unlimited)")
 	fs.DurationVar(&cfg.SchedPatience, "sched-patience", cfg.SchedPatience, "how long a job waits for its best-fit worker before any eligible idle worker may take it")
+	fs.DurationVar(&cfg.ShutdownGrace, "shutdown-grace", cfg.ShutdownGrace, "after SIGTERM, report not-ready for this long before closing the listeners")
 	fs.DurationVar(&cfg.SchedSnapshotTTL, "sched-snapshot-ttl", cfg.SchedSnapshotTTL, "maximum age of the worker view used for placement")
 	fs.BoolVar(&cfg.RequireUsage, "require-usage", cfg.RequireUsage, "refuse to assign jobs to workers that report no resource metrics")
 	if err := fs.Parse(args); err != nil {
@@ -316,6 +322,9 @@ func (c Config) Validate() error {
 	}
 	if c.UserLimit < 0 {
 		return fmt.Errorf("invalid user-limit %d (env USER_LIMIT): must be >= 0", c.UserLimit)
+	}
+	if c.ShutdownGrace < 0 {
+		return fmt.Errorf("invalid shutdown-grace %s: must be >= 0", c.ShutdownGrace)
 	}
 	if c.SchedPatience < 0 || c.SchedSnapshotTTL < 0 {
 		return fmt.Errorf("sched-patience (%s) and sched-snapshot-ttl (%s) must be >= 0", c.SchedPatience, c.SchedSnapshotTTL)

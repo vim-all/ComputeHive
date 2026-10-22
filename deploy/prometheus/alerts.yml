@@ -1,0 +1,104 @@
+# Alert rules. Each one names the symptom, the threshold and what to look at first.
+# Validate with: docker run --rm --entrypoint promtool -v "$PWD/deploy/prometheus:/r:ro" prom/prometheus:v3.5.0 check rules /r/alerts.yml
+groups:
+  - name: computehive-availability
+    rules:
+      - alert: CoordinatorDown
+        expr: up{job="coordinator"} == 0
+        for: 30s
+        labels: {severity: critical}
+        annotations:
+          summary: "The coordinator cannot be scraped"
+          description: "No metrics for 30s. Check `docker compose ps`, the coordinator logs, and that Prometheus still has the API token and CA mounted."
+
+      - alert: RedisDown
+        expr: computehive_redis_up == 0
+        for: 15s
+        labels: {severity: critical}
+        annotations:
+          summary: "The coordinator cannot reach Redis"
+          description: "Queue state is unavailable: no jobs can be submitted, assigned or completed until Redis is back."
+
+      - alert: NoLiveWorkers
+        expr: computehive_queue_depth > 0 and computehive_workers{state="alive"} == 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "Jobs are queued but no worker is alive"
+          description: "Start or enrol a worker (`computehive worker join`); `computehive workers` shows what the coordinator knows."
+
+  - name: computehive-workers
+    rules:
+      - alert: WorkerLost
+        expr: increase(computehive_workers_lost_total[2m]) > 0
+        labels: {severity: warning}
+        annotations:
+          summary: "A worker stopped heartbeating and was declared dead"
+          description: "Its jobs were requeued (see computehive_job_requeues_total{reason=\"worker_dead\"}). Check the worker host and its logs."
+
+      - alert: WorkerHeartbeatLate
+        expr: computehive_worker_heartbeat_age_seconds > 10
+        for: 10s
+        labels: {severity: warning}
+        annotations:
+          summary: "Worker {{ $labels.worker }} has not sent a heartbeat for {{ $value | printf \"%.0f\" }}s"
+          description: "Workers are declared dead after 6s without a heartbeat; this is past that."
+
+      - alert: WorkerRAMHigh
+        expr: computehive_worker_ram_used_percent >= 90
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: "Worker {{ $labels.worker }} RAM is at {{ $value | printf \"%.0f\" }}%"
+          description: "At or above the 90% safety limit: the worker takes no new jobs and running ones may be evicted."
+
+      - alert: WorkerDiskHigh
+        expr: computehive_worker_disk_used_percent >= 90
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: "Worker {{ $labels.worker }} disk is at {{ $value | printf \"%.0f\" }}%"
+          description: "At or above the 90% safety limit. Clean the work directory or Docker data root."
+
+      - alert: WorkerOverloadedLong
+        expr: computehive_worker_overloaded == 1
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "Worker {{ $labels.worker }} has been overloaded for 10 minutes"
+          description: "It is refusing work. `computehive workers` shows which metric tripped; something else on that host is using its resources."
+
+  - name: computehive-queue
+    rules:
+      - alert: QueueStuck
+        expr: |
+          computehive_oldest_pending_age_seconds > 120
+          and on() (computehive_workers{state="alive"} - computehive_workers{state="overloaded"}) > 0
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: "The oldest queued job has waited {{ $value | printf \"%.0f\" }}s although healthy workers exist"
+          description: "Likely no worker satisfies the job's requirements (GPU, os/arch, labels, isolation, memory). Run `computehive explain <job-id>` on the head job."
+
+      - alert: DeadLetterGrowing
+        expr: delta(computehive_jobs{state="DEAD"}[15m]) > 0
+        labels: {severity: warning}
+        annotations:
+          summary: "Jobs are being parked in the dead-letter set"
+          description: "They exhausted their attempts. Inspect with `computehive status`, then fix and revive or discard."
+
+      - alert: HighRequeueRate
+        expr: sum(rate(computehive_job_requeues_total[5m])) > 0.1
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: "Jobs are being requeued more than once every 10 seconds"
+          description: "Workers are failing or dying under load. Break it down by reason: computehive_job_requeues_total."
+
+      - alert: SchedulingSlow
+        expr: histogram_quantile(0.95, sum(rate(computehive_scheduling_decision_seconds_bucket[5m])) by (le)) > 0.25
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "p95 scheduling decision time is {{ $value | printf \"%.3f\" }}s"
+          description: "Placement is taking too long: Redis latency, a very large worker pool, or a deep queue."

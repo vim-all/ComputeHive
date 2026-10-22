@@ -43,7 +43,7 @@ type WorkerState struct {
 	OS, Arch, Isolation, Version           string
 	Labels                                 []string
 	DiskFreeMB                             int64
-	Load1, CPUPct, MemPct                  float64
+	Load1, CPUPct, MemPct, DiskPct         float64
 	MemTotalMB, MemUsedMB, JobsMemMB       int64
 	Running                                []string
 	DeclaredRunningMemMB                   int64
@@ -145,7 +145,7 @@ func (q *Queue) WorkerStates(ctx context.Context) ([]WorkerState, error) {
 			AllowsNet: m["allows_net"] == "1", HasUsage: m["mem_pct"] != "",
 			CPU: int(atoi64(m["cpu"])), GPU: int(atoi64(m["gpu"])), MemMB: int(atoi64(m["mem_mb"])), MaxJobs: max(int(atoi64(m["max_jobs"])), 1),
 			Preference: pref, OS: m["os"], Arch: m["arch"], Isolation: m["isolation"], Version: m["version"], Labels: labels,
-			DiskFreeMB: atoi64(m["disk_free_mb"]), Load1: atof(m["load1"]), CPUPct: atof(m["cpu_pct"]), MemPct: atof(m["mem_pct"]),
+			DiskFreeMB: atoi64(m["disk_free_mb"]), Load1: atof(m["load1"]), CPUPct: atof(m["cpu_pct"]), MemPct: atof(m["mem_pct"]), DiskPct: atof(m["disk_pct"]),
 			MemTotalMB: atoi64(m["mem_total"]), MemUsedMB: atoi64(m["mem_used"]), JobsMemMB: atoi64(m["jobs_mem"]),
 			Running: running, DeclaredRunningMemMB: declared[id], HeartbeatAgeMs: now - last, RegisteredMs: atoi64(m["registered_ms"]),
 			Reliability: rel, ReliabilitySamples: samples, Cached: make(map[string]bool, len(cached)), OverloadReasons: m["over_reasons"],
@@ -200,6 +200,27 @@ func (q *Queue) PendingJobs(ctx context.Context, limit int) ([]PendingJob, error
 		out = append(out, PendingJob{Job: *j, WaitMs: wait})
 	}
 	return out, nil
+}
+
+// OldestPendingAge is how long the job at the head of the queue has been waiting (0 if the queue is empty).
+// The head is the oldest by FIFO sequence, so this is the "is the queue stuck" signal.
+func (q *Queue) OldestPendingAge(ctx context.Context) (time.Duration, error) {
+	ids, err := q.rdb.ZRange(ctx, "ch:pending", 0, 0).Result()
+	if err != nil || len(ids) == 0 {
+		return 0, err
+	}
+	created, err := q.rdb.HGet(ctx, "ch:job:"+ids[0], "created_ms").Int64()
+	if err == redis.Nil {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	now, err := q.Now(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return time.Duration(max(now-created, 0)) * time.Millisecond, nil
 }
 
 // Now is Redis's clock in milliseconds, the same clock every script and snapshot uses.

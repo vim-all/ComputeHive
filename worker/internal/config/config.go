@@ -75,6 +75,11 @@ type Config struct {
 	// PressureGrace: if the host stays over a limit this long while a job runs, the job is
 	// evicted (stopped gracefully and requeued elsewhere, not counted as the job's fault).
 	PressureGrace time.Duration
+	// DrainTimeout: on SIGTERM the worker stops taking jobs and lets the current one finish for up to this
+	// long; after that the job is handed back to the queue (no attempt burned). The kill switch is immediate.
+	DrainTimeout time.Duration
+	// LogFormat is "json" (default, one object per line, for log pipelines) or "text" (for a terminal).
+	LogFormat string
 
 	// Hard caps on every job container; a job's own request wins when it declares one.
 	DefaultJobMemoryMB int64
@@ -169,6 +174,8 @@ func parse(args []string, getenv func(string) string) (Config, error) {
 		ReleaseAfter:       envDuration(getenv, "RELEASE_AFTER", 10*time.Second),
 		SampleInterval:     envDuration(getenv, "SAMPLE_INTERVAL", time.Second),
 		PressureGrace:      envDuration(getenv, "PRESSURE_GRACE", 15*time.Second),
+		DrainTimeout:       envDuration(getenv, "DRAIN_TIMEOUT", 30*time.Second),
+		LogFormat:          envOr(getenv, "LOG_FORMAT", "json"),
 		DefaultJobMemoryMB: envInt64(getenv, "DEFAULT_JOB_MEMORY_MB", 512),
 		DefaultJobCPUs:     envFloat(getenv, "DEFAULT_JOB_CPUS", 1),
 		PidsLimit:          envInt(getenv, "JOB_PIDS_LIMIT", 256),
@@ -259,6 +266,8 @@ func parse(args []string, getenv func(string) string) (Config, error) {
 	fs.Float64Var(&cfg.ReleasePercent, "release-percent", cfg.ReleasePercent, "Resume only after every metric stays one hysteresis band below its limit (80 with the 90 defaults)")
 	fs.DurationVar(&cfg.ReleaseAfter, "release-after", cfg.ReleaseAfter, "... continuously for this long")
 	fs.DurationVar(&cfg.SampleInterval, "sample-interval", cfg.SampleInterval, "How often to sample host resources")
+	fs.DurationVar(&cfg.DrainTimeout, "drain-timeout", cfg.DrainTimeout, "On SIGTERM, let the current job finish for this long before handing it back")
+	fs.StringVar(&cfg.LogFormat, "log-format", cfg.LogFormat, "Log format: json or text")
 	fs.DurationVar(&cfg.PressureGrace, "pressure-grace", cfg.PressureGrace, "Evict the running job if the host stays over a limit this long")
 	fs.Int64Var(&cfg.DefaultJobMemoryMB, "default-job-memory-mb", cfg.DefaultJobMemoryMB, "Memory cap for jobs that declare none (also --memory-swap)")
 	fs.Float64Var(&cfg.DefaultJobCPUs, "default-job-cpus", cfg.DefaultJobCPUs, "CPU cap for jobs that declare none")
@@ -311,6 +320,12 @@ func parse(args []string, getenv func(string) string) (Config, error) {
 	}
 	if cfg.SampleInterval <= 0 {
 		return Config{}, fmt.Errorf("sample-interval must be > 0")
+	}
+	if cfg.DrainTimeout < 0 {
+		return Config{}, fmt.Errorf("drain-timeout must be >= 0")
+	}
+	if cfg.LogFormat != "json" && cfg.LogFormat != "text" {
+		return Config{}, fmt.Errorf("log-format must be json or text, got %q", cfg.LogFormat)
 	}
 	if cfg.PressureGrace < 0 {
 		return Config{}, fmt.Errorf("pressure-grace must be >= 0")

@@ -6,7 +6,7 @@ atomic, how failure is detected and what happens next, and which guarantees are 
 [decisions.md](decisions.md) (why each choice was made), [AUDIT.md](AUDIT.md) (what was wrong at the start and what changed).
 
 Everything here describes behaviour that exists in the repository and is covered by a test or a reproducible script. Anything
-that is not verified is called out in [section 14](#14-what-is-not-verified-or-not-built).
+that is not verified is called out in [section 15](#15-what-is-not-verified-or-not-built).
 
 ## 1. Goals and non-goals
 
@@ -63,6 +63,7 @@ The coordinator is the only component that talks to Redis. Workers and submitter
 | `internal/grpc` | `WorkerService`, `ClientService`, `AdminService`. Input validation (`validate.go`), the scheduler glue and `ExplainJob` (`schedule.go`), enrollment and revocation (`admin.go`). |
 | `internal/auth` | Enrollment tokens, per-worker credentials (hashed), API token, rate limits, TLS/mTLS certificate generation. |
 | `internal/httpapi` | Content-addressed artifact store (`/artifacts/<sha256>`), per-attempt output store (`/outputs/...`), `/healthz`, `/readyz`. |
+| `internal/metrics` | Prometheus series: cluster gauges read from Redis at scrape time, event counters and histograms recorded inline. See [OPERATIONS.md](OPERATIONS.md). |
 | `internal/config` | Flags and environment; refuses insecure defaults. |
 | `internal/chaos`, `internal/testutil` | The fault-injection harness and a real-Redis-in-Docker test helper. |
 
@@ -265,10 +266,33 @@ Detailed in [THREAT_MODEL.md](THREAT_MODEL.md). Summary:
 | gRPC `AdminService`: `CreateEnrollmentToken`, `RevokeWorker` | operator | API token |
 | HTTP `PUT/GET /artifacts/<sha256>` | CLI (write), workers (read) | API token / worker credential |
 | HTTP `PUT/GET /outputs/<job>/<attempt>/<path>` | workers (write, lease holder only), CLI (read) | worker credential / API token |
-| HTTP `/healthz`, `/readyz` | orchestrators, probes | none |
+| HTTP `/healthz`, `/readyz` | orchestrators, probes | none (`/readyz` is 503 while draining) |
+| HTTP `GET /metrics` | Prometheus | API token |
 | Worker Unix socket (0600) | the contributor's CLI | file permissions |
 
-## 14. What is not verified or not built
+## 14. Observability and shutdown
+
+- **Metrics, alerts, dashboard, logs, runbook:** see [OPERATIONS.md](OPERATIONS.md). Prometheus scrapes the coordinator's authenticated `/metrics` over TLS;
+  12 alert rules cover availability, workers, the 90% rule, a stuck queue, the dead-letter set and scheduling latency; a provisioned Grafana dashboard
+  doubles as the live cluster view.
+- **Correlation:** every gRPC call gets a request id (echoed in the `x-request-id` response header) and a structured log line carrying `job_id` and `worker_id`.
+- **Graceful shutdown:** the coordinator reports not-ready for a grace period while still serving, then drains in-flight calls. A worker stops taking jobs, tells the coordinator it
+  is draining, lets the current job finish for up to `DRAIN_TIMEOUT`, then hands it back (as `evicted`, no attempt burned). A second signal or the kill switch stops immediately.
+
+```mermaid
+flowchart LR
+    subgraph Coordinator
+        GRPC["gRPC interceptor<br/>request id, RPC metrics, log line"] --> H["handlers + scheduler"]
+        H --> M["internal/metrics"]
+        R[("Redis")] -- "read at scrape time" --> M
+    end
+    P["Prometheus"] -- "GET /metrics (TLS, API token)" --> M
+    P --> A["alert rules"]
+    P --> G["Grafana dashboard"]
+    H -- "JSON logs (request_id, job_id, worker_id)" --> L["stdout / log pipeline"]
+```
+
+## 15. What is not verified or not built
 
 Stated plainly, so nothing here is read as a claim:
 
@@ -277,5 +301,5 @@ Stated plainly, so nothing here is read as a claim:
 - The **Tauri desktop client** was not tested headless; macOS and Windows were not tested.
 - Network-allowlist mode requires the worker to run directly on the host (not inside a container).
 - Job **output retention/cleanup** is not implemented.
-- Single coordinator and single Redis: no automatic failover.
+- Single coordinator and single Redis: no automatic failover. Alerts are evaluated but not delivered (no Alertmanager); Prometheus history is not persisted in Compose.
 - Reliability scoring is a *soft* signal that can entrench a winner (a worker that has run more jobs has a better-established score), and the prior keeps a brand-new worker at 0.5.

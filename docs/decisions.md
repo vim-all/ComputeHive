@@ -387,3 +387,64 @@ isolation, per-user limit); artifact cache (LRU, tamper detection); manifest par
 live cluster: `explain` with score breakdown, locality 0.100 on the worker holding the artifact.
 Measured: scheduler cost 5.2 us / 60 us / 0.77 ms per decision at 10 / 100 / 1000 workers (pure CPU, i7-13620H).
 Not verified: behaviour with more than 2 live workers on real containers (end-to-end scheduling latency is Phase 8); weights are not tuned.
+
+---
+
+## Phase 6: observability and operations
+
+### D-51: Metrics from two sources: Redis at scrape time, events as they happen
+- **Options:** (a) maintain gauges incrementally in memory; (b) read cluster state from Redis on every scrape; (c) a separate exporter process.
+- **Decision:** both (b) and event counters. Queue depth, jobs by state and per-worker utilisation are read from Redis when scraped, so they
+  cannot drift from the data (an in-memory gauge would be wrong after a coordinator restart or with two coordinators). Durations and counts
+  (time in queue, runtime, requeues, RPCs) can only be observed as they happen, so those are recorded inline.
+- **Tradeoff:** each scrape costs a few Redis reads (bounded by a 3 s timeout; failure exports `computehive_redis_up 0` instead of stale data).
+  Per-worker series are capped at 200 to bound label cardinality. Rejected (c): another process to deploy and secure for no gain.
+- All metric methods are nil-safe, so tests and code that do not care about metrics need no plumbing.
+
+### D-52: `/metrics` is authenticated and TLS-only, like everything else
+- It lists worker ids and utilisation, so it requires the API token (not the worker credential) and shares the source-address rate limit.
+  Prometheus presents the token from a mounted file and verifies the coordinator against the cluster CA.
+- **Consequence:** Prometheus must read a 0600 file, so it runs as the host user and keeps its TSDB on a tmpfs: metrics history is not persisted in
+  Compose (documented). A deployment beyond a laptop should use a service account and a volume.
+
+### D-53: Alerts describe symptoms and carry the first action
+- Twelve rules (down, no workers, worker lost, heartbeat late, RAM/disk at 90%, overloaded for 10 min, queue stuck, dead-letter growing, requeue
+  rate, slow scheduling). `QueueStuck` fires only when the head job is old **and healthy workers exist**, because "queue is long" while the cluster
+  is saturated is normal, but "old job, idle workers" means nobody can run it, and the annotation points at `computehive explain`.
+- Validated with `promtool`; one was fired for real by killing a worker. No Alertmanager is configured, so alerts are visible in Prometheus and
+  Grafana but not delivered anywhere.
+
+### D-54: One dashboard, generated from a short script, verified by rendering
+- Grafana JSON is verbose, so `deploy/grafana/dashboard.py` is the source and the JSON is generated. It is provisioned (nothing to import) and doubles
+  as the "live cluster view" (a one-row-per-worker table plus the 90% rule per worker), which avoids building a second UI.
+- **Verification:** every panel query was run against Prometheus (31 of 34 returned data; the 3 empty ones are failure-only panels that stayed empty
+  until a failure happened), then the page was rendered in a browser. That caught a real defect the queries could not: the table was cluttered with
+  `__name__/instance/job` columns (fixed with `max by (worker)`).
+- **Bug found live:** pinning the datasource UID made Grafana refuse to start on an existing stack (it cannot change a provisioned datasource's UID).
+  The provisioning file now deletes the datasource by name first, so upgrades work without wiping Grafana.
+
+### D-55: Correlation by request id and job id; JSON logs everywhere
+- An outermost gRPC interceptor assigns or accepts an `x-request-id`, returns it in the response, records RPC metrics and writes one structured line
+  per call with `method`, `code`, `duration_ms`, `job_id`, `worker_id`. A caller-supplied id is accepted only if it matches `[A-Za-z0-9._-]{1,64}`, so a client cannot
+  inject newlines or fake log lines (tested). Polling is logged at debug, otherwise an idle cluster writes a line per worker per 2 s.
+- The worker now logs JSON by default (`LOG_FORMAT=text` for terminals) with `component` and `worker_id` on every line, and `slog.SetDefault` so package-level logs match.
+- **Not done:** distributed tracing. Correlation is by ids in logs.
+
+### D-56: Graceful drain, with a second signal as the escape hatch
+- **Before:** SIGTERM cancelled the agent immediately: a running job was killed and handed back, even if seconds from finishing.
+- **Now:** SIGTERM starts a drain. The worker stops pulling, heartbeats `draining` (so the coordinator stops assigning), lets the current job finish for up to
+  `DRAIN_TIMEOUT` (30 s), then exits; on timeout the job is handed back as `evicted` (no attempt burned). A second signal terminates immediately; the contributor
+  kill switch is still immediate. The coordinator reports not-ready for `SHUTDOWN_GRACE` (3 s) while still serving, then drains in-flight RPCs (forced stop after 15 s).
+- **Why:** a rolling restart or `docker stop` should not waste work. Compose `stop_grace_period` is raised (30 s/45 s) because Docker's 10 s default would SIGKILL a draining worker.
+- **Measured live:** a 15 s job survived a SIGTERM to its worker and finished on attempt 1 of 3; `/readyz` went 200, 503 for about 3 s, then closed.
+
+### D-57: Honest limits in the metrics
+- `jobs_killed_total{kind="kill"}` is exit codes 137/143: it includes OOM, disk and PID quota kills and a manual kill. The worker reports only four failure reasons,
+  so a precise sandbox-kill reason would need a protocol addition. Documented as an approximation rather than presented as exact.
+- Overload transitions are detected in coordinator memory, so a restart can double-count one.
+
+### Phase 6 outcome
+Verified: metrics content against a real Redis (exact values), the authenticated endpoint, nil-safety, overload-transition counting, correlation-id handling including hostile ids,
+worker drain (finish, no more work, timeout hand-back, idle exit; run 3x under `-race`), `make lint` and `make test` (chaos 145 s), alert rules with `promtool`, live: Prometheus scraping
+over TLS with the token, 12 rules loaded, `WorkerLost` fired by a real kill, Grafana datasource and dashboard provisioned and rendered, SIGTERM drain of a worker and of the coordinator.
+Not verified: behaviour with more than two workers; alert delivery (no Alertmanager); metrics persistence across Prometheus restarts.

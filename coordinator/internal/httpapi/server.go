@@ -170,3 +170,27 @@ func (s *server) readyz(w http.ResponseWriter, r *http.Request) {
 	}
 	_, _ = io.WriteString(w, "ready\n")
 }
+
+// WithMetrics serves metricsHandler at GET /metrics in front of next. The endpoint exposes worker ids,
+// queue sizes and per-worker utilisation, so it requires the API token (the same credential as artifact
+// uploads) and is rate-limited by source address before the token is examined.
+func WithMetrics(next, metricsHandler http.Handler, authz Authz) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/metrics" || r.Method != http.MethodGet {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if authz != nil {
+			if !authz.AllowAnon(r.RemoteAddr) {
+				http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
+				return
+			}
+			if !authz.HTTPWriteAllowed(r) {
+				w.Header().Set("WWW-Authenticate", `Bearer realm="computehive"`)
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+		}
+		metricsHandler.ServeHTTP(w, r)
+	})
+}
