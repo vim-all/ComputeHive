@@ -202,3 +202,213 @@ func TestHeadroomCountsMemoryPromisedToRunningJobsNotYetUsed(t *testing.T) {
 		t.Fatalf("job that fits was refused: %q", reason)
 	}
 }
+
+// A job that demands gVisor never lands on a plain-runc worker; unconstrained jobs go anywhere.
+func TestRequiredIsolationIsHonouredByTheClaimScript(t *testing.T) {
+	q := newQueue(t, testConfig())
+	enqueue(t, q, "needs-gvisor", func(s *Spec) { s.RequiredIsolation = "gvisor" })
+	enqueue(t, q, "anywhere")
+
+	hb(t, q, "runc-worker", func(r *WorkerReport) { r.Isolation = "hardened-runc" })
+	c, _ := tryClaim(t, q, "runc-worker")
+	if c == nil || c.JobID != "anywhere" {
+		t.Fatalf("the plain worker should skip the gVisor-only job and take the other, got %+v", c)
+	}
+	if c2, _ := tryClaim(t, q, "runc-worker"); c2 != nil {
+		t.Fatalf("a hardened-runc worker was given a job that requires gVisor: %+v", c2)
+	}
+	if st := state(t, q, "needs-gvisor").State; st != StatePending {
+		t.Fatalf("job should still be waiting for a gVisor worker, is %s", st)
+	}
+
+	hb(t, q, "gvisor-worker", func(r *WorkerReport) { r.Isolation = "gvisor" })
+	c3, _ := tryClaim(t, q, "gvisor-worker")
+	if c3 == nil || c3.JobID != "needs-gvisor" {
+		t.Fatalf("the gVisor worker should get the job, got %+v", c3)
+	}
+	ws, _ := q.ListWorkers(context.Background())
+	seen := map[string]string{}
+	for _, w := range ws {
+		seen[w.ID] = w.Isolation
+	}
+	if seen["gvisor-worker"] != "gvisor" || seen["runc-worker"] != "hardened-runc" {
+		t.Fatalf("isolation not surfaced in the worker listing: %v", seen)
+	}
+}
+
+// Jobs that ask for network access only go to workers whose contributor allows network jobs.
+func TestNetworkJobsOnlyGoToWorkersThatAllowThem(t *testing.T) {
+	q := newQueue(t, testConfig())
+	enqueue(t, q, "wants-net", func(s *Spec) { s.NetworkHosts = []string{"pypi.org"} })
+	enqueue(t, q, "offline")
+
+	hb(t, q, "private", func(r *WorkerReport) { r.AllowsNet = false })
+	c, _ := tryClaim(t, q, "private")
+	if c == nil || c.JobID != "offline" {
+		t.Fatalf("a worker that refuses network jobs must skip them, got %+v", c)
+	}
+	if st := state(t, q, "wants-net").State; st != StatePending {
+		t.Fatalf("network job should still be waiting, is %s", st)
+	}
+	hb(t, q, "open", func(r *WorkerReport) { r.AllowsNet = true })
+	c2, _ := tryClaim(t, q, "open")
+	if c2 == nil || c2.JobID != "wants-net" {
+		t.Fatalf("the network-enabled worker should get the network job, got %+v", c2)
+	}
+}
+
+// ---- redundant execution (verify) ----
+
+func enqueuePair(t *testing.T, q *Queue, id string) {
+	t.Helper()
+	if _, created, err := q.EnqueuePair(context.Background(), Spec{ID: id, ContainerImage: "img", CreatedAtUnix: time.Now().Unix()}, 0); err != nil || !created {
+		t.Fatalf("enqueue pair: %v %v", created, err)
+	}
+}
+
+func finishWith(t *testing.T, q *Queue, c *Claimed, digest string) {
+	t.Helper()
+	d, err := q.Complete(context.Background(), c.JobID, c.Token, true, Result{JobID: c.JobID, OutputDigest: digest})
+	if err != nil || d != DispOK {
+		t.Fatalf("complete %s: %v %v", c.JobID, d, err)
+	}
+}
+
+func TestVerifiedJobRunsOnTwoDifferentWorkersAndMatchingOutputSucceeds(t *testing.T) {
+	cfg := testConfig()
+	cfg.VerifyTimeout = time.Minute
+	q := newQueue(t, cfg)
+	enqueuePair(t, q, "v")
+	hb(t, q, "w1")
+	hb(t, q, "w2")
+
+	a := mustClaim(t, q, "w1")
+	finishWith(t, q, a, "sha256-of-correct-output")
+	if j := state(t, q, a.JobID); j.State != StateVerifying || j.Verification != "pending" {
+		t.Fatalf("first replica must wait for its sibling: %+v", j)
+	}
+	// The sibling replica is still PENDING and w1 is free again, but w1 must never be given it:
+	// otherwise one worker could produce both results and forge the agreement. This exercises the
+	// exclusion rule itself (capacity is not the reason).
+	if n, _ := q.QueueDepth(context.Background()); n != 1 {
+		t.Fatalf("the sibling should still be waiting, queue depth %d", n)
+	}
+	if c, _ := tryClaim(t, q, "w1"); c != nil {
+		t.Fatalf("worker w1 was given the sibling replica %s", c.JobID)
+	}
+	// ...while another worker takes it immediately, proving it was available all along.
+	b := mustClaim(t, q, "w2")
+	if b.JobID == a.JobID {
+		t.Fatalf("the same replica was assigned twice")
+	}
+	ctx := context.Background()
+	if res, err := q.GetResult(ctx, a.JobID); err != nil || res == nil {
+		t.Fatalf("result stored but withheld by the API layer: %v %v", res, err)
+	}
+	finishWith(t, q, b, "sha256-of-correct-output")
+
+	for _, id := range []string{a.JobID, b.JobID} {
+		if j := state(t, q, id); j.State != StateSucceeded || j.Verification != "match" || j.Commits != 1 {
+			t.Fatalf("after agreement %s: %+v", id, j)
+		}
+	}
+	counts, _ := q.Counts(ctx)
+	if counts[StateVerifying] != 0 || counts[StateSucceeded] != 2 {
+		t.Fatalf("counts %v", counts)
+	}
+}
+
+func TestDisagreeingOutputsFailBothReplicas(t *testing.T) {
+	cfg := testConfig()
+	cfg.VerifyTimeout = time.Minute
+	q := newQueue(t, cfg)
+	enqueuePair(t, q, "v")
+	hb(t, q, "honest")
+	hb(t, q, "forger")
+	a, b := mustClaim(t, q, "honest"), mustClaim(t, q, "forger")
+	finishWith(t, q, a, "digest-honest")
+	finishWith(t, q, b, "digest-forged")
+	for _, id := range []string{a.JobID, b.JobID} {
+		j := state(t, q, id)
+		if j.State != StateFailed || j.Verification != "mismatch" || j.LastFailure != "verification_mismatch" {
+			t.Fatalf("%s must fail on a mismatch: %+v", id, j)
+		}
+	}
+}
+
+func TestAReplicaWithoutADigestCanNeverBeVerified(t *testing.T) {
+	cfg := testConfig()
+	cfg.VerifyTimeout = time.Minute
+	q := newQueue(t, cfg)
+	enqueuePair(t, q, "v")
+	hb(t, q, "w1")
+	hb(t, q, "w2")
+	a, b := mustClaim(t, q, "w1"), mustClaim(t, q, "w2")
+	finishWith(t, q, a, "")
+	finishWith(t, q, b, "")
+	if j := state(t, q, a.JobID); j.State != StateFailed || j.Verification != "mismatch" {
+		t.Fatalf("two empty digests must not count as agreement: %+v", j)
+	}
+}
+
+func TestAVerifiedJobOnAOneWorkerClusterTimesOutInsteadOfWaitingForever(t *testing.T) {
+	cfg := testConfig()
+	cfg.VerifyTimeout = 300 * time.Millisecond
+	cfg.DeadAfter = time.Minute
+	q := newQueue(t, cfg)
+	enqueuePair(t, q, "v")
+	hb(t, q, "only")
+	a := mustClaim(t, q, "only")
+	finishWith(t, q, a, "d")
+	if c, _ := tryClaim(t, q, "only"); c != nil {
+		t.Fatal("the only worker was given the second replica")
+	}
+	time.Sleep(450 * time.Millisecond)
+	if n, err := q.ReapVerifyTimeouts(context.Background()); err != nil || n != 1 {
+		t.Fatalf("reap: %d %v", n, err)
+	}
+	if j := state(t, q, a.JobID); j.State != StateFailed || j.Verification != "timeout" || j.LastFailure != "verification_timeout" {
+		t.Fatalf("after the timeout: %+v", j)
+	}
+}
+
+func TestIfTheOtherReplicaFailsTheWaitingOneFailsToo(t *testing.T) {
+	cfg := testConfig()
+	cfg.VerifyTimeout = time.Minute
+	q := newQueue(t, cfg)
+	enqueuePair(t, q, "v")
+	hb(t, q, "w1")
+	hb(t, q, "w2")
+	a, b := mustClaim(t, q, "w1"), mustClaim(t, q, "w2")
+	finishWith(t, q, a, "d")
+	// the sibling's own failure (non-zero exit) is terminal
+	if d, err := q.Complete(context.Background(), b.JobID, b.Token, false, Result{JobID: b.JobID}); err != nil || d != DispOK {
+		t.Fatal(d, err)
+	}
+	if j := state(t, q, a.JobID); j.State != StateFailed || j.Verification != "unavailable" {
+		t.Fatalf("the waiting replica must not be left in VERIFYING or reported as success: %+v", j)
+	}
+}
+
+func TestCancellingAVerifiedJobCancelsBothReplicasAndPairEnqueueIsIdempotent(t *testing.T) {
+	q := newQueue(t, testConfig())
+	enqueuePair(t, q, "v")
+	seq1 := state(t, q, "v").Seq
+	if seq, created, _ := q.EnqueuePair(context.Background(), Spec{ID: "v", ContainerImage: "img"}, 0); created || seq != seq1 {
+		t.Fatalf("re-enqueue created=%v seq %d vs %d", created, seq, seq1)
+	}
+	if n, _ := q.QueueDepth(context.Background()); n != 2 {
+		t.Fatalf("a pair is two queue entries, got %d", n)
+	}
+	if d, _ := q.Cancel(context.Background(), "v"); d != DispOK {
+		t.Fatal(d)
+	}
+	for _, id := range []string{"v", ShadowID("v")} {
+		if st := state(t, q, id).State; st != StateCanceled {
+			t.Fatalf("%s is %s after cancelling the verified job", id, st)
+		}
+	}
+	if n, _ := q.QueueDepth(context.Background()); n != 0 {
+		t.Fatalf("cancelled replicas still queued: %d", n)
+	}
+}

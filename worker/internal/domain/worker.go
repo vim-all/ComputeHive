@@ -34,6 +34,8 @@ type WorkerHeartbeat struct {
 	MaxJobs     int      `json:"max_jobs,omitempty"`
 
 	// Usage is the latest resource sample; nil until the monitor has produced one.
+	Isolation       string           `json:"isolation,omitempty"`
+	AllowsNetwork   bool             `json:"allows_network,omitempty"`
 	Usage           *monitor.Metrics `json:"usage,omitempty"`
 	OverloadReasons []string         `json:"overload_reasons,omitempty"`
 }

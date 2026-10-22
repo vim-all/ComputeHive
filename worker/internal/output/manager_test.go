@@ -2,8 +2,11 @@ package output
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -128,4 +131,69 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
 	return fn(request)
+}
+
+// Self-hosted mode: with no bucket, files go to the coordinator with the worker's credential and a hash.
+func TestOutputsAreStoredOnTheCoordinatorWhenThereIsNoBucket(t *testing.T) {
+	type put struct {
+		path, sha, auth, worker string
+		body                    []byte
+	}
+	var got []put
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		got = append(got, put{r.URL.Path, r.Header.Get("X-Content-SHA256"), r.Header.Get("Authorization"), r.Header.Get("X-Worker-Id"), b})
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"uri":"computehive-output://job1/2` + strings.TrimPrefix(r.URL.Path, "/outputs/job1") + `"}`))
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(dir, "sub dir"), 0o755)
+	_ = os.WriteFile(filepath.Join(dir, "result.csv"), []byte("a,b\n1,2\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "sub dir", "log.txt"), []byte("done"), 0o644)
+
+	m, err := NewManager(Config{Timeout: 5 * time.Second, MaxFiles: 10, MaxBytes: 1 << 20, CoordinatorURL: srv.URL + "/",
+		CoordinatorAuth: func(set func(k, v string)) { set("Authorization", "Bearer chwc_x"); set("X-Worker-Id", "w1") }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := m.CollectAndUpload(context.Background(), "job1", dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || len(res.Artifacts) != 2 {
+		t.Fatalf("uploads %d artifacts %d", len(got), len(res.Artifacts))
+	}
+	for _, p := range got {
+		if p.auth != "Bearer chwc_x" || p.worker != "w1" {
+			t.Errorf("credential headers missing on %s", p.path)
+		}
+		sum := sha256.Sum256(p.body)
+		if p.sha != hex.EncodeToString(sum[:]) {
+			t.Errorf("%s: X-Content-SHA256 %s does not match the body", p.path, p.sha)
+		}
+	}
+	byPath := map[string]string{}
+	for _, a := range res.Artifacts {
+		byPath[a.RelativePath] = a.URI
+	}
+	if byPath["result.csv"] != "computehive-output://job1/2/result.csv" || !strings.HasPrefix(byPath["sub dir/log.txt"], "computehive-output://job1/2/sub") {
+		t.Fatalf("artifact URIs: %v", byPath)
+	}
+}
+
+func TestACoordinatorRefusalFailsTheUpload(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { http.Error(w, "no lease", http.StatusForbidden) }))
+	defer srv.Close()
+	dir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(dir, "r.txt"), []byte("x"), 0o644)
+	m, _ := NewManager(Config{Timeout: 2 * time.Second, MaxFiles: 10, MaxBytes: 1 << 20, CoordinatorURL: srv.URL})
+	if _, err := m.CollectAndUpload(context.Background(), "job1", dir); err == nil || !strings.Contains(err.Error(), "refused") {
+		t.Fatalf("got %v", err)
+	}
+	empty, _ := NewManager(Config{Timeout: time.Second, MaxFiles: 1, MaxBytes: 1})
+	if _, err := empty.CollectAndUpload(context.Background(), "job1", dir); err == nil || !strings.Contains(err.Error(), "no output storage") {
+		t.Fatalf("no sink at all must say what to configure, got %v", err)
+	}
 }

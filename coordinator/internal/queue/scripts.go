@@ -49,6 +49,8 @@ local function release(id, jk)
   redis.call('HSET', jk, 'worker', '', 'token', '')
 end
 
+local settle -- defined below (verification pairs); requeue needs it for DEAD replicas
+
 -- Fail the current attempt of an ASSIGNED/RUNNING job. If attempts remain the job
 -- goes back into ch:pending under its ORIGINAL sequence number (so it keeps its
 -- FIFO place) after an exponential backoff; otherwise it is parked as DEAD.
@@ -67,6 +69,7 @@ local function requeue(id, jk, reason, count)
     setstate(jk, 'DEAD')
     redis.call('HSET', jk, 'finished_ms', now)
     redis.call('ZADD', 'ch:dead', now, id)
+    settle(id, jk)
     return 'DEAD'
   end
   local backoff = 0
@@ -80,28 +83,76 @@ local function requeue(id, jk, reason, count)
   redis.call('ZADD', 'ch:pending', tonumber(redis.call('HGET', jk, 'seq')), id)
   return 'REQUEUED'
 end
+
+-- Redundant execution ("verify"): a job runs as two replicas that are linked by a 'sibling' field and
+-- never run on the same worker. A replica that finishes OK waits in VERIFYING until its sibling has
+-- finished too; the pair then both SUCCEED (digests equal) or both FAIL.
+local function finish_verified(k, i, state, verdict, reason)
+  redis.call('ZREM', 'ch:verifying', i)
+  setstate(k, state)
+  local now = now_ms()
+  redis.call('HSET', k, 'verified', verdict, 'finished_ms', now)
+  if reason then redis.call('HSET', k, 'last_failure', reason, 'last_failure_ms', now) end
+end
+
+settle = function(id, jk)
+  local sib = redis.call('HGET', jk, 'sibling')
+  if not sib or sib == '' then return end
+  local sk = 'ch:job:' .. sib
+  local mine, theirs = redis.call('HGET', jk, 'state'), redis.call('HGET', sk, 'state')
+  local function dead(st) return st == 'FAILED' or st == 'DEAD' or st == 'CANCELED' end
+  if mine == 'VERIFYING' and theirs == 'VERIFYING' then
+    local a, b = redis.call('HGET', jk, 'digest'), redis.call('HGET', sk, 'digest')
+    if a and a ~= '' and a == b then
+      finish_verified(jk, id, 'SUCCEEDED', 'match')
+      finish_verified(sk, sib, 'SUCCEEDED', 'match')
+    else
+      finish_verified(jk, id, 'FAILED', 'mismatch', 'verification_mismatch')
+      finish_verified(sk, sib, 'FAILED', 'mismatch', 'verification_mismatch')
+    end
+  elseif mine == 'VERIFYING' and dead(theirs) then
+    finish_verified(jk, id, 'FAILED', 'unavailable', 'verification_peer_' .. string.lower(theirs))
+  elseif theirs == 'VERIFYING' and dead(mine) then
+    finish_verified(sk, sib, 'FAILED', 'unavailable', 'verification_peer_' .. string.lower(mine))
+  end
+end
+
+local function enqueue_one(base, sibling)
+  local id = ARGV[base]
+  local jk = 'ch:job:' .. id
+  if redis.call('EXISTS', jk) == 1 then
+    return {'EXISTS', redis.call('HGET', jk, 'seq')}
+  end
+  local seq = redis.call('INCR', 'ch:seq')
+  local now = now_ms()
+  redis.call('HSET', jk,
+    'id', id, 'state', 'PENDING', 'seq', seq, 'attempt', 0, 'max_attempts', ARGV[base + 1],
+    'req_cpu', ARGV[base + 2], 'req_mem', ARGV[base + 3], 'req_gpu', ARGV[base + 4], 'timeout_s', ARGV[base + 5],
+    'backoff_base', ARGV[base + 6], 'backoff_max', ARGV[base + 7], 'user', ARGV[base + 8], 'verify', ARGV[base + 9],
+    'spec', ARGV[base + 10], 'req_isolation', ARGV[base + 11], 'needs_net', ARGV[base + 12],
+    'sibling', sibling, 'exclude', '', 'created_ms', now, 'not_before', 0, 'worker', '', 'token', '')
+  redis.call('ZADD', 'ch:pending', seq, id)
+  redis.call('ZADD', 'ch:jobs', seq, id)
+  redis.call('HINCRBY', 'ch:counts', 'PENDING', 1)
+  return {'OK', tostring(seq)}
+end
 `
 
 // enqueue: ARGV id, max_attempts, req_cpu, req_mem_mb, req_gpu, timeout_s,
-// backoff_base_ms, backoff_max_ms, user, verify, spec_json.
+// backoff_base_ms, backoff_max_ms, user, verify, spec_json, required_isolation, needs_net.
 // Idempotent: re-enqueueing an existing id is a no-op that returns its seq.
 var enqueueScript = redis.NewScript(prelude + `
-local id = ARGV[1]
-local jk = 'ch:job:' .. id
-if redis.call('EXISTS', jk) == 1 then
-  return {'EXISTS', redis.call('HGET', jk, 'seq')}
-end
-local seq = redis.call('INCR', 'ch:seq')
-local now = now_ms()
-redis.call('HSET', jk,
-  'id', id, 'state', 'PENDING', 'seq', seq, 'attempt', 0, 'max_attempts', ARGV[2],
-  'req_cpu', ARGV[3], 'req_mem', ARGV[4], 'req_gpu', ARGV[5], 'timeout_s', ARGV[6],
-  'backoff_base', ARGV[7], 'backoff_max', ARGV[8], 'user', ARGV[9], 'verify', ARGV[10],
-  'spec', ARGV[11], 'created_ms', now, 'not_before', 0, 'worker', '', 'token', '')
-redis.call('ZADD', 'ch:pending', seq, id)
-redis.call('ZADD', 'ch:jobs', seq, id)
-redis.call('HINCRBY', 'ch:counts', 'PENDING', 1)
-return {'OK', tostring(seq)}
+return enqueue_one(1, '')
+`)
+
+// enqueuePair: ARGV is two enqueue argument blocks of 13 (primary then shadow). Both replicas are
+// created in one atomic step, linked to each other, so a crash can never leave half a pair.
+var enqueuePairScript = redis.NewScript(prelude + `
+local pid, sid = ARGV[1], ARGV[14]
+local first = enqueue_one(1, sid)
+if first[1] == 'EXISTS' then return first end
+enqueue_one(14, pid)
+return first
 `)
 
 // claim: ARGV worker_id, new_token, dead_after_ms, default_timeout_ms, lease_grace_ms, scan_limit,
@@ -128,7 +179,7 @@ if not hb then return {'REJECT', 'unknown_worker'} end
 if now - tonumber(hb) > dead_after then return {'REJECT', 'stale_heartbeat'} end
 
 local wk = 'ch:worker:' .. w
-local f = redis.call('HMGET', wk, 'overloaded', 'draining', 'max_jobs', 'cpu', 'mem_mb', 'gpu', 'mem_pct', 'mem_total', 'mem_used', 'jobs_mem')
+local f = redis.call('HMGET', wk, 'overloaded', 'draining', 'max_jobs', 'cpu', 'mem_mb', 'gpu', 'mem_pct', 'mem_total', 'mem_used', 'jobs_mem', 'isolation', 'allows_net')
 if f[1] == '1' then return {'REJECT', 'overloaded'} end
 if f[2] == '1' then return {'REJECT', 'draining'} end
 if require_usage and not f[7] then return {'REJECT', 'no_metrics'} end
@@ -137,6 +188,8 @@ local wrun = 'ch:wrun:' .. w
 if redis.call('SCARD', wrun) >= max_jobs then return {'REJECT', 'at_capacity'} end
 local wcpu, wmem, wgpu = tonumber(f[4]) or 0, tonumber(f[5]) or 0, tonumber(f[6]) or 0
 local mem_total, mem_used, jobs_mem = tonumber(f[8]) or 0, tonumber(f[9]) or 0, tonumber(f[10]) or 0
+local isolation = f[11] or ''
+local allows_net = f[12] == '1'
 
 -- memory already promised to running jobs but not yet visible in the host's usage
 local unramped = 0
@@ -154,12 +207,15 @@ local skipped_headroom = false
 local ids = redis.call('ZRANGE', 'ch:pending', 0, limit - 1)
 for _, id in ipairs(ids) do
   local jk = 'ch:job:' .. id
-  local j = redis.call('HMGET', jk, 'state', 'not_before', 'req_cpu', 'req_mem', 'req_gpu', 'timeout_s', 'attempt', 'spec')
+  local j = redis.call('HMGET', jk, 'state', 'not_before', 'req_cpu', 'req_mem', 'req_gpu', 'timeout_s', 'attempt', 'spec', 'req_isolation', 'needs_net', 'exclude', 'sibling')
   local st = j[1]
   if st ~= 'PENDING' and st ~= 'REQUEUED' then
     redis.call('ZREM', 'ch:pending', id) -- defensive: never leave a non-pending id in the queue
   elseif tonumber(j[2]) <= now
-     and tonumber(j[3]) <= wcpu and tonumber(j[4]) <= wmem and tonumber(j[5]) <= wgpu then
+     and tonumber(j[3]) <= wcpu and tonumber(j[4]) <= wmem and tonumber(j[5]) <= wgpu
+     and (j[9] == nil or j[9] == '' or j[9] == isolation)
+     and (j[10] ~= '1' or allows_net)
+     and j[11] ~= w then -- a verification replica never runs on the worker that ran its sibling
     local fits = true
     if mem_total > 0 and limit_mem > 0 then
       local req = tonumber(j[4])
@@ -177,6 +233,7 @@ for _, id in ipairs(ids) do
       setstate(jk, 'ASSIGNED')
       redis.call('ZADD', 'ch:leases', now + timeout + grace, id)
       redis.call('SADD', wrun, id)
+      if j[12] and j[12] ~= '' then redis.call('HSET', 'ch:job:' .. j[12], 'exclude', w) end
       return {'OK', id, tostring(attempt), j[8], token}
     end
   end
@@ -199,7 +256,7 @@ end
 return 'OK'
 `)
 
-// complete: ARGV id, token, outcome (SUCCEEDED|FAILED), result_json.
+// complete: ARGV id, token, outcome (SUCCEEDED|FAILED), result_json, output_digest.
 // The first valid completion wins; everything later is a no-op ("DUP"), and a
 // completion from a superseded attempt is discarded ("STALE").
 var completeScript = redis.NewScript(prelude + `
@@ -207,13 +264,21 @@ local id = ARGV[1]
 local jk = 'ch:job:' .. id
 local st = redis.call('HGET', jk, 'state')
 if not st then return 'UNKNOWN' end
-if is_terminal(st) then return 'DUP' end
+if is_terminal(st) or st == 'VERIFYING' then return 'DUP' end
 if st == 'PENDING' or st == 'REQUEUED' or redis.call('HGET', jk, 'token') ~= ARGV[2] then return 'STALE' end
 release(id, jk)
-setstate(jk, ARGV[3])
-redis.call('HSET', jk, 'finished_ms', now_ms())
 redis.call('HINCRBY', jk, 'commits', 1) -- audit counter: must end at exactly 1
 redis.call('SET', 'ch:result:' .. id, ARGV[4])
+if redis.call('HGET', jk, 'verify') == '1' and ARGV[3] == 'SUCCEEDED' then
+  -- hold the result back until the other replica has produced the same output
+  setstate(jk, 'VERIFYING')
+  redis.call('HSET', jk, 'digest', ARGV[5])
+  redis.call('ZADD', 'ch:verifying', now_ms(), id)
+else
+  setstate(jk, ARGV[3])
+  redis.call('HSET', jk, 'finished_ms', now_ms())
+end
+settle(id, jk)
 return 'OK'
 `)
 
@@ -230,19 +295,26 @@ return 'OK:' .. requeue(id, jk, ARGV[3], ARGV[4] == '1')
 
 // cancel: ARGV id.
 var cancelScript = redis.NewScript(prelude + `
-local id = ARGV[1]
-local jk = 'ch:job:' .. id
-local st = redis.call('HGET', jk, 'state')
-if not st then return 'UNKNOWN' end
-if is_terminal(st) then return 'DUP' end
-if st == 'ASSIGNED' or st == 'RUNNING' then
-  release(id, jk)
-else
-  redis.call('ZREM', 'ch:pending', id)
+local function cancel_one(id)
+  local jk = 'ch:job:' .. id
+  local st = redis.call('HGET', jk, 'state')
+  if not st then return 'UNKNOWN' end
+  if is_terminal(st) then return 'DUP' end
+  if st == 'ASSIGNED' or st == 'RUNNING' then
+    release(id, jk)
+  elseif st == 'VERIFYING' then
+    redis.call('ZREM', 'ch:verifying', id)
+  else
+    redis.call('ZREM', 'ch:pending', id)
+  end
+  setstate(jk, 'CANCELED')
+  redis.call('HSET', jk, 'finished_ms', now_ms())
+  return 'OK'
 end
-setstate(jk, 'CANCELED')
-redis.call('HSET', jk, 'finished_ms', now_ms())
-return 'OK'
+local r = cancel_one(ARGV[1])
+local sib = redis.call('HGET', 'ch:job:' .. ARGV[1], 'sibling')
+if r == 'OK' and sib and sib ~= '' then cancel_one(sib) end -- cancelling a verified job cancels both replicas
+return r
 `)
 
 // revive moves a DEAD job back to PENDING with a fresh attempt budget, keeping its sequence.
@@ -259,7 +331,7 @@ return 'OK'
 
 // heartbeat: ARGV worker, cpu, mem_mb, gpu, worker_overloaded, draining, max_jobs, version,
 // orphan_grace_ms, has_usage, mem_total_mb, mem_used_mb, jobs_mem_mb, mem_pct, cpu_pct, disk_pct,
-// limit_mem, limit_cpu, limit_disk, release_pct, release_after_ms, usage_json, running_job_id...
+// limit_mem, limit_cpu, limit_disk, release_pct, release_after_ms, usage_json, isolation, allows_net, running_job_id...
 //
 // Returns the reported jobs that the worker no longer owns (it must abort them).
 //
@@ -283,7 +355,7 @@ local wk = 'ch:worker:' .. w
 if redis.call('EXISTS', wk) == 0 then redis.call('HSET', wk, 'registered_ms', now) end
 redis.call('ZADD', 'ch:workers', now, w)
 redis.call('HSET', wk, 'cpu', ARGV[2], 'mem_mb', ARGV[3], 'gpu', ARGV[4], 'draining', ARGV[6],
-  'max_jobs', ARGV[7], 'version', ARGV[8], 'last_hb_ms', now, 'w_overloaded', ARGV[5])
+  'max_jobs', ARGV[7], 'version', ARGV[8], 'last_hb_ms', now, 'w_overloaded', ARGV[5], 'isolation', ARGV[23], 'allows_net', ARGV[24])
 
 local cp = redis.call('HGET', wk, 'cp_over') == '1'
 if ARGV[10] == '1' then
@@ -325,7 +397,7 @@ redis.call('HSET', wk, 'overloaded', (ARGV[5] == '1' or cp) and '1' or '0')
 local wrun = 'ch:wrun:' .. w
 local reported = {}
 local cancel = {}
-for i = 23, #ARGV do
+for i = 25, #ARGV do
   reported[ARGV[i]] = true
   if redis.call('SISMEMBER', wrun, ARGV[i]) == 0 then cancel[#cancel + 1] = ARGV[i] end
 end
@@ -392,4 +464,40 @@ for _, id in ipairs(ids) do
   end
 end
 return n
+`)
+
+// releaseWorker: ARGV worker_id. Used when a worker is revoked: marks it dead immediately (so it is
+// never assigned anything) and requeues everything it held. A revoked worker's jobs were not the
+// jobs' fault, so no attempt is counted.
+var releaseWorkerScript = redis.NewScript(prelude + `
+local w = ARGV[1]
+redis.call('ZADD', 'ch:workers', 0, w)
+local n = 0
+for _, id in ipairs(redis.call('SMEMBERS', 'ch:wrun:' .. w)) do
+  local jk = 'ch:job:' .. id
+  local st = redis.call('HGET', jk, 'state')
+  if st == 'ASSIGNED' or st == 'RUNNING' then
+    requeue(id, jk, 'worker_revoked', false)
+    n = n + 1
+  else
+    redis.call('SREM', 'ch:wrun:' .. w, id)
+  end
+end
+return n
+`)
+
+// reapVerify: ARGV timeout_ms, limit. A replica that finished but whose sibling never did (for
+// example a cluster with a single worker, which can never run both) must not wait forever.
+var reapVerifyScript = redis.NewScript(prelude + `
+local cutoff = now_ms() - tonumber(ARGV[1])
+local ids = redis.call('ZRANGEBYSCORE', 'ch:verifying', '-inf', cutoff, 'LIMIT', 0, tonumber(ARGV[2]))
+for _, id in ipairs(ids) do
+  local jk = 'ch:job:' .. id
+  if redis.call('HGET', jk, 'state') == 'VERIFYING' then
+    finish_verified(jk, id, 'FAILED', 'timeout', 'verification_timeout')
+  else
+    redis.call('ZREM', 'ch:verifying', id)
+  end
+end
+return #ids
 `)

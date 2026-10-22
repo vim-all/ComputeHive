@@ -91,8 +91,8 @@ Docker 29.8 (runc only), Go 1.27, cargo 1.94, 16 cores / 15 GB RAM. Not verifiab
 | A4 | No lease/attempt tokens; late result can commit | **Phase 2 (done)**: lease tokens; stale/duplicate results discarded |
 | A5 | No Redis persistence or coordinator recovery | **Phase 1+2 (done)**: AOF in compose; stateless coordinator; Redis SIGKILL and coordinator restart tests |
 | A6 | Heartbeat carries no usage; no 90% rule | **Phase 3 (done)**: gopsutil monitor, hysteresis, enforced on worker and coordinator; real-container and cluster tests |
-| A7 | Executor not hardened; unbounded output; container survives timeout | Phase 4 |
-| A8 | No auth/TLS/rate limit | Phase 4 |
+| A7 | Executor not hardened; unbounded output; container survives timeout | **Phase 4 (done)**: non-root, cap-drop ALL, no-new-privileges, read-only rootfs + noexec tmpfs, seccomp, ulimits, PID/mem/CPU caps, output-dir quota, log caps, argument audit, image-tar tag policy, empty DOCKER_CONFIG, `--pull never`; 9-category hostile suite passes (`make hostile`) |
+| A8 | No auth/TLS/rate limit | **Phase 4 (done)**: expiring enrollment tokens, hashed revocable per-worker credentials, API token, TLS 1.3 + optional mTLS, per-identity rate limits, input validation; secure by default (refuses to start without TLS+token unless explicitly told) |
 | A9 | Dead scheduler; no requirement matching | Phase 5 |
 | A10 | No metrics/health/drain | Phase 6 |
 | A11 | No compose/Makefile/CI/CLI; README says prototype | Phase 1 (compose, Makefile, CI, CLI, quickstart) / 7 (full README) |
@@ -106,3 +106,6 @@ Docker 29.8 (runc only), Go 1.27, cargo 1.94, 16 cores / 15 GB RAM. Not verifiab
 | A19 | Worker polled `RequestJob` in a tight loop with no delay | **Phase 2 (done)**: `POLL_INTERVAL` (500ms) |
 | A20 | `docker run --rm` plus an explicit `docker rm` raced and stranded containers in Docker's `Dead` state (a disk leak), found by the real-container cancellation test | **Phase 3 (done)**: executor removes containers itself; startup sweep removes orphans |
 | A21 | Containers had no `--memory-swap`, `--pids-limit` or default caps (a job declaring nothing ran unbounded) | **Phase 3 (done)**: hard defaults on every container |
+| A22 | A worker that wrote any output file failed every attempt unless S3/R2 was configured (found by the first verified-job run on the real cluster) | **Phase 4 (done)**: outputs stored on the coordinator, accepted only from the lease holder, hash-verified, downloadable with `result --download` |
+| A23 | The first network-allowlist design (proxy on the bridge gateway) cannot work: Docker internal networks cannot reach the gateway (found by the real-Docker test) | **Phase 4 (done)**: redesigned as a per-job proxy sidecar; this also closed a residual risk |
+| A24 | `docker run --rm` race left Dead containers (A20) and a crashed worker left proxy sidecars/networks | **Phase 4 (done)**: startup sweep removes this worker's containers, sidecars and networks |

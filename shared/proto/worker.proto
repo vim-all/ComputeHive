@@ -139,6 +139,8 @@ enum Status {
   STATUS_SUCCEEDED = 4;
   STATUS_FAILED = 5;
   STATUS_CANCELED = 6;
+  // Finished and waiting for its verification replica to agree (see SubmitJobRequest.verify).
+  STATUS_VERIFYING = 9;
   // Failed attempt waiting to be re-assigned (original queue position kept).
   STATUS_REQUEUED = 7;
   // Exhausted max attempts; parked in the dead-letter set.
@@ -161,6 +163,8 @@ message Job {
   int32 attempt = 11;
   // Opaque token proving ownership of this attempt; must accompany SubmitResult.
   string lease_token = 12;
+  // Hosts this job asked to reach; honoured only if the contributor's policy allows.
+  repeated string network_hosts = 13;
 }
 
 // Worker-reported job execution result.
@@ -180,6 +184,9 @@ message Result {
   // "timeout" (job exceeded its runtime, terminal), "infra" (worker-side problem, retried),
   // "evicted" (worker shed load, retried without burning an attempt).
   string failure_reason = 12;
+  // SHA-256 over the exit code, full stdout and every output file. Compared across the two
+  // replicas of a job submitted with verify=true.
+  string output_digest = 13;
 }
 
 message RegisterWorkerRequest {
@@ -190,11 +197,21 @@ message RegisterWorkerRequest {
   string worker_id = 4;
   // Maximum concurrent jobs this worker will run (default 1).
   int32 max_jobs = 5;
+  // Isolation level the worker provides: "hardened-runc" or "gvisor".
+  string isolation = 6;
+  // The contributor's policy permits jobs that ask for network access.
+  bool allows_network = 7;
+  // Expiring token issued by an operator. Needed only the first time a worker ID enrols; afterwards
+  // the worker authenticates with the credential it was given.
+  string enrollment_token = 8;
 }
 
 message RegisterWorkerResponse {
   WorkerID worker_id = 1;
   int32 heartbeat_interval_seconds = 2;
+  // Per-worker credential, returned only when a worker first enrols. Send it as
+  // "authorization: Bearer <credential>" on every later call. Only its hash is stored server-side.
+  string credential = 3;
 }
 
 // Host and Docker resource usage sampled by the worker (about once per second).
@@ -235,6 +252,8 @@ message HeartbeatRequest {
   bool draining = 6;
   int32 max_jobs = 7;
   ResourceUsage usage = 8;
+  string isolation = 9;
+  bool allows_network = 10;
 }
 
 message HeartbeatResponse {

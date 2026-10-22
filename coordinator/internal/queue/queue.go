@@ -34,10 +34,12 @@ const (
 	StateRequeued  = "REQUEUED"
 	StateDead      = "DEAD"
 	StateCanceled  = "CANCELED"
+	// StateVerifying: the job ran and its result is held back until its verification replica agrees.
+	StateVerifying = "VERIFYING"
 )
 
 // AllStates lists every state, for metrics and tests.
-var AllStates = []string{StatePending, StateAssigned, StateRunning, StateSucceeded, StateFailed, StateRequeued, StateDead, StateCanceled}
+var AllStates = []string{StatePending, StateAssigned, StateRunning, StateSucceeded, StateFailed, StateRequeued, StateDead, StateCanceled, StateVerifying}
 
 // Disposition is the outcome of a state-changing call.
 type Disposition string
@@ -68,6 +70,8 @@ type Config struct {
 	DefaultTimeout time.Duration // lease basis for jobs that declare no timeout
 	ClaimScan      int           // how many queue-head jobs a claim considers
 	ReapInterval   time.Duration
+	// VerifyTimeout bounds how long a replica waits in VERIFYING for its sibling (default 10m).
+	VerifyTimeout time.Duration
 	// OrphanGrace is how long a lease may go unreported by its worker before the job
 	// is taken back (a lost claim reply). It must exceed the worker's heartbeat interval
 	// plus the time a worker takes to register a freshly received job.
@@ -97,6 +101,7 @@ func DefaultConfig() Config {
 		ClaimScan:      100,
 		ReapInterval:   time.Second,
 		OrphanGrace:    10 * time.Second,
+		VerifyTimeout:  10 * time.Minute,
 
 		LimitMemPct:     90,
 		LimitCPUPct:     90,
@@ -120,6 +125,8 @@ func (c Config) Validate() error {
 		return errors.New("backoff max must be >= backoff base >= 0")
 	case c.ClaimScan < 1:
 		return errors.New("claim scan must be >= 1")
+	case c.VerifyTimeout < 0:
+		return errors.New("verify timeout must be >= 0")
 	case c.OrphanGrace <= 0:
 		return errors.New("orphan grace must be > 0")
 	case c.LimitMemPct <= 0 || c.LimitMemPct > 100 || c.LimitCPUPct <= 0 || c.LimitCPUPct > 100 || c.LimitDiskPct <= 0 || c.LimitDiskPct > 100:
@@ -146,6 +153,8 @@ type Spec struct {
 	ArtifactSHA256    string            `json:"artifact_sha256,omitempty"`
 	User              string            `json:"user,omitempty"`
 	Verify            bool              `json:"verify,omitempty"`
+	RequiredIsolation string            `json:"required_isolation,omitempty"`
+	NetworkHosts      []string          `json:"network_hosts,omitempty"`
 	CreatedAtUnix     int64             `json:"created_at_unix"`
 }
 
@@ -175,6 +184,7 @@ type Result struct {
 	OutputAPIURL    string           `json:"output_api_url,omitempty"`
 	OutputPublicURL string           `json:"output_public_url,omitempty"`
 	OutputSizeBytes int64            `json:"output_size_bytes,omitempty"`
+	OutputDigest    string           `json:"output_digest,omitempty"`
 	OutputArtifacts []OutputArtifact `json:"output_artifacts,omitempty"`
 	FinishedAtUnix  int64            `json:"finished_at_unix,omitempty"`
 }
@@ -272,7 +282,7 @@ func (q *Queue) Enqueue(ctx context.Context, spec Spec, maxAttempts int) (seq in
 	}
 	res, err := enqueueScript.Run(ctx, q.rdb, nil,
 		spec.ID, maxAttempts, spec.CPUCores, spec.MemoryMB, spec.GPUCount, spec.MaxRuntimeSeconds,
-		q.cfg.BackoffBase.Milliseconds(), q.cfg.BackoffMax.Milliseconds(), spec.User, boolArg(spec.Verify), payload).Result()
+		q.cfg.BackoffBase.Milliseconds(), q.cfg.BackoffMax.Milliseconds(), spec.User, boolArg(spec.Verify), payload, spec.RequiredIsolation, boolArg(len(spec.NetworkHosts) > 0)).Result()
 	if err != nil {
 		return 0, false, fmt.Errorf("enqueue %s: %w", spec.ID, err)
 	}
@@ -282,6 +292,52 @@ func (q *Queue) Enqueue(ctx context.Context, spec Spec, maxAttempts int) (seq in
 	}
 	seq, _ = strconv.ParseInt(out[1], 10, 64)
 	return seq, out[0] == "OK", nil
+}
+
+// ShadowID is the id of the verification replica of job id.
+func ShadowID(id string) string { return id + "~v" }
+
+// EnqueuePair adds a job and its verification replica atomically. The replica has the same spec
+// under ShadowID(spec.ID) and is never run on the same worker as the primary.
+func (q *Queue) EnqueuePair(ctx context.Context, spec Spec, maxAttempts int) (seq int64, created bool, err error) {
+	if spec.ID == "" {
+		return 0, false, errors.New("job id is required")
+	}
+	if maxAttempts <= 0 {
+		maxAttempts = q.cfg.MaxAttempts
+	}
+	spec.Verify = true
+	shadow := spec
+	shadow.ID = ShadowID(spec.ID)
+	args := []any{}
+	for _, sp := range []Spec{spec, shadow} {
+		payload, err := json.Marshal(sp)
+		if err != nil {
+			return 0, false, fmt.Errorf("marshal job spec: %w", err)
+		}
+		args = append(args, sp.ID, maxAttempts, sp.CPUCores, sp.MemoryMB, sp.GPUCount, sp.MaxRuntimeSeconds,
+			q.cfg.BackoffBase.Milliseconds(), q.cfg.BackoffMax.Milliseconds(), sp.User, boolArg(true), payload,
+			sp.RequiredIsolation, boolArg(len(sp.NetworkHosts) > 0))
+	}
+	res, err := enqueuePairScript.Run(ctx, q.rdb, nil, args...).Result()
+	if err != nil {
+		return 0, false, fmt.Errorf("enqueue verified pair %s: %w", spec.ID, err)
+	}
+	out, err := asStrings(res)
+	if err != nil || len(out) != 2 {
+		return 0, false, fmt.Errorf("enqueue verified pair %s: bad reply %v", spec.ID, res)
+	}
+	seq, _ = strconv.ParseInt(out[1], 10, 64)
+	return seq, out[0] == "OK", nil
+}
+
+// ReapVerifyTimeouts fails replicas that waited longer than VerifyTimeout for their sibling.
+func (q *Queue) ReapVerifyTimeouts(ctx context.Context) (int, error) {
+	n, err := reapVerifyScript.Run(ctx, q.rdb, nil, q.cfg.VerifyTimeout.Milliseconds(), 100).Int()
+	if err != nil {
+		return 0, fmt.Errorf("reap verification timeouts: %w", err)
+	}
+	return n, nil
 }
 
 // Claimed is a job assigned to a worker under a fresh lease token.
@@ -348,7 +404,7 @@ func (q *Queue) Complete(ctx context.Context, jobID, token string, succeeded boo
 	if err != nil {
 		return "", fmt.Errorf("marshal result: %w", err)
 	}
-	d, _, err := q.runDisp(ctx, completeScript, jobID, token, outcome, payload)
+	d, _, err := q.runDisp(ctx, completeScript, jobID, token, outcome, payload, res.OutputDigest)
 	return d, err
 }
 
@@ -384,6 +440,8 @@ type WorkerReport struct {
 	Draining   bool
 	MaxJobs    int
 	Version    string
+	Isolation  string   // "hardened-runc" or "gvisor"
+	AllowsNet  bool     // the contributor's policy permits network jobs
 	Running    []string // jobs the worker believes it is running
 
 	// Usage is the worker's latest resource sample; nil if it sent none.
@@ -412,7 +470,7 @@ func (q *Queue) Heartbeat(ctx context.Context, r WorkerReport) ([]string, error)
 	}
 	args := []any{r.ID, r.CPU, r.MemMB, r.GPU, boolArg(r.Overloaded), boolArg(r.Draining), r.MaxJobs, r.Version, q.cfg.OrphanGrace.Milliseconds(),
 		hasUsage, u.MemTotalMB, u.MemUsedMB, u.JobsMemMB, u.MemPct, u.CPUPct, u.DiskPct,
-		q.cfg.LimitMemPct, q.cfg.LimitCPUPct, q.cfg.LimitDiskPct, q.cfg.ReleasePct, q.cfg.ReleaseAfter.Milliseconds(), u.JSON}
+		q.cfg.LimitMemPct, q.cfg.LimitCPUPct, q.cfg.LimitDiskPct, q.cfg.ReleasePct, q.cfg.ReleaseAfter.Milliseconds(), u.JSON, r.Isolation, boolArg(r.AllowsNet)}
 	for _, id := range r.Running {
 		args = append(args, id)
 	}
@@ -447,6 +505,16 @@ func (q *Queue) ReapDeadWorkers(ctx context.Context) (jobs, workers int, err err
 	return jobs, workers, nil
 }
 
+// ReleaseWorker marks a worker dead at once and requeues its jobs without counting an attempt.
+// It returns how many jobs were requeued. Used when a worker is revoked.
+func (q *Queue) ReleaseWorker(ctx context.Context, workerID string) (int, error) {
+	n, err := releaseWorkerScript.Run(ctx, q.rdb, nil, workerID).Int()
+	if err != nil {
+		return 0, fmt.Errorf("release worker %s: %w", workerID, err)
+	}
+	return n, nil
+}
+
 // ReapExpiredLeases requeues jobs that outlived their lease deadline.
 func (q *Queue) ReapExpiredLeases(ctx context.Context) (int, error) {
 	res, err := reapLeasesScript.Run(ctx, q.rdb, nil, 100).Int()
@@ -476,6 +544,13 @@ func (q *Queue) RunReaper(ctx context.Context, log *slog.Logger, onRequeue func(
 				if onRequeue != nil {
 					onRequeue(jobs)
 				}
+			}
+			if n, err := q.ReapVerifyTimeouts(ctx); err != nil {
+				if ctx.Err() == nil {
+					log.Error("reap verification timeouts failed", "error", err)
+				}
+			} else if n > 0 {
+				log.Warn("verification timed out: the replica never finished", "jobs", n)
 			}
 			n, err := q.ReapExpiredLeases(ctx)
 			if err != nil {
@@ -518,7 +593,10 @@ type Job struct {
 	// Commits is how many results were ever committed for this job. The Lua scripts
 	// guarantee it is 0 until the job finishes and exactly 1 afterwards.
 	Commits int
-	Spec    Spec
+	// Verification is "" for ordinary jobs; for verified jobs "pending", "match", "mismatch",
+	// "timeout" or "unavailable".
+	Verification string
+	Spec         Spec
 }
 
 func atoi64(s string) int64 { n, _ := strconv.ParseInt(s, 10, 64); return n }
@@ -540,6 +618,12 @@ func (q *Queue) Get(ctx context.Context, jobID string) (*Job, error) {
 		FinishedMs: atoi64(m["finished_ms"]), NotBeforeMs: atoi64(m["not_before"]), Commits: int(atoi64(m["commits"])),
 	}
 	_ = json.Unmarshal([]byte(m["spec"]), &j.Spec)
+	if m["verify"] == "1" {
+		j.Verification = m["verified"]
+		if j.Verification == "" {
+			j.Verification = "pending"
+		}
+	}
 	return j, nil
 }
 
@@ -594,6 +678,8 @@ type WorkerInfo struct {
 	RegisteredMs    int64
 	LastHeartbeatMs int64
 	Running         []string
+	Isolation       string
+	AllowsNetwork   bool
 	OverloadReasons string // "ram,cpu" while the coordinator considers the host overloaded
 	UsageJSON       string // the worker's last full resource sample
 }
@@ -625,7 +711,7 @@ func (q *Queue) ListWorkers(ctx context.Context) ([]WorkerInfo, error) {
 			CPU: int(atoi64(m["cpu"])), MemMB: int(atoi64(m["mem_mb"])), GPU: int(atoi64(m["gpu"])),
 			Overloaded: m["overloaded"] == "1", Draining: m["draining"] == "1", MaxJobs: int(atoi64(m["max_jobs"])),
 			Version: m["version"], RegisteredMs: atoi64(m["registered_ms"]), LastHeartbeatMs: last, Running: running,
-			OverloadReasons: m["over_reasons"], UsageJSON: m["usage_json"],
+			OverloadReasons: m["over_reasons"], UsageJSON: m["usage_json"], Isolation: m["isolation"], AllowsNetwork: m["allows_net"] == "1",
 		})
 	}
 	return out, nil

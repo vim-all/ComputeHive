@@ -92,7 +92,7 @@ func startCoordinator(t testing.TB, r *testutil.Redis, addr string, p profile) *
 	go q.RunReaper(ctx, quietLog(), nil)
 	go func() {
 		defer close(c.done)
-		_ = grpcserver.Serve(ctx, l, svc)
+		_ = grpcserver.Serve(ctx, l, svc, nil)
 		_ = rdb.Close()
 	}()
 	t.Cleanup(c.Kill)

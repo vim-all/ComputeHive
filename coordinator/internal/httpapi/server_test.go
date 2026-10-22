@@ -15,7 +15,7 @@ import (
 
 func newTestServer(t *testing.T, max int64, ready ReadyFunc) *httptest.Server {
 	t.Helper()
-	h, err := New(t.TempDir(), max, ready)
+	h, err := New(t.TempDir(), max, ready, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

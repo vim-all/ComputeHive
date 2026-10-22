@@ -36,7 +36,13 @@ type SubmitJobRequest struct {
 	// Submitting user, used for per-user concurrency limits and fairness.
 	User string `protobuf:"bytes,10,opt,name=user,proto3" json:"user,omitempty"`
 	// Run on two workers and compare output hashes (untrusted-worker mitigation).
-	Verify        bool `protobuf:"varint,11,opt,name=verify,proto3" json:"verify,omitempty"`
+	Verify bool `protobuf:"varint,11,opt,name=verify,proto3" json:"verify,omitempty"`
+	// Only run on workers providing at least this isolation: "" (any) or "gvisor".
+	RequiredIsolation string `protobuf:"bytes,12,opt,name=required_isolation,json=requiredIsolation,proto3" json:"required_isolation,omitempty"`
+	// Hosts the job needs to reach (for example "pypi.org"). Off by default: jobs get no network.
+	// Honoured only by workers whose contributor allows network jobs and lists the host; the
+	// worker's filtering proxy still refuses private, loopback and metadata addresses.
+	NetworkHosts  []string `protobuf:"bytes,13,rep,name=network_hosts,json=networkHosts,proto3" json:"network_hosts,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -146,6 +152,20 @@ func (x *SubmitJobRequest) GetVerify() bool {
 		return x.Verify
 	}
 	return false
+}
+
+func (x *SubmitJobRequest) GetRequiredIsolation() string {
+	if x != nil {
+		return x.RequiredIsolation
+	}
+	return ""
+}
+
+func (x *SubmitJobRequest) GetNetworkHosts() []string {
+	if x != nil {
+		return x.NetworkHosts
+	}
+	return nil
 }
 
 type SubmitJobResponse struct {
@@ -263,8 +283,10 @@ type GetJobStatusResponse struct {
 	MaxAttempts      int32                  `protobuf:"varint,7,opt,name=max_attempts,json=maxAttempts,proto3" json:"max_attempts,omitempty"`
 	LastFailure      string                 `protobuf:"bytes,8,opt,name=last_failure,json=lastFailure,proto3" json:"last_failure,omitempty"`
 	QueueSeq         int64                  `protobuf:"varint,9,opt,name=queue_seq,json=queueSeq,proto3" json:"queue_seq,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// For jobs submitted with verify=true: "pending", "match", "mismatch", "timeout" or "unavailable".
+	Verification  string `protobuf:"bytes,10,opt,name=verification,proto3" json:"verification,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *GetJobStatusResponse) Reset() {
@@ -358,6 +380,13 @@ func (x *GetJobStatusResponse) GetQueueSeq() int64 {
 		return x.QueueSeq
 	}
 	return 0
+}
+
+func (x *GetJobStatusResponse) GetVerification() string {
+	if x != nil {
+		return x.Verification
+	}
+	return ""
 }
 
 type CancelJobRequest struct {
@@ -583,6 +612,8 @@ type WorkerInfo struct {
 	Overloaded    bool           `protobuf:"varint,8,opt,name=overloaded,proto3" json:"overloaded,omitempty"`
 	Draining      bool           `protobuf:"varint,9,opt,name=draining,proto3" json:"draining,omitempty"`
 	Usage         *ResourceUsage `protobuf:"bytes,10,opt,name=usage,proto3" json:"usage,omitempty"`
+	Isolation     string         `protobuf:"bytes,11,opt,name=isolation,proto3" json:"isolation,omitempty"`
+	AllowsNetwork bool           `protobuf:"varint,12,opt,name=allows_network,json=allowsNetwork,proto3" json:"allows_network,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -687,6 +718,20 @@ func (x *WorkerInfo) GetUsage() *ResourceUsage {
 	return nil
 }
 
+func (x *WorkerInfo) GetIsolation() string {
+	if x != nil {
+		return x.Isolation
+	}
+	return ""
+}
+
+func (x *WorkerInfo) GetAllowsNetwork() bool {
+	if x != nil {
+		return x.AllowsNetwork
+	}
+	return false
+}
+
 type ListWorkersRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -772,7 +817,7 @@ var File_client_proto protoreflect.FileDescriptor
 const file_client_proto_rawDesc = "" +
 	"\n" +
 	"\fclient.proto\x12\n" +
-	"compute.v1\x1a\fworker.proto\"\xa3\x04\n" +
+	"compute.v1\x1a\fworker.proto\"\xf7\x04\n" +
 	"\x10SubmitJobRequest\x12'\n" +
 	"\x0fcontainer_image\x18\x01 \x01(\tR\x0econtainerImage\x12\x18\n" +
 	"\acommand\x18\x02 \x03(\tR\acommand\x12G\n" +
@@ -785,7 +830,9 @@ const file_client_proto_rawDesc = "" +
 	"\fmax_attempts\x18\t \x01(\x05R\vmaxAttempts\x12\x12\n" +
 	"\x04user\x18\n" +
 	" \x01(\tR\x04user\x12\x16\n" +
-	"\x06verify\x18\v \x01(\bR\x06verify\x1a>\n" +
+	"\x06verify\x18\v \x01(\bR\x06verify\x12-\n" +
+	"\x12required_isolation\x18\f \x01(\tR\x11requiredIsolation\x12#\n" +
+	"\rnetwork_hosts\x18\r \x03(\tR\fnetworkHosts\x1a>\n" +
 	"\x10EnvironmentEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xa8\x01\n" +
@@ -795,7 +842,7 @@ const file_client_proto_rawDesc = "" +
 	"\n" +
 	"job_status\x18\x03 \x01(\x0e2\x1e.compute.v1.JobLifecycleStatusR\tjobStatus\"?\n" +
 	"\x13GetJobStatusRequest\x12(\n" +
-	"\x06job_id\x18\x01 \x01(\v2\x11.compute.v1.JobIDR\x05jobId\"\x92\x03\n" +
+	"\x06job_id\x18\x01 \x01(\v2\x11.compute.v1.JobIDR\x05jobId\"\xb6\x03\n" +
 	"\x14GetJobStatusResponse\x12*\n" +
 	"\x06status\x18\x01 \x01(\x0e2\x12.compute.v1.StatusR\x06status\x12,\n" +
 	"\x12assigned_worker_id\x18\x02 \x01(\tR\x10assignedWorkerId\x12&\n" +
@@ -808,7 +855,9 @@ const file_client_proto_rawDesc = "" +
 	"\aattempt\x18\x06 \x01(\x05R\aattempt\x12!\n" +
 	"\fmax_attempts\x18\a \x01(\x05R\vmaxAttempts\x12!\n" +
 	"\flast_failure\x18\b \x01(\tR\vlastFailure\x12\x1b\n" +
-	"\tqueue_seq\x18\t \x01(\x03R\bqueueSeq\"<\n" +
+	"\tqueue_seq\x18\t \x01(\x03R\bqueueSeq\x12\"\n" +
+	"\fverification\x18\n" +
+	" \x01(\tR\fverification\"<\n" +
 	"\x10CancelJobRequest\x12(\n" +
 	"\x06job_id\x18\x01 \x01(\v2\x11.compute.v1.JobIDR\x05jobId\"5\n" +
 	"\x11CancelJobResponse\x12 \n" +
@@ -821,7 +870,7 @@ const file_client_proto_rawDesc = "" +
 	"\x06result\x18\x03 \x01(\v2\x12.compute.v1.ResultR\x06result\x12@\n" +
 	"\rresult_schema\x18\x04 \x01(\v2\x1b.compute.v1.JobResultSchemaR\fresultSchema\x12=\n" +
 	"\n" +
-	"job_status\x18\x05 \x01(\x0e2\x1e.compute.v1.JobLifecycleStatusR\tjobStatus\"\xa8\x03\n" +
+	"job_status\x18\x05 \x01(\x0e2\x1e.compute.v1.JobLifecycleStatusR\tjobStatus\"\xed\x03\n" +
 	"\n" +
 	"WorkerInfo\x121\n" +
 	"\tworker_id\x18\x01 \x01(\v2\x14.compute.v1.WorkerIDR\bworkerId\x126\n" +
@@ -836,7 +885,9 @@ const file_client_proto_rawDesc = "" +
 	"overloaded\x12\x1a\n" +
 	"\bdraining\x18\t \x01(\bR\bdraining\x12/\n" +
 	"\x05usage\x18\n" +
-	" \x01(\v2\x19.compute.v1.ResourceUsageR\x05usage\"\x14\n" +
+	" \x01(\v2\x19.compute.v1.ResourceUsageR\x05usage\x12\x1c\n" +
+	"\tisolation\x18\v \x01(\tR\tisolation\x12%\n" +
+	"\x0eallows_network\x18\f \x01(\bR\rallowsNetwork\"\x14\n" +
 	"\x12ListWorkersRequest\"G\n" +
 	"\x13ListWorkersResponse\x120\n" +
 	"\aworkers\x18\x01 \x03(\v2\x16.compute.v1.WorkerInfoR\aworkers2\x99\x03\n" +

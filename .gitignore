@@ -7,3 +7,4 @@ coordinator/.env
 bin/
 data/
 *.out
+.computehive/

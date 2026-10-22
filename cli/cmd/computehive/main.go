@@ -22,9 +22,6 @@ import (
 	"time"
 
 	pb "coordinator/pkg/pb"
-
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 const usage = `computehive - submit and inspect jobs on a ComputeHive cluster
@@ -36,14 +33,19 @@ Commands:
   submit <dir>      Build <dir> (Dockerfile) into an image, upload it, submit a job
   status <job-id>   Show job state, attempt, queue position and assigned worker
   cancel <job-id>   Cancel a queued or running job
+  admin enroll      Mint an expiring token that lets a new worker enrol
+  admin revoke <id> Cut a worker off and requeue its jobs
   result <job-id>   Show the job result (exit code, output excerpts)
   logs <job-id>     Show captured stdout/stderr excerpts of a finished job
   workers           List registered workers
   worker join       Run a worker on this machine (checks prerequisites first)
+  worker status|pause|resume|kill|history|policy   control the worker on this machine
 
 Global flags (or env):
   --coordinator ADDR   gRPC address        (COMPUTEHIVE_COORDINATOR, default localhost:50051)
   --http URL           artifact upload URL (COMPUTEHIVE_HTTP, default http://localhost:8080)
+  --token TOKEN        API token            (COMPUTEHIVE_TOKEN, or .computehive/api.token)
+  --ca FILE            coordinator CA cert  (COMPUTEHIVE_CA, or .computehive/ca.crt)
 `
 
 func main() {
@@ -53,6 +55,8 @@ func main() {
 type globals struct {
 	coordinator string
 	httpURL     string
+	token       string // API token
+	ca          string // CA certificate that signed the coordinator's certificate
 }
 
 func envOr(key, fallback string) string {
@@ -68,12 +72,20 @@ func run(args []string, out, errOut io.Writer) int {
 	fs.SetOutput(errOut)
 	fs.Usage = func() { fmt.Fprint(errOut, usage) }
 	fs.StringVar(&g.coordinator, "coordinator", envOr("COMPUTEHIVE_COORDINATOR", "localhost:50051"), "")
-	fs.StringVar(&g.httpURL, "http", envOr("COMPUTEHIVE_HTTP", "http://localhost:8080"), "")
+	fs.StringVar(&g.httpURL, "http", envOr("COMPUTEHIVE_HTTP", ""), "")
+	fs.StringVar(&g.token, "token", envOr("COMPUTEHIVE_TOKEN", ""), "")
+	fs.StringVar(&g.ca, "ca", envOr("COMPUTEHIVE_CA", ""), "")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
 		}
 		return 2
+	}
+	if g.httpURL == "" { // https when a CA is configured (the normal case), http for plain development setups
+		g.httpURL = "http://localhost:8080"
+		if g.caFile() != "" {
+			g.httpURL = "https://localhost:8080"
+		}
 	}
 	rest := fs.Args()
 	if len(rest) == 0 {
@@ -93,13 +105,15 @@ func run(args []string, out, errOut io.Writer) int {
 	case "cancel":
 		err = withClient(g, func(c pb.ClientServiceClient) error { return cmdCancel(ctx, c, rest[1:], out) })
 	case "result":
-		err = withClient(g, func(c pb.ClientServiceClient) error { return cmdResult(ctx, c, rest[1:], out, false) })
+		err = withClient(g, func(c pb.ClientServiceClient) error { return cmdResult(ctx, g, c, rest[1:], out, false) })
 	case "logs":
-		err = withClient(g, func(c pb.ClientServiceClient) error { return cmdResult(ctx, c, rest[1:], out, true) })
+		err = withClient(g, func(c pb.ClientServiceClient) error { return cmdResult(ctx, g, c, rest[1:], out, true) })
 	case "workers":
 		err = withClient(g, func(c pb.ClientServiceClient) error { return cmdWorkers(ctx, c, out) })
 	case "worker":
 		err = cmdWorker(ctx, g, rest[1:], out, errOut)
+	case "admin":
+		err = cmdAdmin(ctx, g, rest[1:], out, errOut)
 	case "help":
 		fs.Usage()
 	default:
@@ -119,12 +133,12 @@ func signalContext() (context.Context, context.CancelFunc) {
 }
 
 func withClient(g globals, fn func(pb.ClientServiceClient) error) error {
-	conn, err := grpc.NewClient(g.coordinator, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := g.dial()
 	if err != nil {
 		return fmt.Errorf("connect to coordinator %s: %w", g.coordinator, err)
 	}
 	defer conn.Close()
-	return fn(pb.NewClientServiceClient(conn))
+	return friendly(fn(pb.NewClientServiceClient(conn)))
 }
 
 func jobIDArg(args []string, name string) (string, error) {
@@ -148,6 +162,9 @@ func cmdStatus(ctx context.Context, c pb.ClientServiceClient, args []string, out
 	if resp.GetLastFailure() != "" {
 		fmt.Fprintf(out, "last failure: %s\n", resp.GetLastFailure())
 	}
+	if v := resp.GetVerification(); v != "" {
+		fmt.Fprintf(out, "verified: %s\n", v)
+	}
 	return nil
 }
 
@@ -168,10 +185,11 @@ func cmdCancel(ctx context.Context, c pb.ClientServiceClient, args []string, out
 	return nil
 }
 
-func cmdResult(ctx context.Context, c pb.ClientServiceClient, args []string, out io.Writer, logsOnly bool) error {
+func cmdResult(ctx context.Context, g globals, c pb.ClientServiceClient, args []string, out io.Writer, logsOnly bool) error {
 	fs := flag.NewFlagSet("result", flag.ContinueOnError)
 	wait := fs.Bool("wait", false, "poll until the job reaches a terminal state")
 	timeout := fs.Duration("timeout", 10*time.Minute, "give up waiting after this long")
+	download := fs.String("download", "", "save the job's output files into this directory (verified against their SHA-256)")
 	name := "result"
 	if logsOnly {
 		name = "logs"
@@ -203,6 +221,9 @@ func cmdResult(ctx context.Context, c pb.ClientServiceClient, args []string, out
 			resp.GetStatus() == pb.Status_STATUS_CANCELED || resp.GetStatus() == pb.Status_STATUS_DEAD
 		if resp.GetResultAvailable() && (terminal || !*wait) {
 			printResult(out, id, resp, logsOnly)
+			if *download != "" {
+				return downloadOutputs(ctx, g, resp.GetResult().GetOutputArtifacts(), *download, out)
+			}
 			return nil
 		}
 		if terminal { // DEAD / CANCELED jobs finish without a result
@@ -296,7 +317,12 @@ func cmdSubmit(ctx context.Context, g globals, args []string, out io.Writer) err
 	gpu := fs.Int("gpu", 0, "GPUs to request")
 	timeout := fs.Int("timeout", 300, "max runtime in seconds")
 	wait := fs.Bool("wait", false, "wait for the job and print its result")
-	var envs multiFlag
+	verify := fs.Bool("verify", false, "run on two different workers and accept the result only if their outputs match (the job must be deterministic)")
+	isolation := fs.String("isolation", "", "only run on workers providing this isolation: gvisor")
+	user := fs.String("user", "", "submitting user name (for fairness and per-user limits)")
+	maxAttempts := fs.Int("max-attempts", 0, "attempts before the job is parked as dead (0 = cluster default)")
+	var netHosts, envs multiFlag
+	fs.Var(&netHosts, "network-host", "a host the job needs to reach, for example pypi.org (repeatable; only workers whose contributor allows it will run the job)")
 	fs.Var(&envs, "env", "KEY=VALUE environment variable (repeatable)")
 
 	// Allow the directory before or after the flags.
@@ -349,7 +375,7 @@ func cmdSubmit(ctx context.Context, g globals, args []string, out io.Writer) err
 		return err
 	}
 	fmt.Fprintf(out, "uploading artifact sha256:%s (%d bytes) ...\n", sha[:12], size)
-	if err := uploadArtifact(ctx, g.httpURL, tar.Name(), sha); err != nil {
+	if err := uploadArtifact(ctx, g, g.httpURL, tar.Name(), sha); err != nil {
 		return err
 	}
 
@@ -373,6 +399,11 @@ func cmdSubmit(ctx context.Context, g globals, args []string, out io.Writer) err
 			MaxRuntimeSeconds: int32(*timeout),
 			ArtifactUrl:       "computehive-artifact://" + sha,
 			ArtifactSha256:    sha,
+			Verify:            *verify,
+			RequiredIsolation: *isolation,
+			User:              *user,
+			MaxAttempts:       int32(*maxAttempts),
+			NetworkHosts:      netHosts,
 		})
 		return callErr
 	})
@@ -386,7 +417,7 @@ func cmdSubmit(ctx context.Context, g globals, args []string, out io.Writer) err
 		return nil
 	}
 	return withClient(g, func(c pb.ClientServiceClient) error {
-		return cmdResult(ctx, c, []string{id, "--wait"}, out, false)
+		return cmdResult(ctx, g, c, []string{id, "--wait"}, out, false)
 	})
 }
 
@@ -438,7 +469,7 @@ func hashFile(path string) (string, int64, error) {
 	return hex.EncodeToString(h.Sum(nil)), n, nil
 }
 
-func uploadArtifact(ctx context.Context, baseURL, path, sha string) error {
+func uploadArtifact(ctx context.Context, g globals, baseURL, path, sha string) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
@@ -453,7 +484,14 @@ func uploadArtifact(ctx context.Context, baseURL, path, sha string) error {
 		return err
 	}
 	req.ContentLength = st.Size()
-	resp, err := http.DefaultClient.Do(req)
+	if tok := g.apiToken(); tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
+	hc, err := g.httpClient()
+	if err != nil {
+		return err
+	}
+	resp, err := hc.Do(req)
 	if err != nil {
 		return fmt.Errorf("upload artifact to %s: %w", baseURL, err)
 	}
@@ -483,4 +521,72 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+// downloadOutputs saves each output file under dir, checking its SHA-256 and refusing any path that
+// would land outside dir (a hostile job controls the file names it reports).
+func downloadOutputs(ctx context.Context, g globals, artifacts []*pb.OutputArtifact, dir string, out io.Writer) error {
+	if len(artifacts) == 0 {
+		fmt.Fprintln(out, "the job produced no output files")
+		return nil
+	}
+	hc, err := g.httpClient()
+	if err != nil {
+		return err
+	}
+	root, err := filepath.Abs(dir)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return err
+	}
+	for _, a := range artifacts {
+		rest, ok := strings.CutPrefix(a.GetUri(), "computehive-output://")
+		if !ok {
+			fmt.Fprintf(out, "skipping %s: stored outside this cluster (%s)\n", a.GetRelativePath(), firstNonEmpty(a.GetPublicUrl(), a.GetUri()))
+			continue
+		}
+		rel := filepath.FromSlash(a.GetRelativePath())
+		dest := filepath.Join(root, rel)
+		if !filepath.IsLocal(rel) || !strings.HasPrefix(dest, root+string(filepath.Separator)) {
+			return fmt.Errorf("refusing output path %q: it would leave %s", a.GetRelativePath(), root)
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(g.httpURL, "/")+"/outputs/"+rest, nil)
+		if err != nil {
+			return err
+		}
+		if tok := g.apiToken(); tok != "" {
+			req.Header.Set("Authorization", "Bearer "+tok)
+		}
+		resp, err := hc.Do(req)
+		if err != nil {
+			return friendly(err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			return fmt.Errorf("download %s: %s", a.GetRelativePath(), resp.Status)
+		}
+		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+			resp.Body.Close()
+			return err
+		}
+		f, err := os.OpenFile(dest, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+		if err != nil {
+			resp.Body.Close()
+			return err
+		}
+		h := sha256.New()
+		_, cerr := io.Copy(io.MultiWriter(f, h), resp.Body)
+		resp.Body.Close()
+		if cerr != nil || f.Close() != nil {
+			return fmt.Errorf("download %s: %v", a.GetRelativePath(), cerr)
+		}
+		if got := hex.EncodeToString(h.Sum(nil)); a.GetSha256() != "" && got != a.GetSha256() {
+			_ = os.Remove(dest)
+			return fmt.Errorf("%s failed verification: sha256 %s, expected %s (file removed)", a.GetRelativePath(), got, a.GetSha256())
+		}
+		fmt.Fprintf(out, "saved %s (%d bytes, sha256 verified)\n", dest, a.GetSizeBytes())
+	}
+	return nil
 }

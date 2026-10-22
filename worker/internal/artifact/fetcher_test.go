@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
 	"time"
@@ -86,4 +87,40 @@ type roundTripFunc func(request *http.Request) (*http.Response, error)
 
 func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
 	return fn(request)
+}
+
+// The worker credential must reach the coordinator's artifact store and nobody else's.
+func TestWorkerCredentialIsOnlySentToTheCoordinator(t *testing.T) {
+	var coordAuth, otherAuth string
+	body := []byte("artifact bytes")
+	coord := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		coordAuth = r.Header.Get("Authorization") + "|" + r.Header.Get("X-Worker-Id")
+		_, _ = w.Write(body)
+	}))
+	defer coord.Close()
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		otherAuth = r.Header.Get("Authorization") + "|" + r.Header.Get("X-Worker-Id")
+		_, _ = w.Write(body)
+	}))
+	defer other.Close()
+
+	sum := sha256.Sum256(body)
+	hexSum := hex.EncodeToString(sum[:])
+	f := NewFetcher(5*time.Second, 1<<20).WithCoordinator(coord.URL, nil, func(set func(k, v string)) {
+		set("Authorization", "Bearer chwc_secret")
+		set("X-Worker-Id", "w1")
+	})
+	for _, u := range []string{coord.URL + "/artifacts/" + hexSum, other.URL + "/artifacts/" + hexSum} {
+		b, err := f.Fetch(context.Background(), domain.Job{ID: "j", ImageRef: "img", ArtifactURL: u, ArtifactSHA256: hexSum})
+		if err != nil {
+			t.Fatalf("fetch %s: %v", u, err)
+		}
+		_ = Cleanup(b)
+	}
+	if coordAuth != "Bearer chwc_secret|w1" {
+		t.Fatalf("the coordinator did not receive the credential: %q", coordAuth)
+	}
+	if otherAuth != "|" {
+		t.Fatalf("the worker credential leaked to a third-party host: %q", otherAuth)
+	}
 }

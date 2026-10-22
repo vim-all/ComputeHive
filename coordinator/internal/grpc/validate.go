@@ -25,12 +25,14 @@ const (
 	maxMemoryMB    = 4 * 1024 * 1024
 	maxGPUs        = 64
 	maxJobAttempts = 20
+	maxNetHosts    = 16
 )
 
 var (
 	sha256Hex  = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	envKeyName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 	userName   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._@-]*$`)
+	hostName   = regexp.MustCompile(`^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)*[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$`)
 )
 
 func invalid(format string, a ...any) error {
@@ -88,6 +90,19 @@ func validateSubmit(req *pb.SubmitJobRequest) error {
 	}
 	if req.GetMaxAttempts() < 0 || req.GetMaxAttempts() > maxJobAttempts {
 		return invalid("max_attempts must be 0-%d", maxJobAttempts)
+	}
+	switch req.GetRequiredIsolation() {
+	case "", "hardened-runc", "gvisor":
+	default:
+		return invalid("required_isolation must be empty, hardened-runc or gvisor")
+	}
+	if len(req.GetNetworkHosts()) > maxNetHosts {
+		return invalid("network_hosts has more than %d entries", maxNetHosts)
+	}
+	for _, h := range req.GetNetworkHosts() {
+		if len(h) > 253 || !hostName.MatchString(h) {
+			return invalid("network_hosts entry %q is not a valid host name (IP addresses and wildcards are not accepted)", h)
+		}
 	}
 	if u := req.GetUser(); u != "" && (len(u) > maxUserLen || !userName.MatchString(u)) {
 		return invalid("user must match %s and be at most %d bytes", userName, maxUserLen)

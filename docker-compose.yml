@@ -13,14 +13,12 @@ x-worker: &worker
   # The worker is trusted infrastructure: it drives the host Docker daemon to run
   # *untrusted* jobs. Jobs themselves never get the socket.
   group_add: ["${DOCKER_GID:-999}"]
-  volumes:
-    - /var/run/docker.sock:/var/run/docker.sock
-    # Same path inside and outside: job output dirs are bind-mounted by the host
-    # daemon, so the worker must see them at the host path.
-    - ${COMPUTEHIVE_WORK_DIR:-/tmp/computehive-work}:${COMPUTEHIVE_WORK_DIR:-/tmp/computehive-work}
   environment: &worker-env
     COORDINATOR_ADDR: coordinator:50051
-    COORDINATOR_HTTP_URL: http://coordinator:8080
+    COORDINATOR_HTTP_URL: https://coordinator:8080
+    COORDINATOR_TLS_CA: /run/computehive/ca.crt
+    ENROLLMENT_TOKEN_FILE: /run/computehive/enroll.token
+    STATE_DIR: /state
     TMPDIR: ${COMPUTEHIVE_WORK_DIR:-/tmp/computehive-work}
     HEARTBEAT_INTERVAL: 2s
 
@@ -48,27 +46,52 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+    # Run as the host user so the private (0600) TLS key and API token are readable.
+    user: "${COMPUTEHIVE_UID:-1000}:${COMPUTEHIVE_GID:-1000}"
     environment:
       REDIS_ADDR: redis:6379
+      API_TOKEN_FILE: /run/computehive/api.token
+      TLS_CERT_FILE: /run/computehive/certs/server.crt
+      TLS_KEY_FILE: /run/computehive/certs/server.key
     volumes:
-      - artifacts:/data/artifacts
+      - ./.computehive/artifacts:/data/artifacts
+      - ./.computehive/api.token:/run/computehive/api.token:ro
+      - ./.computehive/certs:/run/computehive/certs:ro
     ports:
       - "50051:50051"
       - "8080:8080"
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/readyz"]
+      test: ["CMD", "wget", "-qO-", "--no-check-certificate", "https://127.0.0.1:8080/readyz"]
       interval: 2s
       timeout: 2s
       retries: 15
 
   worker-1:
     <<: *worker
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Same path inside and outside: job output dirs are bind-mounted by the host daemon.
+      - ${COMPUTEHIVE_WORK_DIR:-/tmp/computehive-work}:${COMPUTEHIVE_WORK_DIR:-/tmp/computehive-work}
+      # Trust anchor and one-time enrollment token (scripts/bootstrap.sh). The worker's own credential
+      # lives in its state volume, so the token is only needed the first time.
+      - ./.computehive/ca.crt:/run/computehive/ca.crt:ro
+      - ./.computehive/enroll.token:/run/computehive/enroll.token:ro
+      - worker-1-state:/state
     environment:
       <<: *worker-env
       WORKER_ID: worker-1
 
   worker-2:
     <<: *worker
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Same path inside and outside: job output dirs are bind-mounted by the host daemon.
+      - ${COMPUTEHIVE_WORK_DIR:-/tmp/computehive-work}:${COMPUTEHIVE_WORK_DIR:-/tmp/computehive-work}
+      # Trust anchor and one-time enrollment token (scripts/bootstrap.sh). The worker's own credential
+      # lives in its state volume, so the token is only needed the first time.
+      - ./.computehive/ca.crt:/run/computehive/ca.crt:ro
+      - ./.computehive/enroll.token:/run/computehive/enroll.token:ro
+      - worker-2-state:/state
     environment:
       <<: *worker-env
       WORKER_ID: worker-2
@@ -78,6 +101,15 @@ services:
   worker-hot:
     <<: *worker
     profiles: ["pressure"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Same path inside and outside: job output dirs are bind-mounted by the host daemon.
+      - ${COMPUTEHIVE_WORK_DIR:-/tmp/computehive-work}:${COMPUTEHIVE_WORK_DIR:-/tmp/computehive-work}
+      # Trust anchor and one-time enrollment token (scripts/bootstrap.sh). The worker's own credential
+      # lives in its state volume, so the token is only needed the first time.
+      - ./.computehive/ca.crt:/run/computehive/ca.crt:ro
+      - ./.computehive/enroll.token:/run/computehive/enroll.token:ro
+      - worker-hot-state:/state
     environment:
       <<: *worker-env
       WORKER_ID: worker-hot
@@ -104,4 +136,6 @@ services:
 
 volumes:
   redis-data:
-  artifacts:
+  worker-1-state:
+  worker-2-state:
+  worker-hot-state:

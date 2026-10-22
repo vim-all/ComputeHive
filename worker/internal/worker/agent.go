@@ -8,11 +8,13 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/vim-all/ComputeHive/worker/internal/artifact"
 	"github.com/vim-all/ComputeHive/worker/internal/config"
 	"github.com/vim-all/ComputeHive/worker/internal/domain"
+	"github.com/vim-all/ComputeHive/worker/internal/executor"
 	"github.com/vim-all/ComputeHive/worker/internal/monitor"
 	workeroutput "github.com/vim-all/ComputeHive/worker/internal/output"
 )
@@ -69,7 +71,16 @@ type Agent struct {
 	outputs  outputManagerAPI
 	health   healthMonitor
 	logger   *slog.Logger
-	started  time.Time
+
+	// contributor controls (see controls.go); all optional
+	pol       policyAPI
+	hist      historyAPI
+	sandbox   sandboxAPI
+	isolation string
+	stopRoot  context.CancelFunc
+	killed    atomic.Bool
+	notTaking string
+	started   time.Time
 
 	mu           sync.RWMutex
 	status       string
@@ -123,6 +134,16 @@ func (a *Agent) Run(ctx context.Context) error {
 			continue
 		}
 		a.overloadLogged = false
+
+		// Safety rule 2: the contributor's own rules (pause, schedule, idle-only, gVisor-only).
+		if adm := a.admission(); !adm.Allowed {
+			a.noteNotTaking(adm.Reason)
+			if !sleepCtx(ctx, a.cfg.PollInterval) {
+				return ctx.Err()
+			}
+			continue
+		}
+		a.noteNotTaking("")
 
 		job, found, err := a.store.PullJob(ctx)
 		if err != nil {
@@ -250,6 +271,12 @@ func (a *Agent) publishHeartbeat(ctx context.Context) {
 		LastHeartbeat: time.Now().UTC().Unix(),
 		Stats:         domain.WorkerStats{JobsCompleted: jobsDone, JobsFailed: jobsFailed},
 		MaxJobs:       1,
+		Isolation:     a.isolation,
+		AllowsNetwork: a.currentPolicy().AllowNetwork,
+	}
+	heartbeat.Resources.CPUCores, heartbeat.Resources.MemoryMB = a.donated(heartbeat.Resources.CPUCores, heartbeat.Resources.MemoryMB)
+	if adm := a.admission(); !adm.Allowed {
+		heartbeat.Draining = true // tell the coordinator too: it will refuse to assign us anything
 	}
 	if currentJob != "" {
 		heartbeat.RunningJobs = []string{currentJob}
@@ -291,6 +318,13 @@ func (a *Agent) handleJob(ctx context.Context, job *domain.Job) error {
 	if err := job.Validate(); err != nil {
 		return a.publishFailedJob(ctx, *job, time.Now().UTC(), err, ReasonJobExit)
 	}
+
+	pol := a.currentPolicy()
+	if why := policyViolation(pol, *job); why != "" {
+		a.record(*job, time.Now().UTC(), "refused", -1, ReasonEvicted, why)
+		return a.publishFailedJob(ctx, *job, time.Now().UTC(), errors.New(why), ReasonEvicted)
+	}
+	a.applyPolicy(pol)
 
 	startedAt := time.Now().UTC()
 	jobCtx, abort := context.WithCancelCause(ctx)
@@ -380,13 +414,22 @@ func (a *Agent) handleJob(ctx context.Context, job *domain.Job) error {
 		}
 	}
 
+	if result.Status == domain.JobStatusSucceeded {
+		// Fingerprint the output so the coordinator can compare the replicas of a verify=true job.
+		result.OutputDigest = executor.OutputDigest(result.ExitCode, result.Stdout, result.OutputDirHostPath)
+	}
+	a.record(*job, startedAt, result.Status, result.ExitCode, result.FailureReason, result.Error)
 	disposition, err := a.store.PublishJobResult(ctx, result)
 	if err != nil {
 		return fmt.Errorf("publish job result: %w", err)
 	}
 	a.recordResult(result.Status)
-	a.logger.Info("job result published", "job_id", job.ID, "status", result.Status, "reason", result.FailureReason,
-		"exit_code", result.ExitCode, "duration_ms", result.DurationMillis, "disposition", disposition)
+	logAttrs := []any{"job_id", job.ID, "status", result.Status, "reason", result.FailureReason,
+		"exit_code", result.ExitCode, "duration_ms", result.DurationMillis, "disposition", disposition}
+	if result.Status != domain.JobStatusSucceeded { // say WHY an attempt failed, not just that it did
+		logAttrs = append(logAttrs, "error", truncate(result.Error, 300), "stderr", truncate(strings.TrimSpace(result.Stderr), 300))
+	}
+	a.logger.Info("job result published", logAttrs...)
 	return nil
 }
 
@@ -397,8 +440,10 @@ func (a *Agent) finishAborted(parent, jobCtx, runCtx context.Context, job domain
 	case errors.Is(context.Cause(jobCtx), errLeaseRevoked):
 		a.logger.Warn("job aborted, result discarded", "job_id", job.ID, "reason", "lease_revoked")
 		return nil
-	case errors.Is(context.Cause(jobCtx), errPressureEvict):
-		err := a.publishFailedJob(parent, job, startedAt, errPressureEvict, ReasonEvicted)
+	case isEvictCause(context.Cause(jobCtx)):
+		cause := context.Cause(jobCtx)
+		a.record(job, startedAt, "evicted", -1, ReasonEvicted, cause.Error())
+		err := a.publishFailedJob(parent, job, startedAt, cause, ReasonEvicted)
 		a.logger.Warn("job returned to the queue after eviction", "event", "job_requeued_after_eviction", "job_id", job.ID, "error", err)
 		return nil
 	case parent.Err() != nil:
@@ -406,6 +451,7 @@ func (a *Agent) finishAborted(parent, jobCtx, runCtx context.Context, job domain
 		// making the coordinator wait out the heartbeat window.
 		giveBack, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+		a.record(job, startedAt, "evicted", -1, ReasonEvicted, "worker shutting down")
 		err := a.publishFailedJob(giveBack, job, startedAt, errors.New("worker shutting down"), ReasonEvicted)
 		a.logger.Info("job handed back during shutdown", "job_id", job.ID, "error", err)
 		return nil
@@ -501,4 +547,11 @@ func maxInt64(a, b int64) int64 {
 		return a
 	}
 	return b
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
 }

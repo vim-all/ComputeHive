@@ -39,6 +39,19 @@ type Config struct {
 	ReleasePct   float64
 	ReleaseAfter time.Duration
 	RequireUsage bool
+	// VerifyTimeout: how long a replica of a verify=true job waits for its sibling before failing.
+	VerifyTimeout time.Duration
+
+	// Trust.
+	APIToken        string // required for submitters/operators (env API_TOKEN or API_TOKEN_FILE)
+	AuthDisabled    bool   // AUTH_DISABLED=true: development only
+	AllowInsecure   bool   // ALLOW_INSECURE=true: permit authentication over plaintext (development only)
+	TLSCertFile     string
+	TLSKeyFile      string
+	TLSClientCAFile string // set to require client certificates (mTLS)
+	RateWorkerRPS   float64
+	RateClientRPS   float64
+	RateAnonRPS     float64
 }
 
 // Load reads configuration from flags (args), then environment, then .env files, then defaults.
@@ -141,14 +154,32 @@ func Load(args []string) (Config, error) {
 		BackoffBase:       envDuration(getenv, "BACKOFF_BASE", time.Second),
 		BackoffMax:        envDuration(getenv, "BACKOFF_MAX", 30*time.Second),
 
-		LimitRAMPct:  envFloat(getenv, "RAM_LIMIT_PERCENT", 90),
-		LimitCPUPct:  envFloat(getenv, "CPU_LIMIT_PERCENT", 90),
-		LimitDiskPct: envFloat(getenv, "DISK_LIMIT_PERCENT", 90),
-		ReleasePct:   envFloat(getenv, "RELEASE_PERCENT", 80),
-		ReleaseAfter: envDuration(getenv, "RELEASE_AFTER", 10*time.Second),
-		RequireUsage: envBool(getenv, "REQUIRE_USAGE", true),
+		LimitRAMPct:   envFloat(getenv, "RAM_LIMIT_PERCENT", 90),
+		LimitCPUPct:   envFloat(getenv, "CPU_LIMIT_PERCENT", 90),
+		LimitDiskPct:  envFloat(getenv, "DISK_LIMIT_PERCENT", 90),
+		ReleasePct:    envFloat(getenv, "RELEASE_PERCENT", 80),
+		ReleaseAfter:  envDuration(getenv, "RELEASE_AFTER", 10*time.Second),
+		RequireUsage:  envBool(getenv, "REQUIRE_USAGE", true),
+		VerifyTimeout: envDuration(getenv, "VERIFY_TIMEOUT", 10*time.Minute),
+
+		APIToken:        strings.TrimSpace(getenv("API_TOKEN")),
+		AuthDisabled:    envBool(getenv, "AUTH_DISABLED", false),
+		AllowInsecure:   envBool(getenv, "ALLOW_INSECURE", false),
+		TLSCertFile:     getenv("TLS_CERT_FILE"),
+		TLSKeyFile:      getenv("TLS_KEY_FILE"),
+		TLSClientCAFile: getenv("TLS_CLIENT_CA_FILE"),
+		RateWorkerRPS:   envFloat(getenv, "RATE_WORKER_RPS", 50),
+		RateClientRPS:   envFloat(getenv, "RATE_CLIENT_RPS", 50),
+		RateAnonRPS:     envFloat(getenv, "RATE_ANON_RPS", 20),
 	}
-	if err := durationErr(getenv, "HEARTBEAT_INTERVAL", "WORKER_DEAD_AFTER", "REAP_INTERVAL", "LEASE_GRACE", "BACKOFF_BASE", "BACKOFF_MAX", "RELEASE_AFTER"); err != nil {
+	if f := getenv("API_TOKEN_FILE"); f != "" && cfg.APIToken == "" {
+		raw, err := os.ReadFile(f)
+		if err != nil {
+			return Config{}, fmt.Errorf("read API_TOKEN_FILE: %w", err)
+		}
+		cfg.APIToken = strings.TrimSpace(string(raw))
+	}
+	if err := durationErr(getenv, "HEARTBEAT_INTERVAL", "WORKER_DEAD_AFTER", "REAP_INTERVAL", "LEASE_GRACE", "BACKOFF_BASE", "BACKOFF_MAX", "RELEASE_AFTER", "VERIFY_TIMEOUT"); err != nil {
 		return Config{}, err
 	}
 	if err := intErr(getenv, "MAX_ATTEMPTS"); err != nil {
@@ -174,11 +205,21 @@ func Load(args []string) (Config, error) {
 	fs.IntVar(&cfg.MaxAttempts, "max-attempts", cfg.MaxAttempts, "default attempts per job before it is parked as DEAD")
 	fs.DurationVar(&cfg.BackoffBase, "backoff-base", cfg.BackoffBase, "first retry delay (doubles per attempt)")
 	fs.DurationVar(&cfg.BackoffMax, "backoff-max", cfg.BackoffMax, "maximum retry delay")
+	fs.StringVar(&cfg.APIToken, "api-token", cfg.APIToken, "API token required of submitters and operators (prefer API_TOKEN_FILE)")
+	fs.BoolVar(&cfg.AuthDisabled, "auth-disabled", cfg.AuthDisabled, "DEVELOPMENT ONLY: disable all authentication")
+	fs.BoolVar(&cfg.AllowInsecure, "allow-insecure", cfg.AllowInsecure, "DEVELOPMENT ONLY: allow credentials over plaintext (no TLS)")
+	fs.StringVar(&cfg.TLSCertFile, "tls-cert", cfg.TLSCertFile, "TLS certificate file")
+	fs.StringVar(&cfg.TLSKeyFile, "tls-key", cfg.TLSKeyFile, "TLS private key file")
+	fs.StringVar(&cfg.TLSClientCAFile, "tls-client-ca", cfg.TLSClientCAFile, "require client certificates signed by this CA (mutual TLS)")
+	fs.Float64Var(&cfg.RateWorkerRPS, "rate-worker-rps", cfg.RateWorkerRPS, "requests per second allowed per worker")
+	fs.Float64Var(&cfg.RateClientRPS, "rate-client-rps", cfg.RateClientRPS, "requests per second allowed per API token")
+	fs.Float64Var(&cfg.RateAnonRPS, "rate-anon-rps", cfg.RateAnonRPS, "requests per second allowed per source address (applied before authentication)")
 	fs.Float64Var(&cfg.LimitRAMPct, "ram-limit-percent", cfg.LimitRAMPct, "no jobs for a worker whose RAM use is at or above this percentage")
 	fs.Float64Var(&cfg.LimitCPUPct, "cpu-limit-percent", cfg.LimitCPUPct, "... CPU use")
 	fs.Float64Var(&cfg.LimitDiskPct, "disk-limit-percent", cfg.LimitDiskPct, "... disk use")
 	fs.Float64Var(&cfg.ReleasePct, "release-percent", cfg.ReleasePct, "an overloaded worker recovers only after every metric stays below this")
 	fs.DurationVar(&cfg.ReleaseAfter, "release-after", cfg.ReleaseAfter, "... for this long")
+	fs.DurationVar(&cfg.VerifyTimeout, "verify-timeout", cfg.VerifyTimeout, "how long a verify=true replica waits for its sibling before the job fails")
 	fs.BoolVar(&cfg.RequireUsage, "require-usage", cfg.RequireUsage, "refuse to assign jobs to workers that report no resource metrics")
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
@@ -215,6 +256,23 @@ func (c Config) Validate() error {
 	}
 	if c.ArtifactMaxBytes <= 0 {
 		return fmt.Errorf("invalid artifact-max-bytes %d (env ARTIFACT_MAX_BYTES): must be > 0", c.ArtifactMaxBytes)
+	}
+	if (c.TLSCertFile == "") != (c.TLSKeyFile == "") {
+		return fmt.Errorf("tls-cert (TLS_CERT_FILE) and tls-key (TLS_KEY_FILE) must be set together")
+	}
+	if c.TLSClientCAFile != "" && c.TLSCertFile == "" {
+		return fmt.Errorf("tls-client-ca (TLS_CLIENT_CA_FILE) needs tls-cert and tls-key: mutual TLS requires TLS")
+	}
+	if !c.AuthDisabled {
+		if c.APIToken == "" {
+			return fmt.Errorf("an API token is required: set API_TOKEN or API_TOKEN_FILE (or AUTH_DISABLED=true for local development only)")
+		}
+		if len(c.APIToken) < 16 {
+			return fmt.Errorf("the API token is too short (%d chars): use at least 16 random characters", len(c.APIToken))
+		}
+		if c.TLSCertFile == "" && !c.AllowInsecure {
+			return fmt.Errorf("authentication over plaintext would expose every credential to anyone on the network path: set TLS_CERT_FILE and TLS_KEY_FILE (see `coordinator certs`), or ALLOW_INSECURE=true for local development only")
+		}
 	}
 	if c.HeartbeatInterval <= 0 {
 		return fmt.Errorf("invalid heartbeat-interval %s (env HEARTBEAT_INTERVAL): must be > 0", c.HeartbeatInterval)

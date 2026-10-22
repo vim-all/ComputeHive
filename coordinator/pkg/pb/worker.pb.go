@@ -192,6 +192,8 @@ const (
 	Status_STATUS_SUCCEEDED   Status = 4
 	Status_STATUS_FAILED      Status = 5
 	Status_STATUS_CANCELED    Status = 6
+	// Finished and waiting for its verification replica to agree (see SubmitJobRequest.verify).
+	Status_STATUS_VERIFYING Status = 9
 	// Failed attempt waiting to be re-assigned (original queue position kept).
 	Status_STATUS_REQUEUED Status = 7
 	// Exhausted max attempts; parked in the dead-letter set.
@@ -208,6 +210,7 @@ var (
 		4: "STATUS_SUCCEEDED",
 		5: "STATUS_FAILED",
 		6: "STATUS_CANCELED",
+		9: "STATUS_VERIFYING",
 		7: "STATUS_REQUEUED",
 		8: "STATUS_DEAD",
 	}
@@ -219,6 +222,7 @@ var (
 		"STATUS_SUCCEEDED":   4,
 		"STATUS_FAILED":      5,
 		"STATUS_CANCELED":    6,
+		"STATUS_VERIFYING":   9,
 		"STATUS_REQUEUED":    7,
 		"STATUS_DEAD":        8,
 	}
@@ -1262,7 +1266,9 @@ type Job struct {
 	// 1-based attempt number of this assignment.
 	Attempt int32 `protobuf:"varint,11,opt,name=attempt,proto3" json:"attempt,omitempty"`
 	// Opaque token proving ownership of this attempt; must accompany SubmitResult.
-	LeaseToken    string `protobuf:"bytes,12,opt,name=lease_token,json=leaseToken,proto3" json:"lease_token,omitempty"`
+	LeaseToken string `protobuf:"bytes,12,opt,name=lease_token,json=leaseToken,proto3" json:"lease_token,omitempty"`
+	// Hosts this job asked to reach; honoured only if the contributor's policy allows.
+	NetworkHosts  []string `protobuf:"bytes,13,rep,name=network_hosts,json=networkHosts,proto3" json:"network_hosts,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1381,6 +1387,13 @@ func (x *Job) GetLeaseToken() string {
 	return ""
 }
 
+func (x *Job) GetNetworkHosts() []string {
+	if x != nil {
+		return x.NetworkHosts
+	}
+	return nil
+}
+
 // Worker-reported job execution result.
 type Result struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
@@ -1399,6 +1412,9 @@ type Result struct {
 	// "timeout" (job exceeded its runtime, terminal), "infra" (worker-side problem, retried),
 	// "evicted" (worker shed load, retried without burning an attempt).
 	FailureReason string `protobuf:"bytes,12,opt,name=failure_reason,json=failureReason,proto3" json:"failure_reason,omitempty"`
+	// SHA-256 over the exit code, full stdout and every output file. Compared across the two
+	// replicas of a job submitted with verify=true.
+	OutputDigest  string `protobuf:"bytes,13,opt,name=output_digest,json=outputDigest,proto3" json:"output_digest,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1517,6 +1533,13 @@ func (x *Result) GetFailureReason() string {
 	return ""
 }
 
+func (x *Result) GetOutputDigest() string {
+	if x != nil {
+		return x.OutputDigest
+	}
+	return ""
+}
+
 type RegisterWorkerRequest struct {
 	state              protoimpl.MessageState `protogen:"open.v1"`
 	AvailableResources *ResourceSpec          `protobuf:"bytes,1,opt,name=available_resources,json=availableResources,proto3" json:"available_resources,omitempty"`
@@ -1525,9 +1548,16 @@ type RegisterWorkerRequest struct {
 	// Stable identity requested by the worker; kept across restarts. Empty = server assigns one.
 	WorkerId string `protobuf:"bytes,4,opt,name=worker_id,json=workerId,proto3" json:"worker_id,omitempty"`
 	// Maximum concurrent jobs this worker will run (default 1).
-	MaxJobs       int32 `protobuf:"varint,5,opt,name=max_jobs,json=maxJobs,proto3" json:"max_jobs,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	MaxJobs int32 `protobuf:"varint,5,opt,name=max_jobs,json=maxJobs,proto3" json:"max_jobs,omitempty"`
+	// Isolation level the worker provides: "hardened-runc" or "gvisor".
+	Isolation string `protobuf:"bytes,6,opt,name=isolation,proto3" json:"isolation,omitempty"`
+	// The contributor's policy permits jobs that ask for network access.
+	AllowsNetwork bool `protobuf:"varint,7,opt,name=allows_network,json=allowsNetwork,proto3" json:"allows_network,omitempty"`
+	// Expiring token issued by an operator. Needed only the first time a worker ID enrols; afterwards
+	// the worker authenticates with the credential it was given.
+	EnrollmentToken string `protobuf:"bytes,8,opt,name=enrollment_token,json=enrollmentToken,proto3" json:"enrollment_token,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *RegisterWorkerRequest) Reset() {
@@ -1595,12 +1625,36 @@ func (x *RegisterWorkerRequest) GetMaxJobs() int32 {
 	return 0
 }
 
+func (x *RegisterWorkerRequest) GetIsolation() string {
+	if x != nil {
+		return x.Isolation
+	}
+	return ""
+}
+
+func (x *RegisterWorkerRequest) GetAllowsNetwork() bool {
+	if x != nil {
+		return x.AllowsNetwork
+	}
+	return false
+}
+
+func (x *RegisterWorkerRequest) GetEnrollmentToken() string {
+	if x != nil {
+		return x.EnrollmentToken
+	}
+	return ""
+}
+
 type RegisterWorkerResponse struct {
 	state                    protoimpl.MessageState `protogen:"open.v1"`
 	WorkerId                 *WorkerID              `protobuf:"bytes,1,opt,name=worker_id,json=workerId,proto3" json:"worker_id,omitempty"`
 	HeartbeatIntervalSeconds int32                  `protobuf:"varint,2,opt,name=heartbeat_interval_seconds,json=heartbeatIntervalSeconds,proto3" json:"heartbeat_interval_seconds,omitempty"`
-	unknownFields            protoimpl.UnknownFields
-	sizeCache                protoimpl.SizeCache
+	// Per-worker credential, returned only when a worker first enrols. Send it as
+	// "authorization: Bearer <credential>" on every later call. Only its hash is stored server-side.
+	Credential    string `protobuf:"bytes,3,opt,name=credential,proto3" json:"credential,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *RegisterWorkerResponse) Reset() {
@@ -1645,6 +1699,13 @@ func (x *RegisterWorkerResponse) GetHeartbeatIntervalSeconds() int32 {
 		return x.HeartbeatIntervalSeconds
 	}
 	return 0
+}
+
+func (x *RegisterWorkerResponse) GetCredential() string {
+	if x != nil {
+		return x.Credential
+	}
+	return ""
 }
 
 // Host and Docker resource usage sampled by the worker (about once per second).
@@ -1845,6 +1906,8 @@ type HeartbeatRequest struct {
 	Draining      bool           `protobuf:"varint,6,opt,name=draining,proto3" json:"draining,omitempty"`
 	MaxJobs       int32          `protobuf:"varint,7,opt,name=max_jobs,json=maxJobs,proto3" json:"max_jobs,omitempty"`
 	Usage         *ResourceUsage `protobuf:"bytes,8,opt,name=usage,proto3" json:"usage,omitempty"`
+	Isolation     string         `protobuf:"bytes,9,opt,name=isolation,proto3" json:"isolation,omitempty"`
+	AllowsNetwork bool           `protobuf:"varint,10,opt,name=allows_network,json=allowsNetwork,proto3" json:"allows_network,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1933,6 +1996,20 @@ func (x *HeartbeatRequest) GetUsage() *ResourceUsage {
 		return x.Usage
 	}
 	return nil
+}
+
+func (x *HeartbeatRequest) GetIsolation() string {
+	if x != nil {
+		return x.Isolation
+	}
+	return ""
+}
+
+func (x *HeartbeatRequest) GetAllowsNetwork() bool {
+	if x != nil {
+		return x.AllowsNetwork
+	}
+	return false
 }
 
 type HeartbeatResponse struct {
@@ -2315,7 +2392,7 @@ const file_worker_proto_rawDesc = "" +
 	"\fResourceSpec\x12\x1b\n" +
 	"\tcpu_cores\x18\x01 \x01(\x05R\bcpuCores\x12\x1b\n" +
 	"\tgpu_count\x18\x02 \x01(\x05R\bgpuCount\x12\x1b\n" +
-	"\tmemory_mb\x18\x03 \x01(\x05R\bmemoryMb\"\xca\x04\n" +
+	"\tmemory_mb\x18\x03 \x01(\x05R\bmemoryMb\"\xef\x04\n" +
 	"\x03Job\x12(\n" +
 	"\x06job_id\x18\x01 \x01(\v2\x11.compute.v1.JobIDR\x05jobId\x12'\n" +
 	"\x0fcontainer_image\x18\x02 \x01(\tR\x0econtainerImage\x12\x18\n" +
@@ -2330,10 +2407,11 @@ const file_worker_proto_rawDesc = "" +
 	" \x01(\tR\x0eartifactSha256\x12\x18\n" +
 	"\aattempt\x18\v \x01(\x05R\aattempt\x12\x1f\n" +
 	"\vlease_token\x18\f \x01(\tR\n" +
-	"leaseToken\x1a>\n" +
+	"leaseToken\x12#\n" +
+	"\rnetwork_hosts\x18\r \x03(\tR\fnetworkHosts\x1a>\n" +
 	"\x10EnvironmentEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xfe\x03\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xa3\x04\n" +
 	"\x06Result\x12(\n" +
 	"\x06job_id\x18\x01 \x01(\v2\x11.compute.v1.JobIDR\x05jobId\x12*\n" +
 	"\x06status\x18\x02 \x01(\x0e2\x12.compute.v1.StatusR\x06status\x12\x1b\n" +
@@ -2348,16 +2426,23 @@ const file_worker_proto_rawDesc = "" +
 	"\x11output_public_url\x18\n" +
 	" \x01(\tR\x0foutputPublicUrl\x12*\n" +
 	"\x11output_size_bytes\x18\v \x01(\x03R\x0foutputSizeBytes\x12%\n" +
-	"\x0efailure_reason\x18\f \x01(\tR\rfailureReason\"\xf3\x01\n" +
+	"\x0efailure_reason\x18\f \x01(\tR\rfailureReason\x12#\n" +
+	"\routput_digest\x18\r \x01(\tR\foutputDigest\"\xe3\x02\n" +
 	"\x15RegisterWorkerRequest\x12I\n" +
 	"\x13available_resources\x18\x01 \x01(\v2\x18.compute.v1.ResourceSpecR\x12availableResources\x12%\n" +
 	"\x0eworker_version\x18\x02 \x01(\tR\rworkerVersion\x120\n" +
 	"\x06worker\x18\x03 \x01(\v2\x18.compute.v1.WorkerSchemaR\x06worker\x12\x1b\n" +
 	"\tworker_id\x18\x04 \x01(\tR\bworkerId\x12\x19\n" +
-	"\bmax_jobs\x18\x05 \x01(\x05R\amaxJobs\"\x89\x01\n" +
+	"\bmax_jobs\x18\x05 \x01(\x05R\amaxJobs\x12\x1c\n" +
+	"\tisolation\x18\x06 \x01(\tR\tisolation\x12%\n" +
+	"\x0eallows_network\x18\a \x01(\bR\rallowsNetwork\x12)\n" +
+	"\x10enrollment_token\x18\b \x01(\tR\x0fenrollmentToken\"\xa9\x01\n" +
 	"\x16RegisterWorkerResponse\x121\n" +
 	"\tworker_id\x18\x01 \x01(\v2\x14.compute.v1.WorkerIDR\bworkerId\x12<\n" +
-	"\x1aheartbeat_interval_seconds\x18\x02 \x01(\x05R\x18heartbeatIntervalSeconds\"\xba\x05\n" +
+	"\x1aheartbeat_interval_seconds\x18\x02 \x01(\x05R\x18heartbeatIntervalSeconds\x12\x1e\n" +
+	"\n" +
+	"credential\x18\x03 \x01(\tR\n" +
+	"credential\"\xba\x05\n" +
 	"\rResourceUsage\x12 \n" +
 	"\fmem_total_mb\x18\x01 \x01(\x03R\n" +
 	"memTotalMb\x12\x1e\n" +
@@ -2380,7 +2465,7 @@ const file_worker_proto_rawDesc = "" +
 	"\x18net_egress_bytes_per_sec\x18\x0f \x01(\x01R\x14netEgressBytesPerSec\x12'\n" +
 	"\x10jobs_mem_used_mb\x18\x10 \x01(\x03R\rjobsMemUsedMb\x12)\n" +
 	"\x10overload_reasons\x18\x11 \x03(\tR\x0foverloadReasons\x12&\n" +
-	"\x0fsampled_at_unix\x18\x12 \x01(\x03R\rsampledAtUnix\"\x90\x03\n" +
+	"\x0fsampled_at_unix\x18\x12 \x01(\x03R\rsampledAtUnix\"\xd5\x03\n" +
 	"\x10HeartbeatRequest\x121\n" +
 	"\tworker_id\x18\x01 \x01(\v2\x14.compute.v1.WorkerIDR\bworkerId\x12I\n" +
 	"\x13available_resources\x18\x02 \x01(\v2\x18.compute.v1.ResourceSpecR\x12availableResources\x124\n" +
@@ -2391,7 +2476,10 @@ const file_worker_proto_rawDesc = "" +
 	"overloaded\x12\x1a\n" +
 	"\bdraining\x18\x06 \x01(\bR\bdraining\x12\x19\n" +
 	"\bmax_jobs\x18\a \x01(\x05R\amaxJobs\x12/\n" +
-	"\x05usage\x18\b \x01(\v2\x19.compute.v1.ResourceUsageR\x05usage\"\x7f\n" +
+	"\x05usage\x18\b \x01(\v2\x19.compute.v1.ResourceUsageR\x05usage\x12\x1c\n" +
+	"\tisolation\x18\t \x01(\tR\tisolation\x12%\n" +
+	"\x0eallows_network\x18\n" +
+	" \x01(\bR\rallowsNetwork\"\x7f\n" +
 	"\x11HeartbeatResponse\x12\x1a\n" +
 	"\baccepted\x18\x01 \x01(\bR\baccepted\x12(\n" +
 	"\x10server_time_unix\x18\x02 \x01(\x03R\x0eserverTimeUnix\x12$\n" +
@@ -2430,7 +2518,7 @@ const file_worker_proto_rawDesc = "" +
 	"\x19AssignmentLifecycleStatus\x12+\n" +
 	"'ASSIGNMENT_LIFECYCLE_STATUS_UNSPECIFIED\x10\x00\x12(\n" +
 	"$ASSIGNMENT_LIFECYCLE_STATUS_ASSIGNED\x10\x01\x12'\n" +
-	"#ASSIGNMENT_LIFECYCLE_STATUS_RUNNING\x10\x02*\xc0\x01\n" +
+	"#ASSIGNMENT_LIFECYCLE_STATUS_RUNNING\x10\x02*\xd6\x01\n" +
 	"\x06Status\x12\x16\n" +
 	"\x12STATUS_UNSPECIFIED\x10\x00\x12\x11\n" +
 	"\rSTATUS_QUEUED\x10\x01\x12\x13\n" +
@@ -2438,7 +2526,8 @@ const file_worker_proto_rawDesc = "" +
 	"\x0eSTATUS_RUNNING\x10\x03\x12\x14\n" +
 	"\x10STATUS_SUCCEEDED\x10\x04\x12\x11\n" +
 	"\rSTATUS_FAILED\x10\x05\x12\x13\n" +
-	"\x0fSTATUS_CANCELED\x10\x06\x12\x13\n" +
+	"\x0fSTATUS_CANCELED\x10\x06\x12\x14\n" +
+	"\x10STATUS_VERIFYING\x10\t\x12\x13\n" +
 	"\x0fSTATUS_REQUEUED\x10\a\x12\x0f\n" +
 	"\vSTATUS_DEAD\x10\b2\xd2\x02\n" +
 	"\rWorkerService\x12W\n" +

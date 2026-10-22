@@ -25,48 +25,37 @@ func TestBuildArgsAddsExpectedDockerFlags(t *testing.T) {
 		t.Fatalf("buildRunArgs returned error: %v", err)
 	}
 
-	expected := []string{
-		"run",
-		"--network",
-		"none",
-		"--name",
-		"computehive-worker-01-job-01",
-		"--label",
-		"computehive.worker.id=worker-01",
-		"--label",
-		"computehive.job.id=job-01",
-		"-v",
-		"/tmp/computehive-output-job-01:/computehive/output",
-		"--cpus",
-		"2",
-		"--memory",
-		"512m",
-		"--memory-swap",
-		"512m",
-		"--pids-limit",
-		"256",
-		"--gpus",
-		"all",
-		"-e",
-		"A=1",
-		"-e",
-		"B=2",
-		"-e",
-		"COMPUTEHIVE_OUTPUT_DIR=/computehive/output",
-		"computehive/job-01:latest",
-		"python",
-		"-c",
-		"print('ok')",
-	}
-
-	if len(args) != len(expected) {
-		t.Fatalf("expected %d args, got %d: %#v", len(expected), len(args), args)
-	}
-
-	for index := range expected {
-		if args[index] != expected[index] {
-			t.Fatalf("arg %d mismatch: expected %q, got %q", index, expected[index], args[index])
+	for _, kv := range [][2]string{
+		{"--network", "none"}, {"--name", "computehive-worker-01-job-01"},
+		{"--label", "computehive.worker.id=worker-01"}, {"--label", "computehive.job.id=job-01"},
+		{"-v", "/tmp/computehive-output-job-01:/computehive/output"},
+		{"--cpus", "2"}, {"--memory", "512m"}, {"--memory-swap", "512m"}, {"--pids-limit", "256"}, {"--gpus", "all"},
+		{"-e", "A=1"}, {"-e", "B=2"}, {"-e", "COMPUTEHIVE_OUTPUT_DIR=/computehive/output"},
+	} {
+		if !has(args, kv[0], kv[1]) {
+			t.Errorf("missing %s %s in %v", kv[0], kv[1], args)
 		}
+	}
+	// The image and the job's command are always last, in order, after every flag.
+	tail := args[len(args)-4:]
+	want := []string{"computehive/job-01:latest", "python", "-c", "print('ok')"}
+	for i := range want {
+		if tail[i] != want[i] {
+			t.Fatalf("tail = %v, want %v", tail, want)
+		}
+	}
+	// Env is sorted so the command line is deterministic.
+	ia, ib := -1, -1
+	for i, a := range args {
+		if a == "A=1" {
+			ia = i
+		}
+		if a == "B=2" {
+			ib = i
+		}
+	}
+	if ia < 0 || ib < 0 || ia > ib {
+		t.Fatalf("env not sorted: A at %d, B at %d", ia, ib)
 	}
 }
 

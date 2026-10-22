@@ -2,8 +2,11 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -12,7 +15,10 @@ import (
 	"github.com/vim-all/ComputeHive/worker/internal/artifact"
 	"github.com/vim-all/ComputeHive/worker/internal/config"
 	"github.com/vim-all/ComputeHive/worker/internal/domain"
+	"github.com/vim-all/ComputeHive/worker/internal/executor"
+	"github.com/vim-all/ComputeHive/worker/internal/history"
 	"github.com/vim-all/ComputeHive/worker/internal/monitor"
+	"github.com/vim-all/ComputeHive/worker/internal/policy"
 )
 
 // ---- fakes ----
@@ -324,5 +330,253 @@ func TestFinishedJobReportsSuccess(t *testing.T) {
 	eventually(t, 2*time.Second, func() bool { return len(r.store.resultsCopy()) == 1 }, "result")
 	if res := r.store.resultsCopy()[0]; res.Status != domain.JobStatusSucceeded || res.FailureReason != "" {
 		t.Fatalf("result: %+v", res)
+	}
+}
+
+// ---- contributor controls ----
+
+type fakeSandbox struct {
+	mu       sync.Mutex
+	disk     int64
+	allow    []string
+	graceSet []time.Duration
+}
+
+func (f *fakeSandbox) Configure(fn func(*executor.Sandbox)) {
+	sb := executor.DefaultSandbox()
+	fn(&sb)
+	f.mu.Lock()
+	f.disk, f.allow = sb.OutputMaxBytes, sb.Images.Allow
+	f.mu.Unlock()
+}
+func (f *fakeSandbox) SetStopGrace(d time.Duration) {
+	f.mu.Lock()
+	f.graceSet = append(f.graceSet, d)
+	f.mu.Unlock()
+}
+
+func withControls(t *testing.T, r *rig) (*policy.Manager, *history.Store, *fakeSandbox, *atomic.Bool) {
+	t.Helper()
+	pol, err := policy.Open(filepath.Join(t.TempDir(), "policy.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hist := history.Open(filepath.Join(t.TempDir(), "h.jsonl"), 100)
+	sb := &fakeSandbox{}
+	var stopped atomic.Bool
+	r.agent.WithPolicy(pol).WithHistory(hist).WithSandbox(sb).WithIsolation("hardened-runc").WithStop(func() { stopped.Store(true) })
+	return pol, hist, sb, &stopped
+}
+
+func TestPauseStopsIntakeButLetsTheRunningJobFinish(t *testing.T) {
+	r := newRig(t, &domain.Job{ID: "a", ImageRef: "img", LeaseToken: "t", Attempt: 1})
+	r.exec.runFor = 400 * time.Millisecond
+	withControls(t, r)
+	r.mon.Observe(healthy(50))
+	r.start(t)
+	select {
+	case <-r.exec.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("job never started")
+	}
+	if err := r.agent.Pause(false); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, 3*time.Second, func() bool { return len(r.store.resultsCopy()) == 1 }, "running job finishes after a soft pause")
+	if res := r.store.resultsCopy()[0]; res.Status != domain.JobStatusSucceeded {
+		t.Fatalf("a soft pause must not disturb the running job: %+v", res)
+	}
+	r.store.mu.Lock()
+	r.store.jobs = append(r.store.jobs, &domain.Job{ID: "b", ImageRef: "img", LeaseToken: "t2", Attempt: 1})
+	r.store.mu.Unlock()
+	pullsStayFlat(t, r, "paused")
+	if st := r.agent.Status(); st.State != "paused" {
+		t.Fatalf("status %q, want paused", st.State)
+	}
+	eventually(t, time.Second, func() bool { hb, _ := r.store.lastHeartbeat(); return hb.Draining }, "a paused worker tells the coordinator it is draining")
+
+	if err := r.agent.Resume(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case id := <-r.exec.started:
+		if id != "b" {
+			t.Fatalf("started %s", id)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker did not resume")
+	}
+}
+
+func TestHardPauseHandsTheRunningJobBack(t *testing.T) {
+	r := newRig(t, &domain.Job{ID: "a", ImageRef: "img", LeaseToken: "t", Attempt: 1})
+	_, hist, _, _ := withControls(t, r)
+	r.mon.Observe(healthy(50))
+	r.start(t)
+	select {
+	case <-r.exec.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("job never started")
+	}
+	_ = r.agent.Pause(true)
+	eventually(t, 3*time.Second, func() bool { return len(r.store.resultsCopy()) == 1 }, "evicted result")
+	if res := r.store.resultsCopy()[0]; res.FailureReason != ReasonEvicted {
+		t.Fatalf("a pause-now must requeue without blame: %+v", res)
+	}
+	h, _ := hist.Recent(1)
+	if len(h) != 1 || h[0].JobID != "a" || h[0].Status != "evicted" || !strings.Contains(h[0].Error, "paused") {
+		t.Fatalf("history should record what happened: %+v", h)
+	}
+}
+
+func TestKillSwitchStopsTheJobImmediatelyAndShutsTheWorkerDown(t *testing.T) {
+	r := newRig(t, &domain.Job{ID: "a", ImageRef: "img", LeaseToken: "t", Attempt: 1})
+	_, _, sb, stopped := withControls(t, r)
+	r.mon.Observe(healthy(50))
+	r.start(t)
+	select {
+	case <-r.exec.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("job never started")
+	}
+	_ = r.agent.Kill()
+	eventually(t, 3*time.Second, func() bool { return len(r.store.resultsCopy()) == 1 }, "job handed back")
+	if res := r.store.resultsCopy()[0]; res.FailureReason != ReasonEvicted {
+		t.Fatalf("kill switch result: %+v", res)
+	}
+	eventually(t, 3*time.Second, stopped.Load, "the worker shuts itself down")
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	if len(sb.graceSet) == 0 || sb.graceSet[0] != 0 {
+		t.Fatalf("the kill switch must remove the stop grace period (immediate SIGKILL), got %v", sb.graceSet)
+	}
+	if st := r.agent.Status(); st.State != "killed" {
+		t.Fatalf("status %q", st.State)
+	}
+}
+
+func TestPolicyIsEnforcedOnTheContributorsMachineNotJustAdvertised(t *testing.T) {
+	cases := map[string]struct {
+		mutate func(*policy.Policy)
+		job    domain.Job
+	}{
+		"too many cpus":       {func(p *policy.Policy) { p.MaxCPUs = 2 }, domain.Job{ID: "j", ImageRef: "i", CPUCores: 8}},
+		"too much memory":     {func(p *policy.Policy) { p.MaxMemoryMB = 1024 }, domain.Job{ID: "j", ImageRef: "i", MemoryMB: 4096}},
+		"network not allowed": {func(p *policy.Policy) {}, domain.Job{ID: "j", ImageRef: "i", NetworkHosts: []string{"pypi.org"}}},
+		"host not listed": {func(p *policy.Policy) { p.AllowNetwork, p.AllowedHosts = true, []string{"pypi.org"} },
+			domain.Job{ID: "j", ImageRef: "i", NetworkHosts: []string{"evil.example"}}},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			j := tc.job
+			j.LeaseToken, j.Attempt = "tok", 1
+			r := newRig(t, &j)
+			pol, hist, _, _ := withControls(t, r)
+			_ = pol.Update(tc.mutate)
+			r.mon.Observe(healthy(50))
+			r.start(t)
+			eventually(t, 2*time.Second, func() bool { return len(r.store.resultsCopy()) == 1 }, "refusal result")
+			if res := r.store.resultsCopy()[0]; res.FailureReason != ReasonEvicted {
+				t.Fatalf("a job the contributor's policy refuses must be handed back without blame: %+v", res)
+			}
+			select {
+			case id := <-r.exec.started:
+				t.Fatalf("job %s was executed despite the policy", id)
+			case <-time.After(150 * time.Millisecond):
+			}
+			if h, _ := hist.Recent(1); len(h) != 1 || h[0].Status != "refused" {
+				t.Fatalf("history: %+v", h)
+			}
+		})
+	}
+}
+
+func TestPolicyDisablesNetworkJobsAndAdvertisesCapabilities(t *testing.T) {
+	r := newRig(t)
+	pol, _, _, _ := withControls(t, r)
+	_ = pol.Update(func(p *policy.Policy) { p.MaxCPUs, p.MaxMemoryMB, p.AllowNetwork = 2, 2048, true })
+	r.mon.Observe(healthy(50))
+	r.start(t)
+	eventually(t, time.Second, func() bool { hb, ok := r.store.lastHeartbeat(); return ok && hb.Usage != nil }, "heartbeat")
+	hb, _ := r.store.lastHeartbeat()
+	if hb.Resources.CPUCores != 2 || hb.Resources.MemoryMB != 2048 {
+		t.Fatalf("advertised resources must be the donated amount, got %d CPUs / %d MB", hb.Resources.CPUCores, hb.Resources.MemoryMB)
+	}
+	if !hb.AllowsNetwork || hb.Isolation != "hardened-runc" {
+		t.Fatalf("capabilities: network=%v isolation=%q", hb.AllowsNetwork, hb.Isolation)
+	}
+}
+
+func TestScheduleIdleAndGVisorRulesBlockIntake(t *testing.T) {
+	t.Run("outside the schedule", func(t *testing.T) {
+		r := newRig(t)
+		pol, _, _, _ := withControls(t, r)
+		now := time.Now()
+		off := now.Add(6 * time.Hour) // a 1-minute window six hours from now: certainly closed
+		_ = pol.Update(func(p *policy.Policy) { p.Schedule = off.Format("15:04") + "-" + off.Add(time.Minute).Format("15:04") })
+		r.mon.Observe(healthy(50))
+		r.start(t)
+		pullsStayFlat(t, r, "outside the schedule")
+		if st := r.agent.Status(); st.NotTaking != "outside_schedule" {
+			t.Fatalf("not_taking = %q", st.NotTaking)
+		}
+	})
+	t.Run("idle-only while the machine is busy", func(t *testing.T) {
+		r := newRig(t)
+		pol, _, _, _ := withControls(t, r)
+		_ = pol.Update(func(p *policy.Policy) { p.IdleOnly, p.IdleCPUPercent = true, 25 })
+		busy := healthy(50)
+		busy.CPUPercent = 60
+		r.mon.Observe(busy)
+		r.start(t)
+		pullsStayFlat(t, r, "idle-only and the host is busy")
+		idle := healthy(50)
+		idle.CPUPercent = 5
+		r.mon.Observe(idle)
+		before := r.store.pulls.Load()
+		eventually(t, time.Second, func() bool { return r.store.pulls.Load() > before+2 }, "resumes when the machine goes idle")
+	})
+	t.Run("gVisor required but absent", func(t *testing.T) {
+		r := newRig(t)
+		pol, _, _, _ := withControls(t, r)
+		_ = pol.Update(func(p *policy.Policy) { p.RequireGVisor = true })
+		r.mon.Observe(healthy(50))
+		r.start(t)
+		pullsStayFlat(t, r, "require_gvisor on a runc worker")
+	})
+}
+
+func TestDiskQuotaAndImageRulesFollowThePolicyBeforeEachJob(t *testing.T) {
+	r := newRig(t, &domain.Job{ID: "a", ImageRef: "img", LeaseToken: "t", Attempt: 1})
+	r.exec.runFor = 10 * time.Millisecond
+	pol, _, sb, _ := withControls(t, r)
+	_ = pol.Update(func(p *policy.Policy) { p.MaxJobDiskMB = 64; p.ImageAllow = []string{"alpine:*"} })
+	r.mon.Observe(healthy(50))
+	r.start(t)
+	eventually(t, 2*time.Second, func() bool { return len(r.store.resultsCopy()) == 1 }, "job")
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	if sb.disk != 64<<20 || len(sb.allow) != 1 || sb.allow[0] != "alpine:*" {
+		t.Fatalf("policy was not applied to the sandbox: disk=%d allow=%v", sb.disk, sb.allow)
+	}
+}
+
+func TestEveryJobIsRecordedInTheHistoryWithoutSecrets(t *testing.T) {
+	r := newRig(t, &domain.Job{ID: "ok", ImageRef: "img", LeaseToken: "t", Attempt: 1, Command: []string{"run", "--x"}, Env: map[string]string{"API_KEY": "hunter2"}})
+	r.exec.runFor = 10 * time.Millisecond
+	_, hist, _, _ := withControls(t, r)
+	r.mon.Observe(healthy(50))
+	r.start(t)
+	eventually(t, 2*time.Second, func() bool { h, _ := hist.Recent(0); return len(h) == 1 }, "history entry")
+	h, _ := hist.Recent(1)
+	e := h[0]
+	if e.JobID != "ok" || e.Image != "img" || e.Status != domain.JobStatusSucceeded || e.Command != "run --x" || e.Isolation != "hardened-runc" {
+		t.Fatalf("entry: %+v", e)
+	}
+	if len(e.EnvNames) != 1 || e.EnvNames[0] != "API_KEY" {
+		t.Fatalf("env names: %v", e.EnvNames)
+	}
+	if raw, _ := json.Marshal(e); strings.Contains(string(raw), "hunter2") {
+		t.Fatal("an environment value leaked into the history")
 	}
 }

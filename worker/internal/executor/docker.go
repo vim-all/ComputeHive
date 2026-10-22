@@ -3,13 +3,17 @@ package executor
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/vim-all/ComputeHive/worker/internal/artifact"
@@ -31,22 +35,162 @@ func DefaultLimits() Limits {
 	return Limits{DefaultMemoryMB: 512, DefaultCPUs: 1, PidsLimit: 256, StopGrace: 5 * time.Second}
 }
 
+// Sandbox holds the isolation settings that apply to every job container.
+type Sandbox struct {
+	// User is the container user ("uid[:gid]"). "" or "auto": the worker's own uid:gid when it is
+	// not root (so files the job writes are deletable by the worker), otherwise 65534:65534.
+	// Root is never accepted.
+	User string
+	// Runtime is the OCI runtime: "" for Docker's default (runc) or "runsc" for gVisor.
+	Runtime string
+
+	TmpfsMB          int           // size of the noexec /tmp scratch
+	OutputMaxBytes   int64         // cap on the writable work directory, enforced by a watcher plus RLIMIT_FSIZE
+	OutputMaxEntries int           // cap on files/dirs a job may create in it
+	OutputPoll       time.Duration // watcher interval
+	NoFile           int           // RLIMIT_NOFILE
+	MaxLogBytes      int           // captured stdout and stderr are each truncated to this
+
+	Images       ImagePolicy
+	LoadPrefixes []string // tags an uploaded image archive may create; anything else is refused
+
+	// DockerConfigDir is an EMPTY directory used as DOCKER_CONFIG for every docker command, so the
+	// contributor's stored registry credentials are never used on a stranger's behalf.
+	DockerConfigDir string
+}
+
+// DefaultSandbox is the strict profile: nothing allowed beyond the worker's own namespace.
+func DefaultSandbox() Sandbox {
+	return Sandbox{
+		TmpfsMB: 64, OutputMaxBytes: 256 << 20, OutputMaxEntries: 20000, OutputPoll: 250 * time.Millisecond,
+		NoFile: 1024, MaxLogBytes: 1 << 20,
+		LoadPrefixes: []string{"computehive-job:", "computehive/"},
+	}
+}
+
+// NetworkAttachment is how a job container is connected to a network.
+type NetworkAttachment struct {
+	Name    string            // "none" or a worker-created network
+	Env     map[string]string // for example HTTPS_PROXY
+	Cleanup func()
+}
+
+// NetworkProvider decides a job's network. The default provides none at all.
+type NetworkProvider interface {
+	Attach(ctx context.Context, job domain.Job) (NetworkAttachment, error)
+	Owns(network string) bool
+}
+
+type noNetwork struct{}
+
+func (noNetwork) Attach(context.Context, domain.Job) (NetworkAttachment, error) {
+	return NetworkAttachment{Name: "none"}, nil
+}
+func (noNetwork) Owns(string) bool { return false }
+
 type DockerExecutor struct {
 	binary              string
 	workerID            string
 	allowGPUJobs        bool
 	outputCollectionDir string
 	limits              Limits
+	net                 NetworkProvider
+
+	sbMu sync.RWMutex
+	sb   Sandbox
 }
 
-func NewDockerExecutor(binary, workerID string, allowGPUJobs bool, outputCollectionDir string, limits Limits) *DockerExecutor {
+func NewDockerExecutor(binary, workerID string, allowGPUJobs bool, outputCollectionDir string, limits Limits, sb ...Sandbox) *DockerExecutor {
+	s := DefaultSandbox()
+	if len(sb) > 0 {
+		s = sb[0]
+	}
+	if s.DockerConfigDir == "" {
+		if dir, err := os.MkdirTemp("", "computehive-docker-config-"); err == nil {
+			s.DockerConfigDir = dir
+		}
+	}
 	return &DockerExecutor{
 		binary:              binary,
 		workerID:            workerID,
 		allowGPUJobs:        allowGPUJobs,
 		outputCollectionDir: strings.TrimSpace(outputCollectionDir),
 		limits:              limits,
+		sb:                  s,
+		net:                 noNetwork{},
 	}
+}
+
+// sbc returns a consistent copy of the sandbox settings.
+func (e *DockerExecutor) sbc() Sandbox {
+	e.sbMu.RLock()
+	defer e.sbMu.RUnlock()
+	return e.sb
+}
+
+// Configure changes the sandbox settings; it applies from the next job on. The worker uses it to
+// apply the contributor's policy (disk quota, image allow/deny) without a restart.
+func (e *DockerExecutor) Configure(fn func(*Sandbox)) {
+	e.sbMu.Lock()
+	defer e.sbMu.Unlock()
+	fn(&e.sb)
+}
+
+// SetStopGrace changes how long containers get to exit after SIGTERM (0 = kill at once, for the kill switch).
+func (e *DockerExecutor) SetStopGrace(d time.Duration) {
+	e.sbMu.Lock()
+	defer e.sbMu.Unlock()
+	e.limits.StopGrace = d
+}
+
+// WithNetwork installs a network provider (the filtering-proxy egress mode).
+func (e *DockerExecutor) WithNetwork(p NetworkProvider) *DockerExecutor {
+	e.net = p
+	return e
+}
+
+// IsolationLevel names the isolation this executor provides, for the worker's capabilities.
+func (e *DockerExecutor) IsolationLevel() string {
+	if e.sbc().Runtime == "runsc" {
+		return "gvisor"
+	}
+	return "hardened-runc"
+}
+
+// DetectRuntime reports whether the Docker daemon has the gVisor runtime ("runsc") registered.
+func DetectRuntime(ctx context.Context, dockerBinary string) (hasRunsc bool, err error) {
+	out, err := exec.CommandContext(ctx, dockerBinary, "info", "--format", "{{json .Runtimes}}").Output()
+	if err != nil {
+		return false, fmt.Errorf("docker info: %w", err)
+	}
+	var runtimes map[string]json.RawMessage
+	if err := json.Unmarshal(bytes.TrimSpace(out), &runtimes); err != nil {
+		return false, fmt.Errorf("parse docker runtimes: %w", err)
+	}
+	_, ok := runtimes["runsc"]
+	return ok, nil
+}
+
+func (e *DockerExecutor) resolveUser() (string, error) {
+	u := strings.TrimSpace(e.sbc().User)
+	if u == "" || u == "auto" {
+		if uid := os.Getuid(); uid != 0 {
+			return fmt.Sprintf("%d:%d", uid, os.Getgid()), nil
+		}
+		return "65534:65534", nil
+	}
+	if isRootUser(u) {
+		return "", fmt.Errorf("job user %q is root: refusing to run untrusted code as root", u)
+	}
+	return u, nil
+}
+
+func fail(result *domain.JobResult, started time.Time, reason, msg string) domain.JobResult {
+	result.Error = msg
+	result.FailureReason = reason
+	result.FinishedAt = time.Now().UTC()
+	result.DurationMillis = result.FinishedAt.Sub(started).Milliseconds()
+	return *result
 }
 
 func (e *DockerExecutor) Run(ctx context.Context, job domain.Job, bundle artifact.Bundle) domain.JobResult {
@@ -68,66 +212,93 @@ func (e *DockerExecutor) Run(ctx context.Context, job domain.Job, bundle artifac
 		ArtifactSizeBytes: bundle.SizeBytes,
 	}
 
+	// Refuse malformed or hostile specs before touching Docker. These are the submitter's fault.
+	if err := ValidateImageRef(job.ImageRef); err != nil {
+		return fail(&result, startedAt, domain.FailureJobExit, "rejected: "+err.Error())
+	}
+	if err := ValidateJobFields(job.Env, job.Command); err != nil {
+		return fail(&result, startedAt, domain.FailureJobExit, "rejected: "+err.Error())
+	}
+
 	outputRoot, err := os.MkdirTemp("", "computehive-output-*")
 	if err != nil {
-		result.Error = "create output directory: " + err.Error()
-		result.FinishedAt = time.Now().UTC()
-		result.DurationMillis = result.FinishedAt.Sub(startedAt).Milliseconds()
-		return result
+		return fail(&result, startedAt, domain.FailureInfra, "create output directory: "+err.Error())
+	}
+	outDir := filepath.Join(outputRoot, "out")
+	if err := os.Mkdir(outDir, 0o700); err != nil {
+		return fail(&result, startedAt, domain.FailureInfra, "create work directory: "+err.Error())
+	}
+	user, err := e.resolveUser()
+	if err != nil {
+		return fail(&result, startedAt, domain.FailureInfra, err.Error())
+	}
+	if !strings.HasPrefix(user, strconv.Itoa(os.Getuid())+":") {
+		_ = os.Chmod(outDir, 0o777) // the job runs as a different uid than the worker: it must be able to write here
 	}
 	result.CleanupDir = outputRoot
-	result.OutputDirHostPath = outputRoot
+	result.OutputDirHostPath = outDir
 
 	if strings.TrimSpace(bundle.ArchivePath) != "" {
+		tarInfo, err := artifact.InspectImageTar(bundle.ArchivePath)
+		if err != nil {
+			return fail(&result, startedAt, domain.FailureJobExit, "invalid image archive: "+err.Error())
+		}
+		if err := tarInfo.AllowedTags(e.sbc().LoadPrefixes, job.ImageRef); err != nil {
+			return fail(&result, startedAt, domain.FailureJobExit, err.Error())
+		}
+		defer e.cleanupImages(tarInfo.RepoTags)
 		loadStdout, loadStderr, err := e.runDockerCommand(ctx, "load", "-i", bundle.ArchivePath)
 		if err != nil {
-			result.Error = "docker load failed: " + err.Error()
-			result.FailureReason = domain.FailureInfra
-			result.Stdout = loadStdout
-			result.Stderr = loadStderr
-			result.FinishedAt = time.Now().UTC()
-			result.DurationMillis = result.FinishedAt.Sub(startedAt).Milliseconds()
-			return result
+			result.Stdout, result.Stderr = loadStdout, loadStderr
+			return fail(&result, startedAt, domain.FailureInfra, "docker load failed: "+err.Error())
 		}
-		defer e.cleanupImage(job.ImageRef)
-
 		if _, _, err := e.runDockerCommand(ctx, "image", "inspect", job.ImageRef); err != nil {
-			result.Error = "loaded archive does not contain expected image_ref: " + job.ImageRef
-			result.FailureReason = domain.FailureInfra
-			result.Stdout = loadStdout
-			result.FinishedAt = time.Now().UTC()
-			result.DurationMillis = result.FinishedAt.Sub(startedAt).Milliseconds()
-			return result
+			return fail(&result, startedAt, domain.FailureInfra, "loaded archive does not contain expected image_ref: "+job.ImageRef)
 		}
+	} else if err := e.sbc().Images.Check(job.ImageRef); err != nil {
+		return fail(&result, startedAt, domain.FailureJobExit, err.Error())
 	}
 
-	args, err := e.buildRunArgs(job, outputRoot)
+	attach, err := e.net.Attach(ctx, job)
 	if err != nil {
-		result.Error = err.Error()
-		result.FailureReason = domain.FailureInfra
-		result.FinishedAt = time.Now().UTC()
-		result.DurationMillis = result.FinishedAt.Sub(startedAt).Milliseconds()
-		return result
+		return fail(&result, startedAt, domain.FailureInfra, "network setup: "+err.Error())
+	}
+	if attach.Cleanup != nil {
+		defer attach.Cleanup()
 	}
 
-	cmd := exec.CommandContext(ctx, e.binary, args...)
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	args, err := e.buildRunArgsNet(job, outDir, user, attach)
+	if err != nil {
+		return fail(&result, startedAt, domain.FailureInfra, err.Error())
+	}
+	if err := auditRunArgs(args, job.ImageRef, e.expect(outDir, attach.Name)); err != nil {
+		return fail(&result, startedAt, domain.FailureInfra, err.Error())
+	}
+
+	runCtx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
+	var quotaBytes atomic.Int64
+	go watchDirSize(runCtx, outDir, e.sbc().OutputMaxBytes, e.sbc().OutputMaxEntries, e.sbc().OutputPoll, func(b int64, n int) {
+		quotaBytes.Store(max(b, 1))
+		cancelRun()
+	})
+
+	cmd := exec.CommandContext(runCtx, e.binary, args...)
+	cmd.Env = e.cmdEnv()
+	stdout, stderr := newLimitedBuffer(e.sbc().MaxLogBytes), newLimitedBuffer(e.sbc().MaxLogBytes)
+	cmd.Stdout, cmd.Stderr = stdout, stderr
 
 	name := containerName(e.workerID, job.ID)
 	e.forceRemove(name) // a leftover from an earlier attempt would make `docker run --name` fail
 
 	runErr := cmd.Run()
-	result.Stdout = stdout.String()
-	result.Stderr = stderr.String()
+	result.Stdout, result.Stderr = stdout.String(), stderr.String()
 	result.FinishedAt = time.Now().UTC()
 	result.DurationMillis = result.FinishedAt.Sub(startedAt).Milliseconds()
 
 	// Cancelling the context only kills the `docker run` client; the container keeps
-	// running unless we stop it ourselves (timeouts, lease revocation, shutdown).
-	if ctx.Err() != nil {
+	// running unless we stop it ourselves (timeouts, lease revocation, shutdown, quota).
+	if runCtx.Err() != nil {
 		e.stopContainer(name)
 	}
 	// We remove containers ourselves instead of using `docker run --rm`: --rm races with an
@@ -140,6 +311,9 @@ func (e *DockerExecutor) Run(ctx context.Context, job domain.Job, bundle artifac
 		case *exec.ExitError:
 			result.ExitCode = exitErr.ExitCode()
 			switch {
+			case quotaBytes.Load() > 0 && ctx.Err() == nil:
+				result.FailureReason = domain.FailureJobExit
+				result.Error = fmt.Sprintf("killed: work directory exceeded its %d MB limit (had %d MB)", e.sbc().OutputMaxBytes>>20, quotaBytes.Load()>>20)
 			case errors.Is(ctx.Err(), context.DeadlineExceeded):
 				result.FailureReason = domain.FailureTimeout
 			case ctx.Err() != nil:
@@ -160,9 +334,43 @@ func (e *DockerExecutor) Run(ctx context.Context, job domain.Job, bundle artifac
 	return result
 }
 
+func (e *DockerExecutor) expect(hostOutputDir, network string) auditExpect {
+	return auditExpect{
+		mount:    hostOutputDir + ":" + e.outputCollectionDir,
+		runtime:  e.sbc().Runtime,
+		allowGPU: e.allowGPUJobs,
+		networkAllowed: func(n string) bool {
+			return n == "none" || (n == network && e.net.Owns(n))
+		},
+	}
+}
+
+func (e *DockerExecutor) cmdEnv() []string {
+	env := os.Environ()
+	if e.sbc().DockerConfigDir != "" {
+		env = append(env, "DOCKER_CONFIG="+e.sbc().DockerConfigDir)
+	}
+	return env
+}
+
+// buildRunArgs builds a job container with no network.
 func (e *DockerExecutor) buildRunArgs(job domain.Job, hostOutputDir string) ([]string, error) {
+	user, err := e.resolveUser()
+	if err != nil {
+		return nil, err
+	}
+	return e.buildRunArgsNet(job, hostOutputDir, user, NetworkAttachment{Name: "none"})
+}
+
+func (e *DockerExecutor) buildRunArgsNet(job domain.Job, hostOutputDir, user string, attach NetworkAttachment) ([]string, error) {
 	job.Normalize()
 	if err := job.Validate(); err != nil {
+		return nil, err
+	}
+	if err := ValidateImageRef(job.ImageRef); err != nil {
+		return nil, err
+	}
+	if err := ValidateJobFields(job.Env, job.Command); err != nil {
 		return nil, err
 	}
 	if job.GPU && !e.allowGPUJobs {
@@ -174,19 +382,35 @@ func (e *DockerExecutor) buildRunArgs(job domain.Job, hostOutputDir string) ([]s
 	if strings.TrimSpace(e.outputCollectionDir) == "" {
 		return nil, fmt.Errorf("worker output collection directory is required")
 	}
+	network := attach.Name
+	if network == "" {
+		network = "none"
+	}
 
 	args := []string{
 		"run",
-		"--network",
-		"none",
-		"--name",
-		containerName(e.workerID, job.ID),
-		"--label",
-		"computehive.worker.id=" + e.workerID,
-		"--label",
-		"computehive.job.id=" + job.ID,
-		"-v",
-		hostOutputDir + ":" + e.outputCollectionDir,
+		"--pull", "never", // never fetch images: that would use the contributor's registry access
+		"--network", network,
+		"--name", containerName(e.workerID, job.ID),
+		"--label", "computehive.worker.id=" + e.workerID,
+		"--label", "computehive.job.id=" + job.ID,
+		"--user", user,
+		"--cap-drop", "ALL",
+		"--security-opt", "no-new-privileges",
+		"--read-only",
+		"--init",
+		"--tmpfs", fmt.Sprintf("/tmp:rw,noexec,nosuid,nodev,size=%dm", e.sbc().TmpfsMB),
+		"-v", hostOutputDir + ":" + e.outputCollectionDir,
+	}
+	if e.sbc().Runtime != "" {
+		args = append(args, "--runtime", e.sbc().Runtime)
+	}
+	if e.sbc().NoFile > 0 {
+		args = append(args, "--ulimit", fmt.Sprintf("nofile=%d:%d", e.sbc().NoFile, e.sbc().NoFile))
+	}
+	args = append(args, "--ulimit", "core=0:0")
+	if e.sbc().OutputMaxBytes > 0 {
+		args = append(args, "--ulimit", fmt.Sprintf("fsize=%d:%d", e.sbc().OutputMaxBytes, e.sbc().OutputMaxBytes))
 	}
 
 	cpus := job.CPUCores
@@ -211,13 +435,22 @@ func (e *DockerExecutor) buildRunArgs(job domain.Job, hostOutputDir string) ([]s
 		args = append(args, "--gpus", "all")
 	}
 
-	keys := make([]string, 0, len(job.Env))
-	for key := range job.Env {
+	env := map[string]string{"HOME": "/tmp", "TMPDIR": "/tmp"}
+	for k, v := range attach.Env {
+		env[k] = v
+	}
+	for k, v := range job.Env { // the job may override HOME/TMPDIR, but never the proxy or the reserved COMPUTEHIVE_ names
+		if _, fromNet := attach.Env[k]; !fromNet {
+			env[k] = v
+		}
+	}
+	keys := make([]string, 0, len(env))
+	for key := range env {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
 	for _, key := range keys {
-		args = append(args, "-e", key+"="+job.Env[key])
+		args = append(args, "-e", key+"="+env[key])
 	}
 	args = append(args, "-e", "COMPUTEHIVE_OUTPUT_DIR="+e.outputCollectionDir)
 
@@ -226,8 +459,14 @@ func (e *DockerExecutor) buildRunArgs(job domain.Job, hostOutputDir string) ([]s
 	return args, nil
 }
 
-func (e *DockerExecutor) runDockerCommand(ctx context.Context, args ...string) (string, string, error) {
+func (e *DockerExecutor) dockerCmd(ctx context.Context, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, e.binary, args...)
+	cmd.Env = e.cmdEnv()
+	return cmd
+}
+
+func (e *DockerExecutor) runDockerCommand(ctx context.Context, args ...string) (string, string, error) {
+	cmd := e.dockerCmd(ctx, args...)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -239,7 +478,9 @@ func (e *DockerExecutor) runDockerCommand(ctx context.Context, args ...string) (
 
 // stopContainer gives the container StopGrace to exit after SIGTERM, then SIGKILLs it.
 func (e *DockerExecutor) stopContainer(name string) {
+	e.sbMu.RLock()
 	grace := max(int(e.limits.StopGrace.Seconds()), 0)
+	e.sbMu.RUnlock()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(grace+30)*time.Second)
 	defer cancel()
 	_, _, _ = e.runDockerCommand(ctx, "stop", "-t", strconv.Itoa(grace), name)
@@ -269,14 +510,14 @@ func (e *DockerExecutor) forceRemove(name string) {
 	_, _, _ = e.runDockerCommand(ctx, "rm", "-f", "-v", name)
 }
 
-func (e *DockerExecutor) cleanupImage(imageRef string) {
-	if strings.TrimSpace(imageRef) == "" {
+// cleanupImages removes every tag a job's archive created, so nothing it shipped stays on the machine.
+func (e *DockerExecutor) cleanupImages(tags []string) {
+	if len(tags) == 0 {
 		return
 	}
-
-	cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	_, _, _ = e.runDockerCommand(cleanupCtx, "image", "rm", "-f", imageRef)
+	_, _, _ = e.runDockerCommand(ctx, append([]string{"image", "rm", "-f"}, tags...)...)
 }
 
 func containerName(workerID, jobID string) string {

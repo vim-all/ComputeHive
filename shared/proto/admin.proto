@@ -1,0 +1,41 @@
+syntax = "proto3";
+
+package compute.v1;
+
+option go_package = "coordinator/pkg/pb";
+
+import "worker.proto";
+
+message CreateEnrollmentTokenRequest {
+  // How long the token stays valid, in seconds (1 to 604800 = 7 days).
+  int64 ttl_seconds = 1;
+  // How many workers may enrol with it (1 to 1000).
+  int32 max_uses = 2;
+  // Free-text label to remember who it was for.
+  string note = 3;
+}
+
+message CreateEnrollmentTokenResponse {
+  // The secret token. It is shown exactly once; only its hash is stored.
+  string token = 1;
+  int64 expires_at_unix = 2;
+  int32 max_uses = 3;
+}
+
+message RevokeWorkerRequest {
+  WorkerID worker_id = 1;
+}
+
+message RevokeWorkerResponse {
+  // Jobs that were running on the worker and have been requeued.
+  int32 requeued_jobs = 1;
+}
+
+// Operator-only actions. Requires the coordinator's API token.
+service AdminService {
+  // Creates an expiring, limited-use token that lets new workers enrol.
+  rpc CreateEnrollmentToken(CreateEnrollmentTokenRequest) returns (CreateEnrollmentTokenResponse);
+
+  // Revokes a worker's credential: its later calls are refused and its jobs are requeued at once.
+  rpc RevokeWorker(RevokeWorkerRequest) returns (RevokeWorkerResponse);
+}

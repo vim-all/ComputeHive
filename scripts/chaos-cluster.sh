@@ -19,7 +19,7 @@ field() { sed -n "s/^$1: *//p" | head -1; }   # field <name>: extract "name:   v
 report() { [ -n "${CHAOS_REPORT:-}" ] && echo "$1 $2" >> "$CHAOS_REPORT" || true; }
 
 docker compose ps --status running --services | grep -q '^worker-' || { echo "cluster is not running: run 'make up'" >&2; exit 1; }
-alive=$("$CLI" workers | grep -c ' true ' || true)
+alive=$("$CLI" workers | grep -cE ' (ready|waiting|running) ' || true)
 [ "$alive" -ge 2 ] || { echo "need at least 2 live workers, found $alive" >&2; exit 1; }
 
 fail=0

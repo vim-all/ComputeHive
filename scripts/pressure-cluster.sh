@@ -6,9 +6,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 CLI="${CLI:-./bin/computehive}"
-# Same environment the Makefile gives compose: without DOCKER_GID the worker cannot use the Docker socket.
-export DOCKER_GID="${DOCKER_GID:-$(stat -c %g /var/run/docker.sock 2>/dev/null || echo 999)}"
-export COMPUTEHIVE_WORK_DIR="${COMPUTEHIVE_WORK_DIR:-/tmp/computehive-work}"
+. scripts/env.sh
 JOBS="${1:-6}"
 make build >/dev/null
 
@@ -16,6 +14,8 @@ docker compose ps --status running --services | grep -q '^worker-1$' || { echo "
 cleanup() { docker compose --profile pressure rm -sf worker-hot >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
+# worker-hot is a brand-new identity, so it needs a fresh enrollment token.
+"$CLI" admin enroll --ttl 10m --uses 1 --note "pressure test" > .computehive/enroll.token 2>/dev/null
 echo "== starting worker-hot (RAM_LIMIT_PERCENT=1: permanently over its limit)"
 since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 docker compose --profile pressure up -d --build worker-hot >/dev/null

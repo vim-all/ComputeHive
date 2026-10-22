@@ -45,12 +45,13 @@ type Job struct {
 	TimeoutSeconds int               `json:"timeout_seconds,omitempty"`
 	// Attempt and LeaseToken identify this assignment; the coordinator only commits
 	// a result that presents the token of the current attempt.
-	Attempt         int    `json:"-"`
-	LeaseToken      string `json:"-"`
-	CreatedAtUnix   int64  `json:"-"`
-	AssignedAtUnix  *int64 `json:"-"`
-	StartedAtUnix   *int64 `json:"-"`
-	CompletedAtUnix *int64 `json:"-"`
+	Attempt         int      `json:"-"`
+	LeaseToken      string   `json:"-"`
+	NetworkHosts    []string `json:"-"` // hosts the job asked to reach; honoured only if the contributor allows
+	CreatedAtUnix   int64    `json:"-"`
+	AssignedAtUnix  *int64   `json:"-"`
+	StartedAtUnix   *int64   `json:"-"`
+	CompletedAtUnix *int64   `json:"-"`
 }
 
 func (j *Job) UnmarshalJSON(data []byte) error {
@@ -323,7 +324,9 @@ type JobResult struct {
 	Stderr            string    `json:"stderr,omitempty"`
 	Error             string    `json:"error,omitempty"`
 	// FailureReason is "job_exit", "timeout", "infra" or "evicted" (see the coordinator's retry policy).
-	FailureReason   string           `json:"failure_reason,omitempty"`
+	FailureReason string `json:"failure_reason,omitempty"`
+	// OutputDigest fingerprints exit code, stdout and output files, for verify=true jobs.
+	OutputDigest    string           `json:"output_digest,omitempty"`
 	OutputURI       string           `json:"output_uri,omitempty"`
 	OutputAPIURL    string           `json:"output_api_url,omitempty"`
 	OutputPublicURL string           `json:"output_public_url,omitempty"`

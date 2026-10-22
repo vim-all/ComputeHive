@@ -31,8 +31,10 @@ func needDocker(t *testing.T) {
 }
 
 func limited() *DockerExecutor {
+	sb := DefaultSandbox()
+	sb.Images = ImagePolicy{Allow: []string{testImage}} // the contributor allows the test image
 	return NewDockerExecutor("docker", "limits-test", false, "/computehive/output",
-		Limits{DefaultMemoryMB: 64, DefaultCPUs: 0.5, PidsLimit: 32, StopGrace: time.Second})
+		Limits{DefaultMemoryMB: 64, DefaultCPUs: 0.5, PidsLimit: 32, StopGrace: time.Second}, sb)
 }
 
 func containerExists(name string) bool {

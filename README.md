@@ -84,14 +84,58 @@ or behind NAT. `https://` artifact URLs (S3/R2, as used by the desktop client) s
 
 ## Joining a worker from another machine
 
+On the coordinator host, mint a one-hour, single-use enrollment token (the secrets live in `.computehive/`):
+
 ```bash
-make build
-./bin/computehive worker join --coordinator <coordinator-host>:50051
+make enroll                      # prints a token like chet_...
+cp .computehive/ca.crt /path/to/the/contributor/   # the cluster CA; it is public
 ```
 
-`worker join` checks Docker, coordinator reachability and the worker binary, then runs the
-worker in the foreground. `--token` is accepted but **enrollment tokens are not enforced
-yet** (planned security phase); do not expose the coordinator to untrusted networks.
+On the contributor's machine:
+
+```bash
+make build
+./bin/computehive worker join --coordinator <coordinator-host>:50051 --ca ca.crt --token chet_...
+```
+
+`worker join` checks Docker, coordinator reachability and the worker binary, enrols the worker once (it then keeps its own
+revocable credential in `~/.local/state/computehive/<id>/credential`), and runs it in the foreground. Revoke a worker with
+`computehive admin revoke <worker-id>`.
+
+## Contributor controls
+
+The person who owns the machine decides what runs on it. These talk to the worker over a private Unix socket:
+
+```bash
+computehive worker status                                  # state, why it is not taking jobs, resources, policy
+computehive worker pause [--now]                           # stop taking jobs (--now also hands back the running job)
+computehive worker resume
+computehive worker kill                                    # kill switch: stop everything immediately and exit
+computehive worker history                                 # exactly what ran here (image, command, env NAMES, outcome)
+computehive worker policy set max_cpus=2 max_memory_mb=4096 schedule=22:00-07:00 idle_only=true
+computehive worker policy set allow_network=true allowed_hosts=pypi.org     # off by default
+```
+
+The policy is enforced on the worker itself, so the cluster cannot override it.
+
+## Security model (summary)
+
+Jobs are treated as untrusted and possibly malicious; see [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) for the full model,
+including residual risks.
+
+- **Sandbox per job:** non-root, all capabilities dropped, `no-new-privileges`, read-only root filesystem, default seccomp
+  profile, no network, no Docker socket, only its own work directory mounted, memory/swap/CPU/PID/file limits, wall-clock timeout
+  with forced kill, disk quota and capped logs. A final audit refuses to start any container whose flags weaken this.
+- **No surprises on your Docker:** images never pulled, registry logins never used, uploaded image archives may not retag your
+  images, and everything a job created is removed afterwards.
+- **Optional network:** only when the job asks, your policy allows the host, and traffic goes through a filtering proxy that
+  refuses private, loopback and cloud-metadata addresses.
+- **gVisor** (`ISOLATION=auto|runc|gvisor`) when available: [`docs/GVISOR.md`](docs/GVISOR.md) (implemented, not verified here).
+- **Trust:** TLS 1.3 (mTLS optional), expiring enrollment tokens, hashed revocable per-worker credentials, an API token for
+  submitters, per-identity rate limits, validated inputs. `AUTH_DISABLED` / `ALLOW_INSECURE` exist for development and log loudly.
+- **Result integrity:** `computehive submit DIR --verify` runs the job on two different workers and accepts it only if their
+  outputs match. Costs 2x, needs a deterministic job, and detects disagreement without knowing who lied.
+- **Prove it yourself:** `make hostile` runs the hostile-job suite (needs Docker).
 
 ## Make targets
 
@@ -105,6 +149,9 @@ yet** (planned security phase); do not expose the coordinator to untrusted netwo
 | `make proto` | regenerate protobuf Go code |
 | `make chaos` | fault injection: in-process suite plus `docker kill` of real workers |
 | `make pressure` | overloaded-worker check on the running cluster |
+| `make hostile` | hostile-job suite: every attack must be contained and the host must stay healthy |
+| `make enroll` | print a one-hour, single-use token for joining a worker |
+| `make reset` | stop the cluster and delete all its data and secrets |
 | `make bench` | not implemented yet; exits non-zero with a message |
 
 CI (`.github/workflows/ci.yml`) runs gofmt, `go vet`, `staticcheck`, `go test -race`, an
@@ -172,9 +219,10 @@ Prove it on your machine: `make pressure` (a worker with a 1% RAM limit must sho
 
 ## Known limitations (today)
 
-- No authentication or TLS between components; run on a trusted network only.
-- Job containers are resource-limited and have no network, but the full sandbox hardening
-  (non-root, dropped capabilities, read-only rootfs, seccomp, gVisor) is not done yet.
+- Job output files are kept on the coordinator until you delete them (no retention policy yet).
+- gVisor support is implemented but was not verified (no `runsc` on the development machine).
+- Network jobs need the worker to run directly on the host, not in a container.
+- Containers share the host kernel (unless gVisor is used): a kernel vulnerability is the main residual risk.
 - Scheduling is first-come-first-served pull with capability filtering (no best-fit scoring yet).
 - Single-node Redis only (the Lua scripts address keys dynamically; Redis Cluster would need hash tags).
 - Metrics and the Grafana dashboard are not wired yet (Prometheus scrape target is down by design).

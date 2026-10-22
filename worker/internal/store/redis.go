@@ -4,7 +4,10 @@ package store
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
+	"log/slog"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -13,6 +16,7 @@ import (
 	"github.com/vim-all/ComputeHive/worker/internal/domain"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 )
@@ -22,17 +26,28 @@ import (
 type Store struct {
 	cfg config.Config
 
-	mu         sync.Mutex
-	conn       *grpc.ClientConn
-	client     pb.WorkerServiceClient
-	registered bool
-	leases     map[string]string // jobID -> lease token of the attempt this worker holds
-	lastRes    *pb.ResourceSpec  // last resources announced, reused when re-registering
+	mu          sync.Mutex
+	conn        *grpc.ClientConn
+	client      pb.WorkerServiceClient
+	registered  bool
+	leases      map[string]string // jobID -> lease token of the attempt this worker holds
+	lastRes     *pb.ResourceSpec  // last resources announced, reused when re-registering
+	isolation   string            // capabilities announced at (re)registration
+	allowsNet   bool
+	cred        *credentialStore
+	tlsCfg      *tls.Config
+	tlsErr      error
+	warnedPlain bool
 }
 
 func New(cfg config.Config) *Store {
-	return &Store{cfg: cfg, leases: make(map[string]string)}
+	s := &Store{cfg: cfg, leases: make(map[string]string), cred: loadCredential(filepath.Join(cfg.StateDir, "credential"))}
+	s.tlsCfg, s.tlsErr = BuildTLS(cfg)
+	return s
 }
+
+// TLS returns the TLS configuration in use (nil: plaintext), shared with the artifact fetcher.
+func (s *Store) TLS() *tls.Config { return s.tlsCfg }
 
 // Close releases the connection.
 func (s *Store) Close() error {
@@ -50,7 +65,17 @@ func (s *Store) connect() (pb.WorkerServiceClient, error) {
 	if s.client == nil {
 		// NewClient connects lazily; an unreachable coordinator surfaces as an RPC
 		// error (and is retried by the agent loop) instead of blocking here.
-		conn, err := grpc.NewClient(s.cfg.CoordinatorAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if s.tlsErr != nil {
+			return nil, fmt.Errorf("tls configuration: %w", s.tlsErr)
+		}
+		transport := insecure.NewCredentials()
+		if s.tlsCfg != nil {
+			transport = credentials.NewTLS(s.tlsCfg)
+		} else if !s.warnedPlain {
+			s.warnedPlain = true
+			slog.Warn("connecting to the coordinator WITHOUT TLS: the worker credential and all job data cross the network in clear text. Set COORDINATOR_TLS_CA.")
+		}
+		conn, err := grpc.NewClient(s.cfg.CoordinatorAddr, grpc.WithTransportCredentials(transport), grpc.WithPerRPCCredentials(perRPC{s.cred}))
 		if err != nil {
 			return nil, fmt.Errorf("dial coordinator: %w", err)
 		}
@@ -71,17 +96,32 @@ func (s *Store) register(ctx context.Context, client pb.WorkerServiceClient, res
 		s.lastRes = res
 	}
 	s.mu.Unlock()
+	token := ""
+	if s.cred.get() == "" {
+		if token = strings.TrimSpace(s.cfg.EnrollmentToken); token == "" {
+			return errNoEnrollment
+		}
+	}
 	resp, err := client.RegisterWorker(ctx, &pb.RegisterWorkerRequest{
+		EnrollmentToken:    token,
 		AvailableResources: res,
 		WorkerVersion:      s.cfg.Version,
 		WorkerId:           s.cfg.WorkerID,
 		MaxJobs:            1,
+		Isolation:          s.isolation,
+		AllowsNetwork:      s.allowsNet,
 	})
 	if err != nil {
 		return fmt.Errorf("register worker %s: %w", s.cfg.WorkerID, err)
 	}
 	if got := resp.GetWorkerId().GetValue(); got != s.cfg.WorkerID {
 		return fmt.Errorf("coordinator assigned id %q, wanted %q", got, s.cfg.WorkerID)
+	}
+	if issued := resp.GetCredential(); issued != "" {
+		if err := s.cred.set(issued); err != nil {
+			return fmt.Errorf("enrolled, but could not save the credential (the worker would have to be re-enrolled): %w", err)
+		}
+		slog.Info("enrolled with the coordinator; credential saved", "worker_id", s.cfg.WorkerID)
 	}
 	s.mu.Lock()
 	s.registered = true
@@ -147,6 +187,7 @@ func (s *Store) PullJob(ctx context.Context) (*domain.Job, bool, error) {
 		ArtifactSHA256: strings.TrimSpace(m.GetArtifactSha256()),
 		Attempt:        int(m.GetAttempt()),
 		LeaseToken:     m.GetLeaseToken(),
+		NetworkHosts:   append([]string(nil), m.GetNetworkHosts()...),
 	}
 	if res != nil {
 		job.CPUCores = float64(res.GetCpuCores())
@@ -166,6 +207,9 @@ func (s *Store) PublishHeartbeat(ctx context.Context, hb domain.WorkerHeartbeat)
 	if err != nil {
 		return nil, err
 	}
+	s.mu.Lock()
+	s.isolation, s.allowsNet = hb.Isolation, hb.AllowsNetwork
+	s.mu.Unlock()
 	res := &pb.ResourceSpec{
 		CpuCores: int32(hb.Resources.CPUCores),
 		MemoryMb: int32(hb.Resources.MemoryMB),
@@ -181,6 +225,8 @@ func (s *Store) PublishHeartbeat(ctx context.Context, hb domain.WorkerHeartbeat)
 		Draining:           hb.Draining,
 		MaxJobs:            int32(max(hb.MaxJobs, 1)),
 		Usage:              usageToPB(hb),
+		Isolation:          hb.Isolation,
+		AllowsNetwork:      hb.AllowsNetwork,
 	}
 	for _, id := range hb.RunningJobs {
 		req.RunningJobs = append(req.RunningJobs, &pb.JobID{Value: id})
@@ -256,6 +302,7 @@ func (s *Store) PublishJobResult(ctx context.Context, result domain.JobResult) (
 			OutputArtifacts: toPBOutputArtifacts(result.OutputArtifacts),
 			FinishedAtUnix:  result.FinishedAt.UTC().Unix(),
 			FailureReason:   result.FailureReason,
+			OutputDigest:    result.OutputDigest,
 		},
 	})
 	if err != nil {

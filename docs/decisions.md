@@ -231,3 +231,94 @@ gracefully (SIGTERM, then SIGKILL after `STOP_GRACE`), report it `evicted`, and 
 Verified: unit (monitor, agent, queue, config), real containers (limits, OOM, fork bomb, timeout, orphan sweep, real memory pressure),
 and the running cluster (`make pressure`). Not done: per-job disk quota and ulimits (Phase 4 sandboxing); GPU admission limits;
 `max_jobs > 1`. The macOS memory path of the old reporter is no longer used by the monitor (gopsutil handles it) but was not tested.
+
+---
+
+## Phase 4: sandboxing and trust for contributor mode
+
+### D-32: Threat model first; every mitigation names the test that proves it
+- `docs/THREAT_MODEL.md` was written before the implementation (assets, six attackers, trust boundaries, mitigations with
+  evidence, residual risks). Anything not demonstrated is listed as residual rather than claimed.
+
+### D-33: Defence in depth at the point of `docker run`
+- **Decision:** (1) strict builder: non-root user, `--cap-drop ALL`, `no-new-privileges`, `--read-only`, noexec `/tmp` tmpfs,
+  `--init`, ulimits (`nofile`, `core=0`, `fsize`), memory=swap, PIDs, CPUs, `--network none`, `--pull never`; (2) an **argument
+  audit** that parses the final flags with a whitelist and refuses anything else before Docker runs (`--privileged`, `--cap-add`,
+  `--device`, host namespaces, extra mounts, the Docker socket, unconfined seccomp/AppArmor, root); (3) worker-side
+  re-validation of image refs, env names and command, because the coordinator may be compromised.
+- **Why an audit as well as a careful builder:** the builder is the thing most likely to gain a bug later; the audit is a
+  second, simpler implementation of the invariant. 30+ unsafe variants are tested to be refused.
+- **Evidence:** `TestAuditRefusesEveryUnsafeVariant`, `TestHostile` (real containers).
+
+### D-34: The hostile suite tests behaviour, and it found problems in my own attack scripts
+- Real malicious scripts (network, host files, writes outside the sandbox, privilege escalation, Docker socket, metadata, fork
+  bomb, memory, CPU spin, disk fill, log spam) run through the production executor; each prints BLOCKED/ESCAPED and the host is
+  checked afterwards (no containers left, secret file untouched, Docker alive, memory and disk deltas small).
+- Several early "failures" were bugs in the attacks, not escapes (grep walking `/proc`, a `nc` listener that never exits,
+  `/proc/kcore` being a writable mask over `/dev/null`). Each was fixed by making the *attack* meaningful, never by weakening the
+  assertion. Measured: fork bomb 29 of 500 processes; infinite loop killed at 3.3 s; 4 busy threads held to 0.48 of 0.5 CPU;
+  OOM-kill exit 137; disk fill stopped at 119-125 MB against a 50 MB cap.
+
+### D-35: Disk quota by watcher, not filesystem (an honest limitation)
+- Docker cannot size-limit a bind mount without root-level filesystem features, so a watcher polls the work directory and
+  kills the job; `RLIMIT_FSIZE` caps single files. Overshoot is measured (about 2.4x at memory speed) and listed as a residual
+  risk, with the 90% host-disk rule as a second line.
+
+### D-36: Uploaded image archives cannot retag the contributor's images
+- `docker load` honours whatever tags a tar carries. The worker reads `manifest.json` first and refuses any tag outside
+  `computehive-job:` / `computehive/`. The worker also runs Docker with an **empty `DOCKER_CONFIG`** (so stored registry logins are
+  never used for a stranger) and `--pull never`. Images that are not shipped as artifacts need an explicit contributor allow list.
+
+### D-37: Network egress redesigned after a real-Docker test disproved the first design
+- **First design:** proxy listening on the per-job network's gateway address. **Test result:** Docker `--internal` networks cannot
+  reach the gateway, so nothing worked (the test failed for every check).
+- **Shipped design:** per-job proxy **sidecar** (the worker's own static binary mounted read-only into an empty image, non-root,
+  all caps dropped, read-only, small limits) attached to the internal network and to the default bridge. The job can reach only the
+  sidecar. This also removed the earlier residual risk (host services on wildcard addresses): measured unreachable.
+- **Proxy rules:** names only (never IP literals), resolve itself, refuse private/loopback/link-local/CGNAT/NAT64/reserved
+  after resolution, dial the validated IP (no rebinding), try each validated address (a v6-first answer on a v4-only bridge),
+  ports 80/443 only, concurrency bounded.
+- **Also fixed here:** my CONNECT probes in the test used `nc` that exited before reading the reply, which would have made the
+  denial checks pass vacuously; the allowed tunnel now has to succeed to prove the probe works.
+
+### D-38: gVisor is implemented and surfaced, but NOT verified here
+- Auto-detected via `docker info`, `--runtime runsc`, isolation level reported in heartbeats and enforceable by both submitter
+  (`--isolation gvisor`) and contributor (`require_gvisor`). No `runsc` exists on the development machine, so no container ever ran
+  under it; documented in `docs/GVISOR.md`.
+
+### D-39: The contributor, not the cluster, has the last word
+- A local policy (`policy.json`, 0600) is enforced **on the worker**: donated CPU/RAM/disk, schedule window, idle-only, pause,
+  kill switch, network allow-list, image allow/deny, gVisor requirement. The agent re-checks every job against it, so a
+  compromised coordinator cannot override it; refused jobs are handed back as `evicted` (not the job's fault). The control API is a
+  Unix socket (dir 0700, socket 0600). History records what ran (image, command, env **names only**, outcome).
+- Policy updates are validated and applied atomically; unknown fields are rejected (a typo must not leave a protection off).
+
+### D-40: Secure by default, with explicit, loud development opt-outs
+- The coordinator refuses to start without an API token and TLS (`AUTH_DISABLED` and `ALLOW_INSECURE` exist for development and
+  log warnings). `make up` generates a random API token, a private CA and server certificate under `.computehive/`, so the
+  five-minute quickstart is still two commands.
+- **Enrollment:** operator mints an expiring, limited-use token; a worker presents it once and receives a per-worker credential
+  (hashed in Redis, revocable). A token holder **cannot take over an existing identity**; revoked ids cannot re-enrol; revocation
+  requeues the worker's jobs without burning attempts.
+- **TLS 1.3**, verified server name; **mTLS** supported and tested (client cert from another CA is refused).
+- **Rate limiting** runs on source address before any secret is examined (throttles token guessing), then per worker / per token.
+
+### D-41: Output files are returned through the coordinator, not only S3
+- Found by the first verified job: any worker without an S3 bucket failed every job that wrote a file (A22). Outputs are now
+  uploaded to the coordinator by the lease holder only (re-checked after the upload), SHA-256 verified, stored per attempt, and
+  downloaded with `result --download` (hash re-verified, hostile file names rejected). Retention/cleanup is not implemented yet.
+
+### D-42: Redundant execution ("verify"), simple and honest
+- **Decision:** a verified job is two replicas created atomically; the claim script never gives both to one worker; each replica
+  waits in `VERIFYING` until the other finishes; equal output digests (exit code + full stdout + every output file) -> both
+  `SUCCEEDED`, otherwise both `FAILED (verification_mismatch)`. A replica whose peer fails, is cancelled, dies or never runs (for
+  example a one-worker cluster) fails with a clear reason; a timeout (default 10 min) stops it waiting forever.
+- **Tradeoff (documented):** 2x cost; only for deterministic jobs (a non-deterministic job mismatches - measured with `examples/hello`);
+  detects disagreement but cannot say which worker lied; two colluding workers can agree on a wrong answer.
+- **Evidence:** 6 queue tests plus the real cluster run (`verified: match` for `examples/deterministic`).
+
+### Phase 4 outcome
+Verified: hostile suite on real containers, argument audit, image policy, auth/TLS/mTLS/rate-limit/revocation end to end, contributor
+controls, network allow-list on real Docker, verification, and the secured cluster (`make up`, `demo`, `chaos`, `pressure`).
+Not verified: gVisor; Windows/macOS Docker Desktop behaviour; network mode when the worker itself runs in a container (unsupported).
+Not done: output retention; per-user quotas (Phase 5); the Tauri client's contributor UI (Phase 7).

@@ -21,17 +21,35 @@ var sha256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 // ReadyFunc reports whether dependencies (Redis) are reachable.
 type ReadyFunc func(ctx context.Context) error
 
+// Authz decides who may use the artifact store. A nil Authz leaves it open (tests, dev mode).
+type Authz interface {
+	HTTPWriteAllowed(r *http.Request) bool
+	HTTPReadAllowed(r *http.Request) bool
+	AllowAnon(remote string) bool
+	WorkerFromRequest(r *http.Request) (workerID string, ok bool)
+}
+
+// OutputGuard says whether workerID may store output files for jobID right now, and for which attempt.
+// Only the worker that currently holds the job's lease may: a worker whose lease was revoked or
+// superseded (a zombie) cannot overwrite the real result.
+type OutputGuard func(ctx context.Context, workerID, jobID string) (attempt int, ok bool)
+
 // New returns the HTTP handler. Artifacts are stored under dir, named by their SHA-256.
-func New(dir string, maxBytes int64, ready ReadyFunc) (http.Handler, error) {
+func New(dir string, maxBytes int64, ready ReadyFunc, authz Authz, outputs ...OutputGuard) (http.Handler, error) {
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return nil, fmt.Errorf("create artifact dir %s: %w", dir, err)
 	}
-	s := &server{dir: dir, maxBytes: maxBytes, ready: ready}
+	s := &server{dir: dir, maxBytes: maxBytes, ready: ready, authz: authz}
+	if len(outputs) > 0 {
+		s.outputs = outputs[0]
+	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("PUT /artifacts/{sha}", s.putArtifact)
-	mux.HandleFunc("GET /artifacts/{sha}", s.getArtifact)
-	mux.HandleFunc("HEAD /artifacts/{sha}", s.getArtifact)
+	mux.HandleFunc("PUT /artifacts/{sha}", s.guard(true, s.putArtifact))
+	mux.HandleFunc("GET /artifacts/{sha}", s.guard(false, s.getArtifact))
+	mux.HandleFunc("HEAD /artifacts/{sha}", s.guard(false, s.getArtifact))
+	mux.HandleFunc("PUT /outputs/{job}/{path...}", s.putOutput)
+	mux.HandleFunc("GET /outputs/{job}/{attempt}/{path...}", s.guard(false, s.getOutput))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, "ok\n")
 	})
@@ -43,6 +61,30 @@ type server struct {
 	dir      string
 	maxBytes int64
 	ready    ReadyFunc
+	authz    Authz
+	outputs  OutputGuard
+}
+
+// guard rate-limits by source address, then requires the right credential for the operation.
+func (s *server) guard(write bool, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.authz != nil {
+			if !s.authz.AllowAnon(r.RemoteAddr) {
+				http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
+				return
+			}
+			ok := s.authz.HTTPReadAllowed(r)
+			if write {
+				ok = s.authz.HTTPWriteAllowed(r)
+			}
+			if !ok {
+				w.Header().Set("WWW-Authenticate", `Bearer realm="computehive"`)
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+		}
+		next(w, r)
+	}
 }
 
 func (s *server) path(sha string) string { return filepath.Join(s.dir, sha) }

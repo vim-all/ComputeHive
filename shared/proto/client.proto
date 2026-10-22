@@ -21,6 +21,12 @@ message SubmitJobRequest {
   string user = 10;
   // Run on two workers and compare output hashes (untrusted-worker mitigation).
   bool verify = 11;
+  // Only run on workers providing at least this isolation: "" (any) or "gvisor".
+  string required_isolation = 12;
+  // Hosts the job needs to reach (for example "pypi.org"). Off by default: jobs get no network.
+  // Honoured only by workers whose contributor allows network jobs and lists the host; the
+  // worker's filtering proxy still refuses private, loopback and metadata addresses.
+  repeated string network_hosts = 13;
 }
 
 message SubmitJobResponse {
@@ -43,6 +49,8 @@ message GetJobStatusResponse {
   int32 max_attempts = 7;
   string last_failure = 8;
   int64 queue_seq = 9;
+  // For jobs submitted with verify=true: "pending", "match", "mismatch", "timeout" or "unavailable".
+  string verification = 10;
 }
 
 message CancelJobRequest {
@@ -79,6 +87,8 @@ message WorkerInfo {
   bool overloaded = 8;
   bool draining = 9;
   ResourceUsage usage = 10;
+  string isolation = 11;
+  bool allows_network = 12;
 }
 
 message ListWorkersRequest {}

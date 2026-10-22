@@ -71,6 +71,19 @@ type Config struct {
 	DefaultJobCPUs     float64
 	PidsLimit          int
 	StopGrace          time.Duration
+
+	// Contributor controls and sandbox.
+	StateDir      string // holds policy.json, history.jsonl and the control socket (private, mode 0700)
+	ControlSocket string // Unix socket for pause/resume/kill/policy/history (default <StateDir>/control.sock)
+	Isolation     string // auto (use gVisor if the Docker daemon has it), runc, or gvisor (require it)
+	JobUser       string // container user for jobs ("" = auto; root is refused)
+
+	// Trust: how this worker authenticates to the coordinator.
+	CoordinatorCA            string // PEM CA that signed the coordinator's certificate (enables TLS)
+	CoordinatorTLSServerName string // name to verify in the server certificate (default: the host in coordinator-addr)
+	CoordinatorTLSCert       string // optional client certificate for mutual TLS
+	CoordinatorTLSKey        string
+	EnrollmentToken          string // one-time token to enrol; not needed once the worker has its credential
 }
 
 // MonitorConfig extracts the overload thresholds.
@@ -145,6 +158,24 @@ func parse(args []string, getenv func(string) string) (Config, error) {
 		DefaultJobCPUs:     envFloat(getenv, "DEFAULT_JOB_CPUS", 1),
 		PidsLimit:          envInt(getenv, "JOB_PIDS_LIMIT", 256),
 		StopGrace:          envDuration(getenv, "STOP_GRACE", 5*time.Second),
+
+		StateDir:      envOr(getenv, "STATE_DIR", ""),
+		ControlSocket: envOr(getenv, "CONTROL_SOCKET", ""),
+		Isolation:     envOr(getenv, "ISOLATION", "auto"),
+		JobUser:       envOr(getenv, "JOB_USER", ""),
+
+		CoordinatorCA:            envOr(getenv, "COORDINATOR_TLS_CA", ""),
+		CoordinatorTLSServerName: envOr(getenv, "COORDINATOR_TLS_SERVER_NAME", ""),
+		CoordinatorTLSCert:       envOr(getenv, "COORDINATOR_TLS_CERT", ""),
+		CoordinatorTLSKey:        envOr(getenv, "COORDINATOR_TLS_KEY", ""),
+		EnrollmentToken:          envOr(getenv, "ENROLLMENT_TOKEN", ""),
+	}
+	if f := envOr(getenv, "ENROLLMENT_TOKEN_FILE", ""); f != "" && cfg.EnrollmentToken == "" {
+		raw, err := os.ReadFile(f)
+		if err != nil {
+			return Config{}, fmt.Errorf("read ENROLLMENT_TOKEN_FILE: %w", err)
+		}
+		cfg.EnrollmentToken = strings.TrimSpace(string(raw))
 	}
 	if !cfg.S3SignRequests && strings.TrimSpace(getenv("S3_SIGN_REQUESTS")) == "" {
 		cfg.S3SignRequests = strings.TrimSpace(cfg.S3AccessKeyID) != "" && strings.TrimSpace(cfg.S3SecretAccessKey) != ""
@@ -212,6 +243,15 @@ func parse(args []string, getenv func(string) string) (Config, error) {
 	fs.Int64Var(&cfg.DefaultJobMemoryMB, "default-job-memory-mb", cfg.DefaultJobMemoryMB, "Memory cap for jobs that declare none (also --memory-swap)")
 	fs.Float64Var(&cfg.DefaultJobCPUs, "default-job-cpus", cfg.DefaultJobCPUs, "CPU cap for jobs that declare none")
 	fs.IntVar(&cfg.PidsLimit, "job-pids-limit", cfg.PidsLimit, "Maximum processes per job container")
+	fs.StringVar(&cfg.StateDir, "state-dir", cfg.StateDir, "Directory for policy.json, history and the control socket (default ~/.local/state/computehive/<worker-id>)")
+	fs.StringVar(&cfg.ControlSocket, "control-socket", cfg.ControlSocket, "Unix socket for local pause/resume/kill/policy control (default <state-dir>/control.sock)")
+	fs.StringVar(&cfg.Isolation, "isolation", cfg.Isolation, "Container isolation: auto (gVisor if available), runc, or gvisor (required)")
+	fs.StringVar(&cfg.CoordinatorCA, "coordinator-ca", cfg.CoordinatorCA, "PEM CA file that signed the coordinator's certificate (enables TLS)")
+	fs.StringVar(&cfg.CoordinatorTLSServerName, "coordinator-tls-server-name", cfg.CoordinatorTLSServerName, "Name expected in the coordinator's certificate (default: host of coordinator-addr)")
+	fs.StringVar(&cfg.CoordinatorTLSCert, "tls-cert", cfg.CoordinatorTLSCert, "Client certificate for mutual TLS")
+	fs.StringVar(&cfg.CoordinatorTLSKey, "tls-key", cfg.CoordinatorTLSKey, "Client certificate key for mutual TLS")
+	fs.StringVar(&cfg.EnrollmentToken, "enrollment-token", cfg.EnrollmentToken, "One-time enrollment token from the operator (prefer ENROLLMENT_TOKEN_FILE)")
+	fs.StringVar(&cfg.JobUser, "job-user", cfg.JobUser, "Container user for jobs (default: this process's uid, or 65534 if root; root is refused)")
 	fs.DurationVar(&cfg.StopGrace, "stop-grace", cfg.StopGrace, "SIGTERM-to-SIGKILL window when stopping a job container")
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
@@ -257,6 +297,27 @@ func parse(args []string, getenv func(string) string) (Config, error) {
 	}
 	if cfg.DefaultJobMemoryMB <= 0 || cfg.DefaultJobCPUs <= 0 || cfg.PidsLimit <= 0 {
 		return Config{}, fmt.Errorf("default-job-memory-mb, default-job-cpus and job-pids-limit must be > 0: every job container needs hard caps")
+	}
+	if (cfg.CoordinatorTLSCert == "") != (cfg.CoordinatorTLSKey == "") {
+		return Config{}, fmt.Errorf("tls-cert and tls-key must be set together")
+	}
+	if cfg.CoordinatorTLSCert != "" && cfg.CoordinatorCA == "" {
+		return Config{}, fmt.Errorf("a client certificate needs coordinator-ca: mutual TLS requires TLS")
+	}
+	switch cfg.Isolation {
+	case "auto", "runc", "gvisor":
+	default:
+		return Config{}, fmt.Errorf("isolation %q must be auto, runc or gvisor", cfg.Isolation)
+	}
+	if strings.TrimSpace(cfg.StateDir) == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			cfg.StateDir = filepath.Join(home, ".local", "state", "computehive", cfg.WorkerID)
+		} else {
+			cfg.StateDir = filepath.Join(os.TempDir(), "computehive-state-"+cfg.WorkerID)
+		}
+	}
+	if strings.TrimSpace(cfg.ControlSocket) == "" {
+		cfg.ControlSocket = filepath.Join(cfg.StateDir, "control.sock")
 	}
 	if cfg.StopGrace < 0 {
 		return Config{}, fmt.Errorf("stop-grace must be >= 0")

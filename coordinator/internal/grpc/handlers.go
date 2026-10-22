@@ -2,10 +2,12 @@ package grpcserver
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"regexp"
 	"time"
 
+	"coordinator/internal/auth"
 	"coordinator/internal/queue"
 	pb "coordinator/pkg/pb"
 
@@ -31,12 +33,32 @@ func (s *Server) RegisterWorker(ctx context.Context, req *pb.RegisterWorkerReque
 	if len(req.GetWorkerVersion()) > 64 {
 		return nil, status.Error(codes.InvalidArgument, "worker_version too long")
 	}
+	credential := ""
+	if s.authEnforced() {
+		if workerID == "" || req.GetWorkerId() == "" {
+			return nil, status.Error(codes.InvalidArgument, "worker_id is required")
+		}
+		if id := auth.IdentityFrom(ctx); id.Kind == "enrolling" {
+			cred, err := s.auth.Enroll(ctx, workerID, req.GetEnrollmentToken())
+			switch {
+			case errors.Is(err, auth.ErrBadToken):
+				return nil, status.Error(codes.Unauthenticated, err.Error())
+			case errors.Is(err, auth.ErrAlreadyEnrolled):
+				return nil, status.Error(codes.AlreadyExists, err.Error())
+			case errors.Is(err, auth.ErrRevoked):
+				return nil, status.Error(codes.PermissionDenied, err.Error())
+			case err != nil:
+				return nil, internal("enroll worker", err)
+			}
+			credential = cred
+		}
+	}
 	res := req.GetAvailableResources()
 	// Registration is a heartbeat that also (re)announces capacity; re-registering an
 	// existing ID keeps the worker's identity and any jobs it still owns.
 	if _, err := s.queue.Heartbeat(ctx, queue.WorkerReport{
 		ID: workerID, CPU: int(res.GetCpuCores()), MemMB: int(res.GetMemoryMb()), GPU: int(res.GetGpuCount()),
-		MaxJobs: int(req.GetMaxJobs()), Version: req.GetWorkerVersion(),
+		MaxJobs: int(req.GetMaxJobs()), Version: req.GetWorkerVersion(), Isolation: req.GetIsolation(), AllowsNet: req.GetAllowsNetwork(),
 	}); err != nil {
 		return nil, internal("register worker", err)
 	}
@@ -44,6 +66,7 @@ func (s *Server) RegisterWorker(ctx context.Context, req *pb.RegisterWorkerReque
 	return &pb.RegisterWorkerResponse{
 		WorkerId:                 &pb.WorkerID{Value: workerID},
 		HeartbeatIntervalSeconds: int32(s.cfg.HeartbeatInterval.Seconds() + 0.5),
+		Credential:               credential,
 	}, nil
 }
 
@@ -67,7 +90,7 @@ func (s *Server) Heartbeat(ctx context.Context, req *pb.HeartbeatRequest) (*pb.H
 	cancel, err := s.queue.Heartbeat(ctx, queue.WorkerReport{
 		ID: workerID, CPU: int(res.GetCpuCores()), MemMB: int(res.GetMemoryMb()), GPU: int(res.GetGpuCount()),
 		Overloaded: req.GetOverloaded(), Draining: req.GetDraining(), MaxJobs: int(req.GetMaxJobs()), Running: running,
-		Usage: usageFromPB(req.GetUsage()),
+		Usage: usageFromPB(req.GetUsage()), Isolation: req.GetIsolation(), AllowsNet: req.GetAllowsNetwork(),
 	})
 	if err != nil {
 		return nil, internal("heartbeat", err)
@@ -110,6 +133,7 @@ func (s *Server) RequestJob(ctx context.Context, req *pb.RequestJobRequest) (*pb
 			ArtifactSha256:    sp.ArtifactSHA256,
 			Attempt:           int32(claimed.Attempt),
 			LeaseToken:        claimed.Token,
+			NetworkHosts:      sp.NetworkHosts,
 		},
 	}, nil
 }
@@ -164,7 +188,7 @@ func (s *Server) SubmitResult(ctx context.Context, req *pb.SubmitResultRequest) 
 			ExitCode: r.GetExitCode(), FailureReason: reason,
 			StdoutExcerpt: r.GetStdoutExcerpt(), StderrExcerpt: r.GetStderrExcerpt(),
 			OutputURI: r.GetOutputUri(), OutputAPIURL: r.GetOutputApiUrl(), OutputPublicURL: r.GetOutputPublicUrl(),
-			OutputSizeBytes: r.GetOutputSizeBytes(), FinishedAtUnix: r.GetFinishedAtUnix(),
+			OutputSizeBytes: r.GetOutputSizeBytes(), FinishedAtUnix: r.GetFinishedAtUnix(), OutputDigest: r.GetOutputDigest(),
 		}
 		if res.FinishedAtUnix == 0 {
 			res.FinishedAtUnix = time.Now().Unix()
@@ -209,8 +233,13 @@ func (s *Server) SubmitJob(ctx context.Context, req *pb.SubmitJobRequest) (*pb.S
 		Environment: req.GetEnvironment(), MaxRuntimeSeconds: req.GetMaxRuntimeSeconds(),
 		ArtifactURL: req.GetArtifactUrl(), ArtifactSHA256: req.GetArtifactSha256(),
 		User: req.GetUser(), Verify: req.GetVerify(), CreatedAtUnix: time.Now().Unix(),
+		RequiredIsolation: req.GetRequiredIsolation(), NetworkHosts: req.GetNetworkHosts(),
 	}
-	seq, _, err := s.queue.Enqueue(ctx, spec, int(req.GetMaxAttempts()))
+	enqueue := s.queue.Enqueue
+	if req.GetVerify() {
+		enqueue = s.queue.EnqueuePair // run on two different workers and compare their outputs
+	}
+	seq, _, err := enqueue(ctx, spec, int(req.GetMaxAttempts()))
 	if err != nil {
 		return nil, internal("enqueue job", err)
 	}
@@ -233,6 +262,7 @@ func (s *Server) GetJobStatus(ctx context.Context, req *pb.GetJobStatusRequest) 
 	return &pb.GetJobStatusResponse{
 		Status: stateToPB(j.State), AssignedWorkerId: j.Worker, UpdatedAtUnix: time.Now().Unix(),
 		Attempt: int32(j.Attempt), MaxAttempts: int32(j.MaxAttempts), LastFailure: j.LastFailure, QueueSeq: j.Seq,
+		Verification: j.Verification,
 	}, nil
 }
 
@@ -252,7 +282,8 @@ func (s *Server) GetJobResult(ctx context.Context, req *pb.GetJobResultRequest) 
 	if err != nil {
 		return nil, internal("get result", err)
 	}
-	if rec == nil {
+	if rec == nil || j.State == queue.StateVerifying {
+		// a verified job's result is withheld until both replicas agree
 		return &pb.GetJobResultResponse{Status: stateToPB(j.State), ResultAvailable: false}, nil
 	}
 	resultStatus := stateToPB(j.State)
@@ -303,6 +334,8 @@ func (s *Server) ListWorkers(ctx context.Context, _ *pb.ListWorkersRequest) (*pb
 		}
 		info := &pb.WorkerInfo{
 			Overloaded:        w.Overloaded,
+			Isolation:         w.Isolation,
+			AllowsNetwork:     w.AllowsNetwork,
 			Draining:          w.Draining,
 			Usage:             usage,
 			WorkerId:          &pb.WorkerID{Value: w.ID},
@@ -375,6 +408,8 @@ func stateToPB(state string) pb.Status {
 		return pb.Status_STATUS_DEAD
 	case queue.StateCanceled:
 		return pb.Status_STATUS_CANCELED
+	case queue.StateVerifying:
+		return pb.Status_STATUS_VERIFYING
 	default:
 		return pb.Status_STATUS_UNSPECIFIED
 	}

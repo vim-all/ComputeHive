@@ -35,6 +35,11 @@ type Config struct {
 	Timeout         time.Duration
 	MaxFiles        int
 	MaxBytes        int64
+
+	// Self-hosted mode: with no object-storage bucket, outputs are stored on the coordinator.
+	CoordinatorURL    string                            // e.g. https://coordinator:8080
+	CoordinatorClient *http.Client                      // trusts the cluster CA
+	CoordinatorAuth   func(setHeader func(k, v string)) // worker credential headers
 }
 
 type Manager struct {
@@ -50,6 +55,10 @@ type Manager struct {
 	maxFiles        int
 	maxBytes        int64
 	enabled         bool
+
+	coordURL    string
+	coordClient *http.Client
+	coordAuth   func(setHeader func(k, v string))
 }
 
 type UploadResult struct {
@@ -78,6 +87,13 @@ func NewManager(cfg Config) (*Manager, error) {
 
 	bucketURL := strings.TrimSpace(cfg.BucketURL)
 	if bucketURL == "" {
+		if u := strings.TrimRight(strings.TrimSpace(cfg.CoordinatorURL), "/"); u != "" {
+			manager.coordURL, manager.coordAuth = u, cfg.CoordinatorAuth
+			manager.coordClient = cfg.CoordinatorClient
+			if manager.coordClient == nil {
+				manager.coordClient = &http.Client{Timeout: cfg.Timeout}
+			}
+		}
 		return manager, nil
 	}
 
@@ -123,7 +139,10 @@ func (m *Manager) CollectAndUpload(ctx context.Context, jobID, outputDir string)
 		return UploadResult{}, nil
 	}
 	if !m.enabled {
-		return UploadResult{}, fmt.Errorf("job produced %d output file(s), but object storage output uploads are not configured", len(files))
+		if m.coordURL != "" {
+			return m.uploadToCoordinator(ctx, jobID, files, totalSize)
+		}
+		return UploadResult{}, fmt.Errorf("job produced %d output file(s), but no output storage is configured (set S3_BUCKET, or point the worker at a coordinator with COORDINATOR_HTTP_URL)", len(files))
 	}
 
 	artifacts := make([]domain.OutputArtifact, 0, len(files))
@@ -489,4 +508,63 @@ func sanitizePathComponent(value string) string {
 		return "job"
 	}
 	return clean
+}
+
+// uploadToCoordinator stores each output file on the coordinator. The coordinator accepts a file only
+// from the worker that currently holds the job's lease and verifies the SHA-256 we send.
+func (m *Manager) uploadToCoordinator(ctx context.Context, jobID string, files []collectedFile, total int64) (UploadResult, error) {
+	artifacts := make([]domain.OutputArtifact, 0, len(files))
+	for _, f := range files {
+		uri, err := m.putOne(ctx, jobID, f)
+		if err != nil {
+			return UploadResult{}, err
+		}
+		artifacts = append(artifacts, domain.OutputArtifact{
+			RelativePath: f.RelativePath, URI: uri, SHA256: f.SHA256, SizeBytes: f.SizeBytes, ContentType: f.ContentType,
+		})
+	}
+	return UploadResult{TotalSizeBytes: total, Artifacts: artifacts}, nil
+}
+
+func (m *Manager) putOne(ctx context.Context, jobID string, f collectedFile) (string, error) {
+	file, err := os.Open(f.Path)
+	if err != nil {
+		return "", fmt.Errorf("open output file %s: %w", f.RelativePath, err)
+	}
+	defer file.Close()
+	target := m.coordURL + "/outputs/" + url.PathEscape(jobID) + "/" + escapePath(f.RelativePath)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, target, file)
+	if err != nil {
+		return "", err
+	}
+	req.ContentLength = f.SizeBytes
+	req.Header.Set("X-Content-SHA256", f.SHA256)
+	req.Header.Set("Content-Type", "application/octet-stream")
+	if m.coordAuth != nil {
+		m.coordAuth(req.Header.Set)
+	}
+	resp, err := m.coordClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("upload %s to the coordinator: %w", f.RelativePath, err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode != http.StatusCreated {
+		return "", fmt.Errorf("coordinator refused output %s: %s: %s", f.RelativePath, resp.Status, strings.TrimSpace(string(body)))
+	}
+	var out struct {
+		URI string `json:"uri"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil || out.URI == "" {
+		return "", fmt.Errorf("coordinator gave no URI for %s", f.RelativePath)
+	}
+	return out.URI, nil
+}
+
+func escapePath(p string) string {
+	parts := strings.Split(p, "/")
+	for i, s := range parts {
+		parts[i] = url.PathEscape(s)
+	}
+	return strings.Join(parts, "/")
 }

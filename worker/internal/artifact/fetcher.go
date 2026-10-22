@@ -3,6 +3,7 @@ package artifact
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -32,6 +33,22 @@ type Fetcher struct {
 	sigV4Region  string
 	sigV4Service string
 	signRequests bool
+
+	coordURL  string // only requests under this URL get the worker credential
+	coordAuth func(setHeader func(k, v string))
+}
+
+// WithCoordinator lets the fetcher authenticate to the coordinator's artifact store (and trust its
+// CA) without ever sending the worker credential to any other host, such as an S3/R2 bucket.
+func (f *Fetcher) WithCoordinator(baseURL string, tlsCfg *tls.Config, auth func(setHeader func(k, v string))) *Fetcher {
+	f.coordURL = strings.TrimRight(baseURL, "/")
+	f.coordAuth = auth
+	if tlsCfg != nil {
+		clone := tlsCfg.Clone()
+		clone.ServerName = "" // verify the name in the artifact URL, not the gRPC server-name override
+		f.client.Transport = &http.Transport{TLSClientConfig: clone, Proxy: http.ProxyFromEnvironment}
+	}
+	return f
 }
 
 func NewFetcher(timeout time.Duration, maxBytes int64) *Fetcher {
@@ -95,6 +112,9 @@ func (f *Fetcher) Fetch(ctx context.Context, job domain.Job) (Bundle, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, job.ArtifactURL, nil)
 	if err != nil {
 		return Bundle{}, fmt.Errorf("create artifact request: %w", err)
+	}
+	if f.coordAuth != nil && f.coordURL != "" && strings.HasPrefix(job.ArtifactURL, f.coordURL+"/") {
+		f.coordAuth(request.Header.Set)
 	}
 	if err := f.signIfConfigured(ctx, request); err != nil {
 		return Bundle{}, fmt.Errorf("sign artifact request: %w", err)
